@@ -45,13 +45,15 @@
 #include <h323rtp.h>
 #include <codec/opalplugin.h>  // 🎬 For PluginCodec_Video_FrameHeader (H323Plus include)
 
-#ifdef H323_VIDEO
-// 🎬 Include shared preview callback header (ABI-stable interface)
-// This header is shared with H.264 plugin to ensure consistent ABI
-// extern "C" {
-// #include "../h323plus/plugins/video/H.264-ffmpeg/h264_preview.h"
-// }
-#endif // H323_VIDEO
+#if defined(H323_VIDEO) && defined(USE_QT6)
+// 🎬 Preview callback (kept in sync with plugin ABI: two pointer-sized fields)
+typedef struct PreviewCallback {
+    void (*fn)(const PluginCodec_Video_FrameHeader*, const unsigned char*, unsigned, void*);
+    void* userData;
+} PreviewCallback;
+static_assert(sizeof(PreviewCallback) == sizeof(void*) * 2,
+              "PreviewCallback ABI mismatch – expected two pointer-sized fields");
+#endif // defined(H323_VIDEO) && defined(USE_QT6)
 
 // Qt6 video display support
 #ifdef USE_QT6

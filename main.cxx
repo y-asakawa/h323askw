@@ -5188,13 +5188,49 @@ PBoolean MyH323RTPChannel::OnReceivedAckPDU(const H245_OpenLogicalChannelAck & a
 }
 #endif
 
-// 🎬 Preview callback structure (ABI-stable interface)
-typedef struct {
-    void (*fn)(const PluginCodec_Video_FrameHeader*, const unsigned char*, unsigned, void*);
-    void* userData;
-} PreviewCallback;
+#if defined(H323_VIDEO) && defined(USE_QT6)
+namespace {
+using SetPreviewCallbackFunc = void (*)(const PreviewCallback*);
 
-// 🎬 No external reference - we'll use dlsym at runtime
+// Resolve the preview setter from RTLD_DEFAULT first, then explicitly from known H.264 plugin paths
+static SetPreviewCallbackFunc ResolveH264PreviewSetter()
+{
+    void* sym = dlsym(RTLD_DEFAULT, "H264Plugin_SetPreviewCallback");
+    if (sym != nullptr) {
+        return reinterpret_cast<SetPreviewCallbackFunc>(sym);
+    }
+
+    // Fallback: try to open known H.264 plugin binaries directly
+    PString execDir = PProcess::Current().GetFile().GetDirectory();
+    PString baseDir = execDir + "/../Resources/plugins";
+    const char* envDir = getenv("PTLIBPLUGINDIR");
+    if (envDir != nullptr && strlen(envDir) > 0) {
+        baseDir = envDir;
+    }
+
+    PStringArray candidates;
+    candidates.AppendString(baseDir + "/video/H.264/h264_video_pwplugin.dylib");
+    candidates.AppendString(baseDir + "/video/H.264/h264_pwplugin.dylib");
+    candidates.AppendString(baseDir + "/H.264/h264_plugin_h323plus.dylib");
+    candidates.AppendString(baseDir + "/h264_pwplugin.dylib");
+
+    for (PINDEX i = 0; i < candidates.GetSize(); ++i) {
+        if (!PFile::Exists(candidates[i])) {
+            continue;
+        }
+        PDynaLink link(candidates[i]);
+        if (!link.IsLoaded()) {
+            continue;
+        }
+        void (*genericFunc)() = nullptr;
+        if (link.GetFunction("H264Plugin_SetPreviewCallback", genericFunc) && genericFunc != nullptr) {
+            return reinterpret_cast<SetPreviewCallbackFunc>(genericFunc);
+        }
+    }
+
+    return nullptr;
+}
+} // namespace
 
 // 🎬 Preview callback handler: receives YUV420 from encoder plugin
 void MyH323Connection::PreviewCallbackHandler(const PluginCodec_Video_FrameHeader* hdr,
@@ -5205,9 +5241,51 @@ void MyH323Connection::PreviewCallbackHandler(const PluginCodec_Video_FrameHeade
         return;
     }
     
-    // Display YUV420 frame directly (no decoding needed!)
-    PBYTEArray frameBuffer(yuv, bytes);
-    conn->outgoingVideoDisplay->SetFrameData(0, 0, hdr->width, hdr->height, frameBuffer, FALSE);
+    const unsigned width = hdr->width;
+    const unsigned height = hdr->height;
+    if (width == 0 || height == 0) {
+        return;
+    }
+    
+    const size_t ySize = static_cast<size_t>(width) * height;
+    const size_t uvSize = ySize / 4;
+    const size_t expectedI420 = ySize + uvSize * 2;
+    
+    // サニティチェック: フレームサイズより小さい/極端に大きい場合は破棄
+    if (bytes < expectedI420 || bytes > expectedI420 * 2) {
+        PTRACE(2, "H323ASKW\t⚠️ Preview frame size mismatch bytes=" << bytes
+               << " expected~" << expectedI420 << " (" << width << "x" << height << ")");
+        return;
+    }
+    
+    // 環境変数で NV12 プレビューを強制的に I420 へ変換
+    static bool forceNV12 = (::getenv("H264_PREVIEW_NV12") != nullptr);
+    
+    PBYTEArray frameBuffer;
+    frameBuffer.SetSize(expectedI420);
+    uint8_t* dst = frameBuffer.GetPointer();
+    
+    if (forceNV12) {
+        // NV12 → I420 変換（Y はそのまま、UV を分離）
+        const uint8_t* ySrc = yuv;
+        const uint8_t* uvSrc = yuv + ySize;
+        
+        // Y コピー（行単位、ストライド情報が無いので幅分をそのままコピー）
+        memcpy(dst, ySrc, ySize);
+        
+        uint8_t* uDst = dst + ySize;
+        uint8_t* vDst = uDst + uvSize;
+        for (size_t i = 0; i < uvSize; ++i) {
+            uDst[i] = uvSrc[i * 2];       // Cb
+            vDst[i] = uvSrc[i * 2 + 1];   // Cr
+        }
+    } else {
+        // I420 とみなしてそのままコピー（パディング無し想定）
+        memcpy(dst, yuv, expectedI420);
+    }
+    
+    // Display YUV420 frame
+    conn->outgoingVideoDisplay->SetFrameData(0, 0, width, height, frameBuffer, FALSE);
     
     PTRACE(5, "H323ASKW\t🎬 Preview frame displayed: " << hdr->width << "x" << hdr->height 
            << " (" << bytes << " bytes)");
@@ -5216,7 +5294,6 @@ void MyH323Connection::PreviewCallbackHandler(const PluginCodec_Video_FrameHeade
 // 🎬 Register preview callback with H.264 encoder plugin
 void MyH323Connection::RegisterPreviewCallback(H323VideoCodec* codec)
 {
-#if defined(H323_VIDEO) && defined(USE_QT6)
     if (!codec || !outgoingVideoDisplay) {
         PTRACE(3, "H323ASKW\t⚠️ RegisterPreviewCallback: invalid parameters");
         return;
@@ -5229,12 +5306,7 @@ void MyH323Connection::RegisterPreviewCallback(H323VideoCodec* codec)
     cb.fn = &MyH323Connection::PreviewCallbackHandler;
     cb.userData = this;
     
-    // 🎬 SOLUTION: Call plugin's direct registration function
-    // This updates ALL active encoder instances immediately
-    // Plugin exports H264Plugin_SetPreviewCallback as C symbol
-    
-    typedef void (*SetPreviewCallbackFunc)(const PreviewCallback*);
-    SetPreviewCallbackFunc setCallback = (SetPreviewCallbackFunc)dlsym(RTLD_DEFAULT, "H264Plugin_SetPreviewCallback");
+    SetPreviewCallbackFunc setCallback = ResolveH264PreviewSetter();
     
     if (setCallback != nullptr) {
         setCallback(&cb);
@@ -5243,10 +5315,9 @@ void MyH323Connection::RegisterPreviewCallback(H323VideoCodec* codec)
         PTRACE(3, "H323ASKW\t   User data: " << cb.userData);
     } else {
         PTRACE(2, "H323ASKW\t⚠️ Failed to find H264Plugin_SetPreviewCallback symbol in plugin");
-        PTRACE(2, "H323ASKW\t   dlsym error: " << dlerror());
     }
-#endif
 }
+#endif // defined(H323_VIDEO) && defined(USE_QT6)
 
 
 // Initialize H.264 preview decoder for outgoing video display (DEPRECATED - replaced by callback)
