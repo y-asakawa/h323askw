@@ -5188,6 +5188,12 @@ PBoolean MyH323RTPChannel::OnReceivedAckPDU(const H245_OpenLogicalChannelAck & a
 }
 #endif
 
+// 🎬 Preview callback structure (ABI-stable interface)
+typedef struct {
+    void (*fn)(const PluginCodec_Video_FrameHeader*, const unsigned char*, unsigned, void*);
+    void* userData;
+} PreviewCallback;
+
 // 🎬 No external reference - we'll use dlsym at runtime
 
 // 🎬 Preview callback handler: receives YUV420 from encoder plugin
