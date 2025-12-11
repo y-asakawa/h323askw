@@ -834,10 +834,6 @@ void QtVideoMainWindow::setupUI()
     m_addressCombo->setMinimumWidth(250);
     m_addressCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     
-    // 履歴クリアボタン
-    m_clearHistoryButton = new QPushButton("Clear", this);
-    m_clearHistoryButton->setToolTip("Clear address history");
-    
     // 履歴を読み込み
     loadAddressHistory();
 
@@ -849,7 +845,6 @@ void QtVideoMainWindow::setupUI()
 
     controlLayout->addWidget(addressLabel);
     controlLayout->addWidget(m_addressCombo);
-    controlLayout->addWidget(m_clearHistoryButton);
     controlLayout->addWidget(m_connectButton);
     controlLayout->addWidget(m_disconnectButton);
     controlLayout->addStretch();
@@ -857,6 +852,8 @@ void QtVideoMainWindow::setupUI()
     // ミュート/カメラ
     m_muteCheckbox = new QCheckBox("Mute Mic", this);
     m_cameraCheckbox = new QCheckBox("Camera Off", this);
+    m_muteCheckbox->setEnabled(false);
+    m_cameraCheckbox->setEnabled(false);
     
     controlLayout->addWidget(m_muteCheckbox);
     controlLayout->addWidget(m_cameraCheckbox);
@@ -900,7 +897,8 @@ void QtVideoMainWindow::setupConnections()
     // ボタン接続
     connect(m_connectButton, &QPushButton::clicked, this, &QtVideoMainWindow::onConnectClicked);
     connect(m_disconnectButton, &QPushButton::clicked, this, &QtVideoMainWindow::onDisconnectClicked);
-    connect(m_clearHistoryButton, &QPushButton::clicked, this, &QtVideoMainWindow::onClearHistoryClicked);
+    connect(m_addressCombo, QOverload<int>::of(&QComboBox::activated),
+            this, &QtVideoMainWindow::onAddressActivated);
     
     // チェックボックス
     connect(m_muteCheckbox, &QCheckBox::toggled, this, &QtVideoMainWindow::onMuteToggled);
@@ -984,10 +982,16 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
                 QT_TRACE(1, "H323Connection set - UI controls enabled (via invokeMethod)");
                 safeThis->m_disconnectButton->setEnabled(true);
                 safeThis->m_connectButton->setEnabled(false);
+                safeThis->m_muteCheckbox->setEnabled(true);
+                safeThis->m_cameraCheckbox->setEnabled(true);
             } else {
                 QT_TRACE(1, "H323Connection cleared - UI controls reset (via invokeMethod)");
                 safeThis->m_disconnectButton->setEnabled(false);
                 safeThis->m_connectButton->setEnabled(true);
+                safeThis->m_muteCheckbox->setEnabled(false);
+                safeThis->m_cameraCheckbox->setEnabled(false);
+                safeThis->m_muteCheckbox->setChecked(false);
+                safeThis->m_cameraCheckbox->setChecked(false);
             }
         }, Qt::QueuedConnection);
     } else {
@@ -996,10 +1000,16 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
             QT_TRACE(1, "H323Connection set - UI controls enabled (direct call)");
             m_disconnectButton->setEnabled(true);
             m_connectButton->setEnabled(false);
+            m_muteCheckbox->setEnabled(true);
+            m_cameraCheckbox->setEnabled(true);
         } else {
             QT_TRACE(1, "H323Connection cleared - UI controls reset (direct call)");
             m_disconnectButton->setEnabled(false);
             m_connectButton->setEnabled(true);
+            m_muteCheckbox->setEnabled(false);
+            m_cameraCheckbox->setEnabled(false);
+            m_muteCheckbox->setChecked(false);
+            m_cameraCheckbox->setChecked(false);
         }
     }
 }
@@ -1080,6 +1090,11 @@ void QtVideoMainWindow::setLocalMuted(bool muted)
     if (m_localVideo) {
         m_localVideo->setMuted(muted);
     }
+    // 外部イベントでミュート状態が変わったとき、チェックボックスも同期する
+    if (m_muteCheckbox && m_muteCheckbox->isChecked() != muted) {
+        QSignalBlocker blocker(m_muteCheckbox); // ループ防止
+        m_muteCheckbox->setChecked(muted);
+    }
 }
 
 void QtVideoMainWindow::setRemoteMuted(bool muted)
@@ -1131,12 +1146,16 @@ void QtVideoMainWindow::keyPressEvent(QKeyEvent* event)
             close();
             break;
         case Qt::Key_S:
-            QT_TRACE(1, "'S' pressed - toggling mute");
-            m_muteCheckbox->toggle();
+            if (m_muteCheckbox->isEnabled()) {
+                QT_TRACE(1, "'S' pressed - toggling mute");
+                m_muteCheckbox->toggle();
+            }
             break;
         case Qt::Key_C:
-            QT_TRACE(1, "'C' pressed - toggling camera");
-            m_cameraCheckbox->toggle();
+            if (m_cameraCheckbox->isEnabled()) {
+                QT_TRACE(1, "'C' pressed - toggling camera");
+                m_cameraCheckbox->toggle();
+            }
             break;
         default:
             QMainWindow::keyPressEvent(event);
@@ -1166,6 +1185,11 @@ void QtVideoMainWindow::onDisconnectClicked()
 
 void QtVideoMainWindow::onMuteToggled(bool checked)
 {
+    if (m_h323Connection == nullptr) {
+        QSignalBlocker blocker(m_muteCheckbox);
+        m_muteCheckbox->setChecked(false);
+        return;
+    }
     QT_TRACE(1, "Mute toggled: " << (checked ? "ON" : "OFF"));
     setConnectionStatus(checked ? "Microphone muted" : "Microphone unmuted");
     emit muteToggleRequested();
@@ -1173,6 +1197,11 @@ void QtVideoMainWindow::onMuteToggled(bool checked)
 
 void QtVideoMainWindow::onCameraToggled(bool checked)
 {
+    if (m_h323Connection == nullptr) {
+        QSignalBlocker blocker(m_cameraCheckbox);
+        m_cameraCheckbox->setChecked(false);
+        return;
+    }
     QT_TRACE(1, "Camera toggled: " << (checked ? "OFF" : "ON"));
     setConnectionStatus(checked ? "Camera disabled" : "Camera enabled");
     emit cameraToggleRequested();
@@ -1748,6 +1777,8 @@ void QtVideoMainWindow::loadAddressHistory()
             m_addressCombo->addItem(addr);
         }
     }
+
+    appendClearHistoryItem();
     
     // 最新の履歴を選択状態に（空の場合は入力可能）
     if (m_addressCombo->count() > 0) {
@@ -1761,11 +1792,15 @@ void QtVideoMainWindow::saveAddressHistory()
 {
     QSettings settings("H323ASKW", "VideoClient");
     QStringList history;
-    
-    for (int i = 0; i < m_addressCombo->count() && i < MAX_ADDRESS_HISTORY; i++) {
+
+    int saved = 0;
+    for (int i = 0; i < m_addressCombo->count() && saved < MAX_ADDRESS_HISTORY; i++) {
+        if (isClearHistoryItem(i))
+            continue;
         QString addr = m_addressCombo->itemText(i);
         if (!addr.isEmpty()) {
             history.append(addr);
+            ++saved;
         }
     }
     
@@ -1783,6 +1818,7 @@ void QtVideoMainWindow::clearAddressHistory()
     
     m_addressCombo->clear();
     m_addressCombo->setEditText(QString());
+    appendClearHistoryItem();
     
     QT_TRACE(1, "Cleared address history");
 }
@@ -1801,10 +1837,20 @@ void QtVideoMainWindow::addToAddressHistory(const QString& address)
     m_addressCombo->insertItem(0, address);
     m_addressCombo->setCurrentIndex(0);
     
-    // 最大数を超えたら古いものを削除
-    while (m_addressCombo->count() > MAX_ADDRESS_HISTORY) {
-        m_addressCombo->removeItem(m_addressCombo->count() - 1);
+    // 最大数を超えたら古いものを削除（クリア項目は除外）
+    int nonClearCount = 0;
+    for (int i = 0; i < m_addressCombo->count(); ++i) {
+        if (!isClearHistoryItem(i))
+            ++nonClearCount;
     }
+    for (int i = m_addressCombo->count() - 1; nonClearCount > MAX_ADDRESS_HISTORY && i >= 0; --i) {
+        if (isClearHistoryItem(i))
+            continue;
+        m_addressCombo->removeItem(i);
+        --nonClearCount;
+    }
+
+    appendClearHistoryItem();
     
     // 即座に保存
     saveAddressHistory();
@@ -1812,9 +1858,11 @@ void QtVideoMainWindow::addToAddressHistory(const QString& address)
     QT_TRACE(1, "Added to address history: " << address.toStdString());
 }
 
-void QtVideoMainWindow::onClearHistoryClicked()
+void QtVideoMainWindow::onAddressActivated(int index)
 {
-    clearAddressHistory();
+    if (isClearHistoryItem(index)) {
+        clearAddressHistory();
+    }
 }
 
 void QtVideoMainWindow::onSeparateWindowsClicked()
@@ -1890,6 +1938,27 @@ void QtVideoMainWindow::onRemoteWindowClosed()
         
         QT_TRACE(1, "Remote window closed, combined back");
     }
+}
+
+void QtVideoMainWindow::appendClearHistoryItem()
+{
+    // 既に追加済みなら何もしない
+    int existing = m_addressCombo->findData(true, Qt::UserRole + 1);
+    if (existing >= 0)
+        return;
+
+    // 区別しやすいプレースホルダ
+    m_addressCombo->addItem("Clear history...");
+    int idx = m_addressCombo->count() - 1;
+    m_addressCombo->setItemData(idx, true, Qt::UserRole + 1);
+}
+
+bool QtVideoMainWindow::isClearHistoryItem(int index) const
+{
+    if (index < 0 || index >= m_addressCombo->count())
+        return false;
+    QVariant marker = m_addressCombo->itemData(index, Qt::UserRole + 1);
+    return marker.isValid() && marker.toBool();
 }
 
 #endif // USE_QT6

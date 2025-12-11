@@ -384,7 +384,7 @@ private slots:
     void onCameraDeviceChanged(int index);
     void onSeparateWindowsClicked();
     void onRemoteWindowClosed();
-    void onClearHistoryClicked();
+    void onAddressActivated(int index);
 
 private:
     void setupUI();
@@ -394,6 +394,8 @@ private:
     void saveAddressHistory();
     void addToAddressHistory(const QString& address);
     void clearAddressHistory();
+    void appendClearHistoryItem();
+    bool isClearHistoryItem(int index) const;
 
     // ビデオ表示
     QtVideoWidget* m_localVideo;
@@ -408,7 +410,6 @@ private:
     QComboBox* m_addressCombo;  // 履歴付きアドレス入力
     QPushButton* m_connectButton;
     QPushButton* m_disconnectButton;
-    QPushButton* m_clearHistoryButton;
     QCheckBox* m_muteCheckbox;
     QCheckBox* m_cameraCheckbox;
     

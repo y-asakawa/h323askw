@@ -1185,6 +1185,14 @@ public:
     void ToggleMicMute();
     
     /**
+     * SetMicMuteState - マイクミュート状態を設定
+     * 
+     * @param newMuted 設定するミュート状態
+     * @param signalH245 trueの場合H.245を送信、falseの場合ローカル状態のみ更新
+     */
+    void SetMicMuteState(bool newMuted, bool signalH245 = true);
+    
+    /**
      * ToggleCameraMute - カメラミュート状態の切り替え
      * 
      * 現在の状態を反転し、ビデオ送信を停止/再開

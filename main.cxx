@@ -5251,44 +5251,111 @@ void MyH323Connection::PreviewCallbackHandler(const PluginCodec_Video_FrameHeade
     const size_t uvSize = ySize / 4;
     const size_t expectedI420 = ySize + uvSize * 2;
     
-    // サニティチェック: フレームサイズより小さい/極端に大きい場合は破棄
-    if (bytes < expectedI420 || bytes > expectedI420 * 2) {
-        PTRACE(2, "H323ASKW\t⚠️ Preview frame size mismatch bytes=" << bytes
-               << " expected~" << expectedI420 << " (" << width << "x" << height << ")");
+    // サニティチェック: 最低限 Y 平面があるか
+    if (bytes < ySize) {
+        PTRACE(2, "H323ASKW\t⚠️ Preview frame too small: bytes=" << bytes
+               << " ySize=" << ySize << " (" << width << "x" << height << ")");
         return;
     }
-    
-    // 環境変数で NV12 プレビューを強制的に I420 へ変換
-    static bool forceNV12 = (::getenv("H264_PREVIEW_NV12") != nullptr);
-    
+
+    // パディング推定（Y のストライドが幅より大きい場合に備える）
+    auto estimateStride = [&](unsigned planeHeight, size_t planeBytes, unsigned minStride) -> unsigned {
+        unsigned stride = minStride;
+        if (planeHeight > 0) {
+            stride = static_cast<unsigned>((planeBytes + planeHeight - 1) / planeHeight);
+            if (stride < minStride)
+                stride = minStride;
+        }
+        return stride;
+    };
+
+    // フォーマット判定
+    const char* envForceNV12 = ::getenv("H264_PREVIEW_FORCE_NV12");
+    const char* envForceI420 = ::getenv("H264_PREVIEW_FORCE_I420");
+    const char* envAutoNV12  = ::getenv("H264_PREVIEW_AUTO_NV12");
+    const bool forceNV12 = envForceNV12 != nullptr;
+    const bool forceI420 = envForceI420 != nullptr;
+    const bool autoNV12  = forceNV12 || (!forceI420 && (envAutoNV12 != nullptr)); // AUTO指定時のみ自動判定
+
+    bool useNV12 = forceNV12;
+
+    // 自動判定: UV インターリーブを簡易判定
+    if (!forceNV12 && !forceI420 && autoNV12 && bytes >= expectedI420) {
+        const uint8_t* uvSrc = yuv + ySize;
+        size_t chromaBytes = bytes - ySize;
+        size_t samplePairs = std::min(chromaBytes / 2, static_cast<size_t>(128));
+        unsigned diffEvenOdd = 0;
+        unsigned diffEvenNext = 0;
+        for (size_t i = 0; i < samplePairs; ++i) {
+            uint8_t u = uvSrc[i * 2];
+            uint8_t v = uvSrc[i * 2 + 1];
+            diffEvenOdd += static_cast<unsigned>(std::abs(int(u) - int(v)));
+            if (i + 1 < samplePairs) {
+                uint8_t uNext = uvSrc[(i + 1) * 2];
+                diffEvenNext += static_cast<unsigned>(std::abs(int(u) - int(uNext)));
+            }
+        }
+        // 偶数-奇数の差が同一面の差より十分大きければ NV12 とみなす
+        if (samplePairs > 0 && diffEvenOdd > diffEvenNext * 2) {
+            useNV12 = true;
+            PTRACE(4, "H323ASKW\t🔍 NV12 detected heuristically (diffEvenOdd=" << diffEvenOdd
+                   << " diffEvenNext=" << diffEvenNext << ")");
+        }
+    }
+
+    // ストライドを推定（I420/NV12 共通）
+    unsigned strideY = width;
+    unsigned strideUV = width / 2;
+    if (bytes > expectedI420) {
+        size_t extra = bytes - expectedI420;
+        size_t estYBytes = ySize + extra * 2 / 3; // ざっくり Y に多めに振る
+        strideY = estimateStride(height, estYBytes, width);
+        strideUV = strideY / 2;
+    }
+
+    // 出力バッファ確保
     PBYTEArray frameBuffer;
     frameBuffer.SetSize(expectedI420);
     uint8_t* dst = frameBuffer.GetPointer();
-    
-    if (forceNV12) {
-        // NV12 → I420 変換（Y はそのまま、UV を分離）
-        const uint8_t* ySrc = yuv;
-        const uint8_t* uvSrc = yuv + ySize;
-        
-        // Y コピー（行単位、ストライド情報が無いので幅分をそのままコピー）
-        memcpy(dst, ySrc, ySize);
-        
-        uint8_t* uDst = dst + ySize;
-        uint8_t* vDst = uDst + uvSize;
-        for (size_t i = 0; i < uvSize; ++i) {
-            uDst[i] = uvSrc[i * 2];       // Cb
-            vDst[i] = uvSrc[i * 2 + 1];   // Cr
+
+    const uint8_t* ySrc = yuv;
+    const uint8_t* uvSrc = yuv + ySize;
+
+    // Y 平面コピー（ストライド考慮）
+    for (unsigned row = 0; row < height; ++row) {
+        memcpy(dst + row * width, ySrc + row * strideY, width);
+    }
+
+    uint8_t* uDst = dst + ySize;
+    uint8_t* vDst = uDst + uvSize;
+
+    if (useNV12) {
+        // NV12 -> I420 変換（ストライド有りの前提）
+        unsigned uvHeight = height / 2;
+        for (unsigned row = 0; row < uvHeight; ++row) {
+            const uint8_t* rowUV = uvSrc + row * strideY;
+            uint8_t* rowU = uDst + row * (width / 2);
+            uint8_t* rowV = vDst + row * (width / 2);
+            for (unsigned col = 0; col < width / 2; ++col) {
+                rowU[col] = rowUV[col * 2];
+                rowV[col] = rowUV[col * 2 + 1];
+            }
         }
     } else {
-        // I420 とみなしてそのままコピー（パディング無し想定）
-        memcpy(dst, yuv, expectedI420);
+        // I420（ストライド有り）としてコピー
+        unsigned uvHeight = height / 2;
+        for (unsigned row = 0; row < uvHeight; ++row) {
+            memcpy(uDst + row * (width / 2), uvSrc + row * strideUV, width / 2);
+            memcpy(vDst + row * (width / 2), uvSrc + uvHeight * strideUV + row * strideUV, width / 2);
+        }
     }
-    
+
     // Display YUV420 frame
     conn->outgoingVideoDisplay->SetFrameData(0, 0, width, height, frameBuffer, FALSE);
     
     PTRACE(5, "H323ASKW\t🎬 Preview frame displayed: " << hdr->width << "x" << hdr->height 
-           << " (" << bytes << " bytes)");
+           << " (" << bytes << " bytes, NV12=" << (useNV12 ? "yes" : "no")
+           << " strideY=" << strideY << ")");
 }
 
 // 🎬 Register preview callback with H.264 encoder plugin
