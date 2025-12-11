@@ -1,0 +1,623 @@
+/**
+ * @file qt_video_window.h
+ * @brief Qt6ベースのビデオ表示ウィンドウ
+ * 
+ * SDL2Managerの置き換えとして、Qt6を使用したビデオ表示を提供します。
+ * 既存のH.323/メディア処理バックエンドはそのまま維持し、
+ * UI層のみをQtに置き換える設計です。
+ */
+
+#ifndef QT_VIDEO_WINDOW_H
+#define QT_VIDEO_WINDOW_H
+
+#ifdef USE_QT6
+
+#include <QApplication>
+#include <QMainWindow>
+#include <QWidget>
+#include <QImage>
+#include <QMutex>
+#include <QTimer>
+#include <QDateTime>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QSplitter>
+#include <QPushButton>
+#include <QLineEdit>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QLabel>
+#include <QStatusBar>
+#include <QPainter>
+#include <QKeyEvent>
+#include <QCloseEvent>
+#include <QStringList>
+#include <QSettings>
+#include <QCompleter>
+#include <atomic>
+
+// Forward declarations
+class MyH323Connection;
+class MyH323EndPoint;
+
+// コールバック関数型定義（main.hへの依存を避けるため）
+typedef bool (*MakeCallCallback)(const char* address, void* userData);
+typedef void (*HangupCallCallback)(void* userData);
+typedef void (*ToggleMuteCallback)(void* userData);
+typedef void (*ToggleCameraCallback)(void* userData);
+typedef bool (*IsMutedCallback)(void* userData);
+typedef bool (*GetDeviceListCallback)(int deviceType, QStringList& outList, void* userData);
+typedef void (*ApplyDeviceSelectionCallback)(const QString& mic, const QString& speaker, const QString& camera, void* userData);
+
+// デバイスタイプ定数
+#define QT_DEVICE_TYPE_MIC 0
+#define QT_DEVICE_TYPE_SPEAKER 1
+#define QT_DEVICE_TYPE_CAMERA 2
+
+/**
+ * @struct VideoFrame
+ * @brief ビデオフレームデータ構造（main.hからの再定義を避けるため前方宣言）
+ */
+struct QtVideoFrame {
+    unsigned char* data;
+    unsigned width;
+    unsigned height;
+    size_t dataSize;
+    
+    QtVideoFrame() : data(nullptr), width(0), height(0), dataSize(0) {}
+    QtVideoFrame(unsigned char* d, unsigned w, unsigned h, size_t size)
+        : data(d), width(w), height(h), dataSize(size) {}
+};
+
+/**
+ * @class QtVideoWidget
+ * @brief 単一のビデオ表示用ウィジェット
+ * 
+ * YUV420PまたはRGB形式のフレームを受け取り、QImageとして描画します。
+ */
+class QtVideoWidget : public QWidget
+{
+    Q_OBJECT
+
+public:
+    explicit QtVideoWidget(const QString& title, QWidget* parent = nullptr);
+    virtual ~QtVideoWidget();
+
+    /**
+     * @brief フレームを更新（YUV420P形式）
+     * @param yuvData YUV420Pデータ
+     * @param width フレーム幅
+     * @param height フレーム高さ
+     */
+    void updateFrameYUV420P(const unsigned char* yuvData, unsigned width, unsigned height);
+
+    /**
+     * @brief フレームを更新（RGB24形式）
+     * @param rgbData RGB24データ
+     * @param width フレーム幅
+     * @param height フレーム高さ
+     */
+    void updateFrameRGB24(const unsigned char* rgbData, unsigned width, unsigned height);
+
+    /**
+     * @brief フレームサイズを取得
+     */
+    QSize frameSize() const { return QSize(m_frameWidth, m_frameHeight); }
+
+    /**
+     * @brief ミュート状態を設定
+     * @param muted true=ミュート中, false=アンミュート
+     */
+    void setMuted(bool muted);
+
+    /**
+     * @brief ミュート状態を取得
+     */
+    bool isMuted() const { return m_muted; }
+
+    /**
+     * @brief ミュートアイコン表示の有効化/無効化
+     */
+    void setShowMuteIcon(bool show) { m_showMuteIcon = show; update(); }
+
+    /**
+     * @brief カメラミュート状態を設定（黒画面表示）
+     * @param muted true=カメラOFF（黒画面）, false=通常表示
+     */
+    void setCameraMuted(bool muted);
+
+    /**
+     * @brief カメラミュート状態を取得
+     */
+    bool isCameraMuted() const { return m_cameraMuted; }
+
+signals:
+    /**
+     * @brief フレーム更新シグナル（スレッドセーフな更新用）
+     */
+    void frameUpdated();
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+    QSize sizeHint() const override;
+    QSize minimumSizeHint() const override;
+
+private:
+    void convertYUV420PtoRGB(const unsigned char* yuvData, unsigned width, unsigned height);
+    void drawMicrophoneIcon(QPainter& painter, int x, int y, int size, bool muted);
+    void updateTargetRect();  // 描画領域の再計算
+
+    QImage m_currentFrame;
+    QMutex m_frameMutex;
+    QString m_title;
+    unsigned m_frameWidth;
+    unsigned m_frameHeight;
+    bool m_muted;           // マイクミュート状態
+    bool m_cameraMuted;     // カメラミュート状態（黒画面表示）
+    bool m_showMuteIcon;    // アイコン表示有効
+    
+    // RGB変換バッファ
+    QByteArray m_rgbBuffer;
+    
+    // フレームレート制限
+    qint64 m_lastFrameTime;
+    int m_frameUpdateCount;  // フレーム更新カウント（デバッグ用）
+    int m_paintCallCount;    // paint呼び出しカウント（デバッグ用）
+    int m_timerCallCount;    // タイマー呼び出しカウント（デバッグ用）
+    
+    // 描画領域キャッシュ（カクカク防止）
+    QRect m_targetRect;
+    QSize m_cachedFrameSize;
+    QSize m_cachedWidgetSize;
+    
+    // タイマーベース描画更新
+    QTimer* m_repaintTimer;
+    std::atomic<bool> m_needsRepaint;
+};
+
+/**
+ * @class QtAudioSpectrumWidget
+ * @brief オーディオスペクトラムアナライザ表示ウィジェット
+ * 
+ * グラフィックイコライザ風の縦棒グラフで音声レベルを可視化します。
+ * FFT（高速フーリエ変換）を使用して周波数帯域ごとのレベルを表示。
+ */
+class QtAudioSpectrumWidget : public QWidget
+{
+    Q_OBJECT
+
+public:
+    explicit QtAudioSpectrumWidget(QWidget* parent = nullptr);
+    virtual ~QtAudioSpectrumWidget();
+
+    /**
+     * @brief PCM音声データを受け取りスペクトラムを更新
+     * @param pcmData PCMデータ（16bit signed, mono または stereo）
+     * @param sampleCount サンプル数
+     * @param channels チャンネル数（1=mono, 2=stereo）
+     * @param sampleRate サンプルレート（Hz）
+     */
+    void updateSpectrum(const int16_t* pcmData, size_t sampleCount, int channels, int sampleRate);
+
+    /**
+     * @brief バンド数を設定（デフォルト: 16）
+     */
+    void setBandCount(int count);
+
+    /**
+     * @brief 色を設定
+     */
+    void setBarColor(const QColor& color) { m_barColor = color; }
+    void setPeakColor(const QColor& color) { m_peakColor = color; }
+    void setBackgroundColor(const QColor& color) { m_bgColor = color; }
+
+    /**
+     * @brief ピークホールド機能の有効/無効
+     */
+    void setPeakHoldEnabled(bool enabled) { m_peakHoldEnabled = enabled; }
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+    void timerEvent(QTimerEvent* event) override;
+
+private:
+    void performFFT(const int16_t* pcmData, size_t sampleCount, int channels);
+    void updatePeaks();
+    void decayBars();
+
+    // スペクトラムデータ
+    QVector<float> m_bandLevels;      // 各バンドの現在レベル (0.0-1.0)
+    QVector<float> m_peakLevels;      // 各バンドのピークレベル
+    QVector<int> m_peakHoldCounters;  // ピークホールド用カウンタ
+    
+    // FFT用バッファ
+    QVector<float> m_fftBuffer;
+    QVector<float> m_fftReal;         // FFT実数部
+    QVector<float> m_fftImag;         // FFT虚数部
+    QVector<float> m_fftMagnitude;    // FFT振幅スペクトル
+    QVector<float> m_window;          // ハミング窓
+    QVector<int16_t> m_sampleBuffer;  // サンプル蓄積バッファ
+    int m_fftSize;                    // FFTサイズ（2の累乗）
+    int m_sampleBufferPos;            // バッファ書き込み位置
+    
+    // 設定
+    int m_bandCount;
+    QColor m_barColor;
+    QColor m_peakColor;
+    QColor m_bgColor;
+    bool m_peakHoldEnabled;
+    
+    // アニメーション
+    int m_timerId;
+    float m_decayRate;
+    int m_peakHoldTime;
+    
+    // ミューテックス
+    QMutex m_dataMutex;
+};
+
+/**
+ * @class QtVideoMainWindow
+ * @brief メインウィンドウ（ローカル/リモートビデオ + コントロールパネル）
+ * 
+ * SDL2Managerの機能を置き換えるメインウィンドウです。
+ * - ローカルプレビュー表示
+ * - リモートビデオ表示
+ * - 接続/切断ボタン
+ * - ミュート/カメラOFFボタン
+ * - デバイス選択
+ */
+class QtVideoMainWindow : public QMainWindow
+{
+    Q_OBJECT
+    
+    friend class QtVideoManager;  // QtVideoManagerがメンバーにアクセスできるように
+
+public:
+    explicit QtVideoMainWindow(QWidget* parent = nullptr);
+    virtual ~QtVideoMainWindow();
+
+    /**
+     * @brief H323Connectionを設定
+     */
+    void setH323Connection(MyH323Connection* connection);
+    
+    /**
+     * @brief H323Connectionを取得
+     */
+    MyH323Connection* getH323Connection() const { return m_h323Connection; }
+
+    /**
+     * @brief ローカルフレームを更新（H.323スレッドから呼び出し可能）
+     */
+    void enqueueLocalFrame(const unsigned char* yuvData, unsigned width, unsigned height);
+
+    /**
+     * @brief リモートフレームを更新（H.323スレッドから呼び出し可能）
+     */
+    void enqueueRemoteFrame(const unsigned char* yuvData, unsigned width, unsigned height);
+
+    /**
+     * @brief ウィンドウが実行中かどうか
+     */
+    bool isRunning() const { return m_running; }
+
+    /**
+     * @brief 接続状態を更新
+     */
+    void setConnectionStatus(const QString& status);
+
+    /**
+     * @brief ローカルビデオのミュート状態を設定
+     */
+    void setLocalMuted(bool muted);
+
+    /**
+     * @brief リモートビデオのミュート状態を設定
+     */
+    void setRemoteMuted(bool muted);
+
+    /**
+     * @brief ローカルカメラのミュート状態を設定（黒画面表示）
+     */
+    void setLocalCameraMuted(bool muted);
+
+    /**
+     * @brief デバイスリストを再取得してUIを更新
+     */
+    void refreshDeviceLists();
+
+signals:
+    /**
+     * @brief ローカルフレーム到着シグナル（スレッド間通信用）
+     */
+    void localFrameReady(const QByteArray& yuvData, unsigned width, unsigned height);
+
+    /**
+     * @brief リモートフレーム到着シグナル（スレッド間通信用）
+     */
+    void remoteFrameReady(const QByteArray& yuvData, unsigned width, unsigned height);
+
+    /**
+     * @brief 接続要求シグナル
+     */
+    void connectRequested(const QString& address);
+
+    /**
+     * @brief 切断要求シグナル
+     */
+    void disconnectRequested();
+
+    /**
+     * @brief ミュートトグル要求シグナル
+     */
+    void muteToggleRequested();
+
+    /**
+     * @brief カメラトグル要求シグナル
+     */
+    void cameraToggleRequested();
+
+public slots:
+    /**
+     * @brief ローカルフレームを処理（Qtメインスレッド）
+     */
+    void onLocalFrameReady(const QByteArray& yuvData, unsigned width, unsigned height);
+
+    /**
+     * @brief リモートフレームを処理（Qtメインスレッド）
+     */
+    void onRemoteFrameReady(const QByteArray& yuvData, unsigned width, unsigned height);
+
+protected:
+    void closeEvent(QCloseEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
+
+private slots:
+    void onConnectClicked();
+    void onDisconnectClicked();
+    void onMuteToggled(bool checked);
+    void onCameraToggled(bool checked);
+    void onMicDeviceChanged(int index);
+    void onSpeakerDeviceChanged(int index);
+    void onCameraDeviceChanged(int index);
+    void onSeparateWindowsClicked();
+    void onRemoteWindowClosed();
+    void onClearHistoryClicked();
+
+private:
+    void setupUI();
+    void setupConnections();
+    void populateDeviceLists();
+    void loadAddressHistory();
+    void saveAddressHistory();
+    void addToAddressHistory(const QString& address);
+    void clearAddressHistory();
+
+    // ビデオ表示
+    QtVideoWidget* m_localVideo;
+    QtVideoWidget* m_remoteVideo;
+
+    // ウィンドウ分離用
+    QSplitter* m_videoSplitter;      // ビデオスプリッター
+    QPushButton* m_separateButton;   // 分離/結合ボタン
+    bool m_windowsSeparated;         // 分離状態フラグ
+
+    // コントロール
+    QComboBox* m_addressCombo;  // 履歴付きアドレス入力
+    QPushButton* m_connectButton;
+    QPushButton* m_disconnectButton;
+    QPushButton* m_clearHistoryButton;
+    QCheckBox* m_muteCheckbox;
+    QCheckBox* m_cameraCheckbox;
+    
+    // デバイス選択
+    QComboBox* m_micCombo;
+    QComboBox* m_speakerCombo;
+    QComboBox* m_cameraCombo;
+
+    // ステータス
+    QLabel* m_statusLabel;
+
+    // オーディオスペクトラム
+    QtAudioSpectrumWidget* m_localSpectrum;   // ローカル（マイク）
+    QtAudioSpectrumWidget* m_remoteSpectrum;  // リモート（相手の音声）
+
+    // アドレス履歴
+    static const int MAX_ADDRESS_HISTORY = 20;
+
+    // 状態
+    MyH323Connection* m_h323Connection;
+    bool m_running;
+
+public:
+    /**
+     * @brief ローカル音声スペクトラムを更新
+     */
+    void updateLocalAudioSpectrum(const int16_t* pcmData, size_t sampleCount, int channels, int sampleRate);
+    
+    /**
+     * @brief リモート音声スペクトラムを更新
+     */
+    void updateRemoteAudioSpectrum(const int16_t* pcmData, size_t sampleCount, int channels, int sampleRate);
+};
+
+/**
+ * @class QtVideoManager
+ * @brief MainThreadSDL2Managerの置き換え
+ * 
+ * シングルトンパターンでQtビデオ管理を提供します。
+ * 既存のコードからの移行を容易にするため、
+ * MainThreadSDL2Managerと同様のインターフェースを提供します。
+ */
+class QtVideoManager
+{
+public:
+    static QtVideoManager& getInstance();
+    static QtVideoManager& instance() { return getInstance(); }
+
+    /**
+     * @brief Qt初期化（QApplicationは外部で作成済みであること）
+     */
+    bool initialize();
+
+    /**
+     * @brief Qt終了
+     */
+    void shutdown();
+
+    /**
+     * @brief ウィンドウ作成
+     */
+    bool createWindow(int width = 1280, int height = 720);
+    bool createLocalWindow(int width, int height);
+    bool createRemoteWindow(int width, int height);
+    
+    /**
+     * @brief ウィンドウを表示
+     */
+    void showWindow();
+
+    /**
+     * @brief フレームをキューに追加（H.323スレッドから呼び出し）
+     */
+    void enqueueLocalFrame(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize);
+    void enqueueRemoteFrame(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize);
+    
+    /**
+     * @brief フレームをキューに追加（Qt6VideoOutputDevice互換）
+     */
+    void queueLocalFrame(const unsigned char* data, size_t dataSize, unsigned width, unsigned height) {
+        enqueueLocalFrame(data, width, height, dataSize);
+    }
+    void queueRemoteFrame(const unsigned char* data, size_t dataSize, unsigned width, unsigned height) {
+        enqueueRemoteFrame(data, width, height, dataSize);
+    }
+
+    /**
+     * @brief H323Connectionを設定
+     */
+    void setH323Connection(MyH323Connection* connection);
+    MyH323Connection* getH323Connection() const;
+    
+    /**
+     * @brief H323Endpointを設定（UIからの接続開始に使用）
+     */
+    void setH323Endpoint(class MyH323EndPoint* endpoint);
+    class MyH323EndPoint* getH323Endpoint() const;
+    
+    /**
+     * @brief コールバック関数を設定
+     */
+    void setMakeCallCallback(MakeCallCallback cb, void* userData);
+    void setHangupCallCallback(HangupCallCallback cb, void* userData);
+    void setToggleMuteCallback(ToggleMuteCallback cb, void* userData);
+    void setToggleCameraCallback(ToggleCameraCallback cb, void* userData);
+    void setIsMutedCallback(IsMutedCallback cb, void* userData);
+    void setGetDeviceListCallback(GetDeviceListCallback cb, void* userData);
+    void setApplyDeviceSelectionCallback(ApplyDeviceSelectionCallback cb, void* userData);
+    bool getDeviceList(int deviceType, QStringList& outList);
+    void applyDeviceSelection(const QString& mic, const QString& speaker, const QString& camera);
+    
+    /**
+     * @brief UIから接続を開始
+     */
+    void makeCall(const QString& address);
+    
+    /**
+     * @brief UIから切断
+     */
+    void hangupCall();
+    
+    /**
+     * @brief マイクミュートをトグル
+     */
+    void toggleMute();
+    
+    /**
+     * @brief カメラON/OFFをトグル
+     */
+    void toggleCamera();
+
+    /**
+     * @brief 初期化済みかどうか
+     */
+    bool isInitialized() const { return m_initialized; }
+
+    /**
+     * @brief ウィンドウが存在するかどうか
+     */
+    bool hasWindow() const { return m_mainWindow != nullptr; }
+    bool hasLocalWindow() const { return m_mainWindow != nullptr; }
+    bool hasRemoteWindow() const { return m_mainWindow != nullptr; }
+
+    /**
+     * @brief メインウィンドウを取得
+     */
+    QtVideoMainWindow* mainWindow() const { return m_mainWindow; }
+    QtVideoMainWindow* getMainWindow() const { return m_mainWindow; }
+
+    /**
+     * @brief ミュート状態を更新
+     * @param localMuted ローカルマイクのミュート状態
+     * @param remoteMuted リモートマイクのミュート状態
+     */
+    void updateMuteState(bool localMuted, bool remoteMuted);
+    
+    /**
+     * @brief カメラ状態を更新
+     * @param cameraMuted カメラがオフの場合true
+     */
+    void updateCameraState(bool cameraMuted);
+    
+    /**
+     * @brief 接続ステータスを更新
+     */
+    void setConnectionStatus(const QString& status);
+    
+    /**
+     * @brief デバイスリストを更新（UIスレッドで実行）
+     */
+    void refreshDeviceLists();
+
+private:
+    QtVideoManager();
+    ~QtVideoManager();
+
+    // コピー禁止
+    QtVideoManager(const QtVideoManager&) = delete;
+    QtVideoManager& operator=(const QtVideoManager&) = delete;
+    
+    void setupSignalConnections();
+
+    QtVideoMainWindow* m_mainWindow;
+    class MyH323EndPoint* m_endpoint;
+    bool m_initialized;
+    
+    // コールバック関数（各コールバックごとに専用のuserDataを保持）
+    MakeCallCallback m_makeCallCb;
+    void* m_makeCallUserData;
+    
+    HangupCallCallback m_hangupCallCb;
+    void* m_hangupCallUserData;
+    
+    ToggleMuteCallback m_toggleMuteCb;
+    void* m_toggleMuteUserData;
+    
+    ToggleCameraCallback m_toggleCameraCb;
+    void* m_toggleCameraUserData;
+    
+    IsMutedCallback m_isMutedCb;
+    void* m_isMutedUserData;
+    
+    GetDeviceListCallback m_getDeviceListCb;
+    void* m_getDeviceListUserData;
+    
+    ApplyDeviceSelectionCallback m_applyDeviceSelectionCb;
+    void* m_applyDeviceSelectionUserData;
+};
+
+#endif // USE_QT6
+
+#endif // QT_VIDEO_WINDOW_H

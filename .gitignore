@@ -1,0 +1,32 @@
+# Build artifacts
+obj_Darwin_aarch64/
+obj_Darwin_aarch64_d/
+obj_Darwin_aarch64_s/
+obj_Darwin_aarch64_d_s/
+*.o
+*.a
+*.dylib
+
+# Distribution
+dist/
+
+# Debug logs
+*.log
+debug.log
+debug_full.log
+
+# macOS
+.DS_Store
+*.dSYM/
+
+# Qt MOC generated files
+moc_*.cpp
+
+# Editor/IDE
+.vscode/
+*.swp
+*.swo
+*~
+
+# Compiled executable (keep in dist/)
+h323askw
