@@ -46,6 +46,29 @@ fi
 # 出力ディレクトリ
 OUTPUT_DIR="${CALLGEN_DIR}/dist"
 APP_BUNDLE="${OUTPUT_DIR}/${APP_NAME}.app"
+APP_RESOURCES="${APP_BUNDLE}/Contents/Resources"
+APP_ICON_NAME="${APP_NAME}.icns"
+ICON_ASSETS_DIR="${SCRIPT_DIR}/H323CRT_transparent_iconset_and_png"
+ICONSET_PATH="${ICON_ASSETS_DIR}/H323CRT.iconset"
+ICON_PNG_PATH="${ICON_ASSETS_DIR}/H323CRT_app_icon_1024.png"
+
+# 動的に検出したHomebrewライブラリのパスとファイル名（fix_library_pathsでも使う）
+OPENSSL_SSL_LIB=""
+OPENSSL_SSL_NAME=""
+OPENSSL_CRYPTO_LIB=""
+OPENSSL_CRYPTO_NAME=""
+AVCODEC_LIB=""
+AVCODEC_NAME=""
+AVUTIL_LIB=""
+AVUTIL_NAME=""
+SWRESAMPLE_LIB=""
+SWRESAMPLE_NAME=""
+SWSCALE_LIB=""
+SWSCALE_NAME=""
+X264_LIB=""
+X264_NAME=""
+PORTAUDIO_LIB=""
+PORTAUDIO_NAME=""
 
 # ===== 色付き出力 =====
 RED='\033[0;31m'
@@ -66,6 +89,50 @@ find_dylib() {
     # ワイルドカードで最初にマッチするものを返す
     local found=$(ls -1 ${dir}/${pattern} 2>/dev/null | head -1)
     echo "$found"
+}
+
+# 指定ディレクトリ内でベース名をもとに最新バージョンのdylibを拾う
+find_latest_dylib() {
+    local dir="$1"
+    local base="$2"
+    local found=$(ls -1 "${dir}/${base}."*.dylib 2>/dev/null | sort -V | tail -1)
+    echo "$found"
+}
+
+# フルパスのdylibから「libxxxx.<major>.dylib」の形の名前を返す
+major_dylib_basename() {
+    local path="$1"
+    local base=$(basename "$path")
+    # 例: libogg.0.8.6.dylib → libogg.0.dylib, libogg.0.8.dylib, libogg.0.8.6.dylib
+    local out=()
+    # 例: libogg.0.8.6.dylib → libogg.0.dylib, libogg.0.8.dylib, libogg.0.8.6.dylib
+    if [[ "$base" =~ ^([^.]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)\.dylib$ ]]; then
+        out+=("${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.dylib")
+        out+=("${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}.dylib")
+        out+=("${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}.${BASH_REMATCH[4]}.dylib")
+    elif [[ "$base" =~ ^([^.]+)\.([0-9]+)\.([0-9]+)\.dylib$ ]]; then
+        out+=("${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.dylib")
+        out+=("${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}.dylib")
+    elif [[ "$base" =~ ^([^.]+)\.([0-9]+)\.dylib$ ]]; then
+        out+=("${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.dylib")
+    else
+        out+=("$base")
+    fi
+    for o in "${out[@]}"; do
+        echo "$o"
+    done
+}
+
+# otoolで見える既存パスをパターン検索し、見つかれば置換
+change_dep_if_present() {
+    local binary="$1"
+    local pattern="$2"
+    local newpath="$3"
+    local oldpath
+    oldpath=$(otool -L "$binary" 2>/dev/null | awk 'NR>1 {print $1}' | grep -E "$pattern" | head -1 || true)
+    if [ -n "$oldpath" ]; then
+        install_name_tool -change "$oldpath" "$newpath" "$binary" 2>/dev/null || true
+    fi
 }
 
 # ===== 必要なファイルの存在確認 =====
@@ -135,6 +202,16 @@ check_prerequisites() {
         missing=1
     fi
     
+    # アイコン素材
+    if [ ! -d "${ICONSET_PATH}" ] && [ ! -f "${ICON_PNG_PATH}" ]; then
+        log_error "アプリアイコン素材が見つかりません: ${ICON_ASSETS_DIR}"
+        missing=1
+    fi
+    if ! command -v iconutil >/dev/null 2>&1 && ! command -v sips >/dev/null 2>&1; then
+        log_error "iconutil または sips が見つかりません（アイコン生成に必要）"
+        missing=1
+    fi
+    
     if [ $missing -eq 1 ]; then
         log_error "必要なファイルが不足しています。終了します。"
         exit 1
@@ -154,10 +231,11 @@ create_bundle_structure() {
     # ディレクトリ構造
     mkdir -p "${APP_BUNDLE}/Contents/MacOS"
     mkdir -p "${APP_BUNDLE}/Contents/Frameworks"
-    mkdir -p "${APP_BUNDLE}/Contents/Resources/plugins/video"
-    mkdir -p "${APP_BUNDLE}/Contents/Resources/plugins/vidinput"
-    mkdir -p "${APP_BUNDLE}/Contents/Resources/plugins/audio"
-    mkdir -p "${APP_BUNDLE}/Contents/Resources/plugins/sound"
+    mkdir -p "${APP_RESOURCES}"
+    mkdir -p "${APP_RESOURCES}/plugins/video"
+    mkdir -p "${APP_RESOURCES}/plugins/vidinput"
+    mkdir -p "${APP_RESOURCES}/plugins/audio"
+    mkdir -p "${APP_RESOURCES}/plugins/sound"
     
     log_success "App Bundle 構造を作成しました"
 }
@@ -181,6 +259,8 @@ create_info_plist() {
     <string>6.0</string>
     <key>CFBundleName</key>
     <string>${APP_NAME}</string>
+    <key>CFBundleIconFile</key>
+    <string>${APP_ICON_NAME}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -208,6 +288,34 @@ EOF
     log_success "Info.plist を作成しました"
 }
 
+# ===== アイコンの準備 =====
+prepare_app_icon() {
+    log_info "アプリアイコンを準備中..."
+    
+    local icon_dest="${APP_RESOURCES}/${APP_ICON_NAME}"
+    mkdir -p "${APP_RESOURCES}"
+    
+    if [ -d "${ICONSET_PATH}" ] && command -v iconutil >/dev/null 2>&1; then
+        log_info "  iconset から icns を生成: ${ICONSET_PATH}"
+        if iconutil -c icns "${ICONSET_PATH}" -o "${icon_dest}"; then
+            log_success "アプリアイコンを作成しました: ${icon_dest}"
+            return
+        fi
+        log_warn "  iconutil での生成に失敗しました。代替手段を試みます。"
+    fi
+    
+    if [ -f "${ICON_PNG_PATH}" ] && command -v sips >/dev/null 2>&1; then
+        log_info "  PNG から icns を生成: ${ICON_PNG_PATH}"
+        if sips -s format icns "${ICON_PNG_PATH}" --out "${icon_dest}" >/dev/null; then
+            log_success "アプリアイコンを作成しました: ${icon_dest}"
+            return
+        fi
+        log_warn "  sips でのアイコン生成に失敗しました。"
+    fi
+    
+    log_warn "アイコン生成に失敗しました。既存のアイコンがない場合、Finder でアイコンが表示されません。"
+}
+
 # ===== 実行ファイルのコピー =====
 copy_executable() {
     log_info "実行ファイルをコピー中..."
@@ -228,11 +336,17 @@ copy_libraries() {
     cp "${H323_DYLIB}" "${FRAMEWORKS}/libh323.dylib"
     cp "${PTLIB_DYLIB}" "${FRAMEWORKS}/libpt.dylib"
     
-    # OpenSSL (ワイルドカードで最新を取得)
-    local ssl_lib=$(find_dylib "libssl.3*.dylib" "${HOMEBREW_DIR}/opt/openssl@3/lib")
-    local crypto_lib=$(find_dylib "libcrypto.3*.dylib" "${HOMEBREW_DIR}/opt/openssl@3/lib")
-    [ -n "$ssl_lib" ] && cp "$ssl_lib" "${FRAMEWORKS}/libssl.3.dylib"
-    [ -n "$crypto_lib" ] && cp "$crypto_lib" "${FRAMEWORKS}/libcrypto.3.dylib"
+    # OpenSSL (最新を取得)
+    OPENSSL_SSL_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/openssl@3/lib" "libssl")
+    OPENSSL_CRYPTO_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/openssl@3/lib" "libcrypto")
+    if [ -n "$OPENSSL_SSL_LIB" ]; then
+        OPENSSL_SSL_NAME=$(major_dylib_basename "$OPENSSL_SSL_LIB")
+        cp "$OPENSSL_SSL_LIB" "${FRAMEWORKS}/${OPENSSL_SSL_NAME}"
+    fi
+    if [ -n "$OPENSSL_CRYPTO_LIB" ]; then
+        OPENSSL_CRYPTO_NAME=$(major_dylib_basename "$OPENSSL_CRYPTO_LIB")
+        cp "$OPENSSL_CRYPTO_LIB" "${FRAMEWORKS}/${OPENSSL_CRYPTO_NAME}"
+    fi
     
     # Qt6 フレームワーク (qtbaseに配置される)
     log_info "  Qt6 フレームワークをコピー中..."
@@ -251,71 +365,100 @@ copy_libraries() {
         fi
     done
     
-    # FFmpeg (実体ファイルをコピー)
-    cp "${HOMEBREW_DIR}/opt/ffmpeg/lib/libavcodec.62.19.100.dylib" "${FRAMEWORKS}/libavcodec.62.dylib"
-    cp "${HOMEBREW_DIR}/opt/ffmpeg/lib/libavutil.60.18.100.dylib" "${FRAMEWORKS}/libavutil.60.dylib"
-    cp "${HOMEBREW_DIR}/opt/ffmpeg/lib/libswresample.6.2.100.dylib" "${FRAMEWORKS}/libswresample.6.dylib"
-    cp "${HOMEBREW_DIR}/opt/ffmpeg/lib/libswscale.9.3.100.dylib" "${FRAMEWORKS}/libswscale.9.dylib"
+    # FFmpeg (実体ファイルをコピー・バージョン自動検出)
+    AVCODEC_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/ffmpeg/lib" "libavcodec")
+    AVUTIL_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/ffmpeg/lib" "libavutil")
+    SWRESAMPLE_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/ffmpeg/lib" "libswresample")
+    SWSCALE_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/ffmpeg/lib" "libswscale")
+    if [ -n "$AVCODEC_LIB" ]; then
+        AVCODEC_NAME=$(major_dylib_basename "$AVCODEC_LIB")
+        cp "$AVCODEC_LIB" "${FRAMEWORKS}/${AVCODEC_NAME}"
+    fi
+    if [ -n "$AVUTIL_LIB" ]; then
+        AVUTIL_NAME=$(major_dylib_basename "$AVUTIL_LIB")
+        cp "$AVUTIL_LIB" "${FRAMEWORKS}/${AVUTIL_NAME}"
+    fi
+    if [ -n "$SWRESAMPLE_LIB" ]; then
+        SWRESAMPLE_NAME=$(major_dylib_basename "$SWRESAMPLE_LIB")
+        cp "$SWRESAMPLE_LIB" "${FRAMEWORKS}/${SWRESAMPLE_NAME}"
+    fi
+    if [ -n "$SWSCALE_LIB" ]; then
+        SWSCALE_NAME=$(major_dylib_basename "$SWSCALE_LIB")
+        cp "$SWSCALE_LIB" "${FRAMEWORKS}/${SWSCALE_NAME}"
+    fi
     
     # x264
-    cp "${HOMEBREW_DIR}/opt/x264/lib/libx264.165.dylib" "${FRAMEWORKS}/"
+    X264_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/x264/lib" "libx264")
+    if [ -n "$X264_LIB" ]; then
+        X264_NAME=$(major_dylib_basename "$X264_LIB")
+        cp "$X264_LIB" "${FRAMEWORKS}/${X264_NAME}"
+        # Provide an @executable_path alias so plugins can resolve x264 without absolute Homebrew paths
+        ln -sf "../Frameworks/${X264_NAME}" "${APP_BUNDLE}/Contents/MacOS/${X264_NAME}"
+    fi
     
     # PortAudio
-    cp "${HOMEBREW_DIR}/opt/portaudio/lib/libportaudio.2.dylib" "${FRAMEWORKS}/"
+    PORTAUDIO_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/portaudio/lib" "libportaudio")
+    if [ -n "$PORTAUDIO_LIB" ]; then
+        PORTAUDIO_NAME=$(major_dylib_basename "$PORTAUDIO_LIB")
+        cp "$PORTAUDIO_LIB" "${FRAMEWORKS}/${PORTAUDIO_NAME}"
+    fi
     
     # FFmpeg 追加依存ライブラリ (配布用に必要)
     log_info "  FFmpeg 依存ライブラリをコピー中..."
     
-    # 主要なFFmpeg依存ライブラリをコピー
+    # 主要なFFmpeg依存ライブラリをコピー（バージョン自動検出）
     local FFMPEG_DEPS=(
-        "libvpx/lib/libvpx.11.dylib"
-        "webp/lib/libwebpmux.3.dylib"
-        "webp/lib/libwebp.7.dylib"
-        "webp/lib/libsharpyuv.0.dylib"
-        "xz/lib/liblzma.5.dylib"
-        "aribb24/lib/libaribb24.0.dylib"
-        "dav1d/lib/libdav1d.7.dylib"
-        "opencore-amr/lib/libopencore-amrwb.0.dylib"
-        "opencore-amr/lib/libopencore-amrnb.0.dylib"
-        "snappy/lib/libsnappy.1.dylib"
-        "aom/lib/libaom.3.dylib"
-        "libvmaf/lib/libvmaf.3.dylib"
-        "jpeg-xl/lib/libjxl.0.11.dylib"
-        "jpeg-xl/lib/libjxl_threads.0.11.dylib"
-        "jpeg-xl/lib/libjxl_cms.0.11.dylib"
-        "lame/lib/libmp3lame.0.dylib"
-        "openjpeg/lib/libopenjp2.7.dylib"
-        "opus/lib/libopus.0.dylib"
-        "rav1e/lib/librav1e.0.8.dylib"
-        "speex/lib/libspeex.1.dylib"
-        "svt-av1/lib/libSvtAv1Enc.3.dylib"
-        "theora/lib/libtheoraenc.2.dylib"
-        "theora/lib/libtheoradec.2.dylib"
-        "libogg/lib/libogg.0.dylib"
-        "libvorbis/lib/libvorbis.0.dylib"
-        "libvorbis/lib/libvorbisenc.2.dylib"
-        "x265/lib/libx265.215.dylib"
-        "libsoxr/lib/libsoxr.0.dylib"
-        "libx11/lib/libX11.6.dylib"
-        "libxcb/lib/libxcb.1.dylib"
-        "libxau/lib/libXau.6.dylib"
-        "libxdmcp/lib/libXdmcp.6.dylib"
-        "brotli/lib/libbrotlidec.1.dylib"
-        "brotli/lib/libbrotlienc.1.dylib"
-        "brotli/lib/libbrotlicommon.1.dylib"
-        "highway/lib/libhwy.1.dylib"
-        "highway/lib/libhwy_contrib.1.dylib"
-        "little-cms2/lib/liblcms2.2.dylib"
-        "jpeg-turbo/lib/libjpeg.8.dylib"
-        "openssl@3/lib/libcrypto.3.dylib"
-        "libpng/lib/libpng16.16.dylib"
+        "libvpx:libvpx"
+        "webp:libwebpmux"
+        "webp:libwebp"
+        "webp:libsharpyuv"
+        "xz:liblzma"
+        "aribb24:libaribb24"
+        "dav1d:libdav1d"
+        "opencore-amr:libopencore-amrwb"
+        "opencore-amr:libopencore-amrnb"
+        "snappy:libsnappy"
+        "aom:libaom"
+        "libvmaf:libvmaf"
+        "jpeg-xl:libjxl"
+        "jpeg-xl:libjxl_threads"
+        "jpeg-xl:libjxl_cms"
+        "lame:libmp3lame"
+        "openjpeg:libopenjp2"
+        "opus:libopus"
+        "rav1e:librav1e"
+        "speex:libspeex"
+        "svt-av1:libSvtAv1Enc"
+        "theora:libtheoraenc"
+        "theora:libtheoradec"
+        "libogg:libogg"
+        "libvorbis:libvorbis"
+        "libvorbis:libvorbisenc"
+        "x265:libx265"
+        "libsoxr:libsoxr"
+        "libx11:libX11"
+        "libxcb:libxcb"
+        "libxau:libXau"
+        "libxdmcp:libXdmcp"
+        "brotli:libbrotlidec"
+        "brotli:libbrotlienc"
+        "brotli:libbrotlicommon"
+        "highway:libhwy"
+        "highway:libhwy_contrib"
+        "little-cms2:liblcms2"
+        "jpeg-turbo:libjpeg"
+        "openssl@3:libcrypto"
+        "libpng:libpng16"
     )
     
     for dep in "${FFMPEG_DEPS[@]}"; do
-        local src="${HOMEBREW_DIR}/opt/${dep}"
-        local name=$(basename "$dep")
-        if [ -f "$src" ]; then
-            cp "$src" "${FRAMEWORKS}/" 2>/dev/null || true
+        local pkg="${dep%%:*}"
+        local base="${dep#*:}"
+        local src=$(find_latest_dylib "${HOMEBREW_DIR}/opt/${pkg}/lib" "${base}")
+        if [ -n "$src" ] && [ -f "$src" ]; then
+            for name in $(major_dylib_basename "$src"); do
+                cp "$src" "${FRAMEWORKS}/${name}" 2>/dev/null || true
+            done
         fi
     done
     
@@ -396,27 +539,18 @@ fix_library_paths() {
     log_info "  実行ファイルのパスを修正..."
     
     # h323plus
-    install_name_tool -change \
-        "/Users/example/h323plus/lib/libh323_Darwin_aarch64_.1.28.0.dylib" \
-        "@executable_path/../Frameworks/libh323.dylib" \
-        "${MACOS}/h323askw"
+    change_dep_if_present "${MACOS}/h323askw" "libh323.*\\.dylib" "@executable_path/../Frameworks/libh323.dylib"
     
     # ptlib
-    install_name_tool -change \
-        "/Users/example/ptlib/lib_Darwin_aarch64/libpt.2.10.9.dylib" \
-        "@executable_path/../Frameworks/libpt.dylib" \
-        "${MACOS}/h323askw"
+    change_dep_if_present "${MACOS}/h323askw" "libpt.*\\.dylib" "@executable_path/../Frameworks/libpt.dylib"
     
     # OpenSSL
-    install_name_tool -change \
-        "${HOMEBREW_DIR}/opt/openssl@3/lib/libssl.3.dylib" \
-        "@executable_path/../Frameworks/libssl.3.dylib" \
-        "${MACOS}/h323askw"
-    
-    install_name_tool -change \
-        "${HOMEBREW_DIR}/opt/openssl@3/lib/libcrypto.3.dylib" \
-        "@executable_path/../Frameworks/libcrypto.3.dylib" \
-        "${MACOS}/h323askw"
+    if [ -n "$OPENSSL_SSL_NAME" ]; then
+        change_dep_if_present "${MACOS}/h323askw" "libssl.*\\.dylib" "@executable_path/../Frameworks/${OPENSSL_SSL_NAME}"
+    fi
+    if [ -n "$OPENSSL_CRYPTO_NAME" ]; then
+        change_dep_if_present "${MACOS}/h323askw" "libcrypto.*\\.dylib" "@executable_path/../Frameworks/${OPENSSL_CRYPTO_NAME}"
+    fi
     
     # Qt6 (qtbaseからコピー)
     install_name_tool -change \
@@ -439,9 +573,9 @@ fix_library_paths() {
     
     install_name_tool -id "@executable_path/../Frameworks/libh323.dylib" "${FRAMEWORKS}/libh323.dylib"
     install_name_tool -id "@executable_path/../Frameworks/libpt.dylib" "${FRAMEWORKS}/libpt.dylib"
-    install_name_tool -id "@executable_path/../Frameworks/libssl.3.dylib" "${FRAMEWORKS}/libssl.3.dylib"
-    install_name_tool -id "@executable_path/../Frameworks/libcrypto.3.dylib" "${FRAMEWORKS}/libcrypto.3.dylib"
-    install_name_tool -id "@executable_path/../Frameworks/libavcodec.62.dylib" "${FRAMEWORKS}/libavcodec.62.dylib"
+    [ -n "$OPENSSL_SSL_NAME" ] && install_name_tool -id "@executable_path/../Frameworks/${OPENSSL_SSL_NAME}" "${FRAMEWORKS}/${OPENSSL_SSL_NAME}"
+    [ -n "$OPENSSL_CRYPTO_NAME" ] && install_name_tool -id "@executable_path/../Frameworks/${OPENSSL_CRYPTO_NAME}" "${FRAMEWORKS}/${OPENSSL_CRYPTO_NAME}"
+    [ -n "$AVCODEC_NAME" ] && install_name_tool -id "@executable_path/../Frameworks/${AVCODEC_NAME}" "${FRAMEWORKS}/${AVCODEC_NAME}"
     
     # Qt6 フレームワークのIDを修正
     log_info "  Qt6 フレームワークのIDを修正..."
@@ -501,48 +635,37 @@ fix_library_paths() {
             "@executable_path/../Frameworks/QtCore.framework/Versions/A/QtCore" \
             "${FRAMEWORKS}/QtDBus.framework/Versions/A/QtDBus" 2>/dev/null || true
     fi
-    install_name_tool -id "@executable_path/../Frameworks/libavutil.60.dylib" "${FRAMEWORKS}/libavutil.60.dylib"
-    install_name_tool -id "@executable_path/../Frameworks/libswresample.6.dylib" "${FRAMEWORKS}/libswresample.6.dylib"
-    install_name_tool -id "@executable_path/../Frameworks/libswscale.9.dylib" "${FRAMEWORKS}/libswscale.9.dylib"
-    install_name_tool -id "@executable_path/../Frameworks/libx264.165.dylib" "${FRAMEWORKS}/libx264.165.dylib"
-    install_name_tool -id "@executable_path/../Frameworks/libportaudio.2.dylib" "${FRAMEWORKS}/libportaudio.2.dylib"
+    [ -n "$AVUTIL_NAME" ] && install_name_tool -id "@executable_path/../Frameworks/${AVUTIL_NAME}" "${FRAMEWORKS}/${AVUTIL_NAME}"
+    [ -n "$SWRESAMPLE_NAME" ] && install_name_tool -id "@executable_path/../Frameworks/${SWRESAMPLE_NAME}" "${FRAMEWORKS}/${SWRESAMPLE_NAME}"
+    [ -n "$SWSCALE_NAME" ] && install_name_tool -id "@executable_path/../Frameworks/${SWSCALE_NAME}" "${FRAMEWORKS}/${SWSCALE_NAME}"
+    [ -n "$X264_NAME" ] && install_name_tool -id "@executable_path/../Frameworks/${X264_NAME}" "${FRAMEWORKS}/${X264_NAME}"
+    [ -n "$PORTAUDIO_NAME" ] && install_name_tool -id "@executable_path/../Frameworks/${PORTAUDIO_NAME}" "${FRAMEWORKS}/${PORTAUDIO_NAME}"
     
     # --- libh323 の依存関係を修正 ---
     log_info "  libh323 の依存関係を修正..."
     
-    install_name_tool -change \
-        "/Users/example/ptlib/lib_Darwin_aarch64/libpt.2.10.9.dylib" \
-        "@executable_path/../Frameworks/libpt.dylib" \
-        "${FRAMEWORKS}/libh323.dylib"
-    
-    install_name_tool -change \
-        "${HOMEBREW_DIR}/opt/openssl@3/lib/libssl.3.dylib" \
-        "@executable_path/../Frameworks/libssl.3.dylib" \
-        "${FRAMEWORKS}/libh323.dylib"
-    
-    install_name_tool -change \
-        "${HOMEBREW_DIR}/opt/openssl@3/lib/libcrypto.3.dylib" \
-        "@executable_path/../Frameworks/libcrypto.3.dylib" \
-        "${FRAMEWORKS}/libh323.dylib"
+    change_dep_if_present "${FRAMEWORKS}/libh323.dylib" "libpt.*\\.dylib" "@executable_path/../Frameworks/libpt.dylib"
+    if [ -n "$OPENSSL_SSL_NAME" ]; then
+        change_dep_if_present "${FRAMEWORKS}/libh323.dylib" "libssl.*\\.dylib" "@executable_path/../Frameworks/${OPENSSL_SSL_NAME}"
+    fi
+    if [ -n "$OPENSSL_CRYPTO_NAME" ]; then
+        change_dep_if_present "${FRAMEWORKS}/libh323.dylib" "libcrypto.*\\.dylib" "@executable_path/../Frameworks/${OPENSSL_CRYPTO_NAME}"
+    fi
     
     # --- libpt の依存関係を修正 ---
     log_info "  libpt の依存関係を修正..."
     
-    install_name_tool -change \
-        "${HOMEBREW_DIR}/opt/openssl@3/lib/libssl.3.dylib" \
-        "@executable_path/../Frameworks/libssl.3.dylib" \
-        "${FRAMEWORKS}/libpt.dylib"
-    
-    install_name_tool -change \
-        "${HOMEBREW_DIR}/opt/openssl@3/lib/libcrypto.3.dylib" \
-        "@executable_path/../Frameworks/libcrypto.3.dylib" \
-        "${FRAMEWORKS}/libpt.dylib"
+    if [ -n "$OPENSSL_SSL_NAME" ]; then
+        change_dep_if_present "${FRAMEWORKS}/libpt.dylib" "libssl.*\\.dylib" "@executable_path/../Frameworks/${OPENSSL_SSL_NAME}"
+    fi
+    if [ -n "$OPENSSL_CRYPTO_NAME" ]; then
+        change_dep_if_present "${FRAMEWORKS}/libpt.dylib" "libcrypto.*\\.dylib" "@executable_path/../Frameworks/${OPENSSL_CRYPTO_NAME}"
+    fi
     
     # --- libssl の libcrypto 依存を修正 ---
-    install_name_tool -change \
-        "${HOMEBREW_DIR}/opt/openssl@3/lib/libcrypto.3.dylib" \
-        "@executable_path/../Frameworks/libcrypto.3.dylib" \
-        "${FRAMEWORKS}/libssl.3.dylib"
+    if [ -n "$OPENSSL_CRYPTO_NAME" ] && [ -n "$OPENSSL_SSL_NAME" ]; then
+        change_dep_if_present "${FRAMEWORKS}/${OPENSSL_SSL_NAME}" "libcrypto.*\\.dylib" "@executable_path/../Frameworks/${OPENSSL_CRYPTO_NAME}"
+    fi
     
     # --- H.264 プラグインの依存関係を修正 ---
     log_info "  H.264 プラグインの依存関係を修正..."
@@ -554,30 +677,18 @@ fix_library_paths() {
     install_name_tool -id "@executable_path/../Resources/plugins/video/H.264/h264_video_pwplugin.dylib" \
         "${H264_PLUGIN}" 2>/dev/null || log_warn "  H.264プラグインID設定をスキップ"
     
-    install_name_tool -change \
-        "${HOMEBREW_DIR}/opt/ffmpeg/lib/libavcodec.62.dylib" \
-        "@executable_path/../Frameworks/libavcodec.62.dylib" \
-        "${H264_PLUGIN}" 2>/dev/null || true
-    
-    install_name_tool -change \
-        "${HOMEBREW_DIR}/opt/ffmpeg/lib/libavutil.60.dylib" \
-        "@executable_path/../Frameworks/libavutil.60.dylib" \
-        "${H264_PLUGIN}" 2>/dev/null || true
-    
-    install_name_tool -change \
-        "${HOMEBREW_DIR}/opt/ffmpeg/lib/libswresample.6.dylib" \
-        "@executable_path/../Frameworks/libswresample.6.dylib" \
-        "${H264_PLUGIN}" 2>/dev/null || true
-    
-    install_name_tool -change \
-        "${HOMEBREW_DIR}/opt/ffmpeg/lib/libswscale.9.dylib" \
-        "@executable_path/../Frameworks/libswscale.9.dylib" \
-        "${H264_PLUGIN}" 2>/dev/null || true
-    
-    install_name_tool -change \
-        "${HOMEBREW_DIR}/opt/x264/lib/libx264.165.dylib" \
-        "@executable_path/../Frameworks/libx264.165.dylib" \
-        "${H264_PLUGIN}" 2>/dev/null || true
+    [ -n "$AVCODEC_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libavcodec.*\\.dylib" "@executable_path/../Frameworks/${AVCODEC_NAME}"
+    [ -n "$AVUTIL_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libavutil.*\\.dylib" "@executable_path/../Frameworks/${AVUTIL_NAME}"
+    [ -n "$SWRESAMPLE_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libswresample.*\\.dylib" "@executable_path/../Frameworks/${SWRESAMPLE_NAME}"
+    [ -n "$SWSCALE_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libswscale.*\\.dylib" "@executable_path/../Frameworks/${SWSCALE_NAME}"
+    [ -n "$X264_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libx264.*\.dylib" "@executable_path/${X264_NAME}"
+
+    # libvorbisenc.2.dylibのlibogg依存をlibogg.0.dylibに強制書き換え
+    local VORBISENC_DYLIB="${FRAMEWORKS}/libvorbisenc.2.dylib"
+    local OGG_MAJOR="@executable_path/../Frameworks/libogg.0.dylib"
+    for oggver in $(ls "${FRAMEWORKS}"/libogg.*.dylib | grep -v libogg.0.dylib); do
+        change_dep_if_present "$VORBISENC_DYLIB" "$(basename $oggver)" "$OGG_MAJOR"
+    done
     
     # --- H.263-ffmpeg プラグインの依存関係を修正 ---
     log_info "  H.263-ffmpeg プラグインの依存関係を修正..."
@@ -587,26 +698,8 @@ fix_library_paths() {
         install_name_tool -id "@executable_path/../Resources/plugins/video/H.263-ffmpeg/h263-ffmpeg_video_pwplugin.dylib" \
             "${H263_PLUGIN}" 2>/dev/null || log_warn "  H.263プラグインID設定をスキップ"
         
-        install_name_tool -change \
-            "${HOMEBREW_DIR}/opt/ffmpeg/lib/libavcodec.62.dylib" \
-            "@executable_path/../Frameworks/libavcodec.62.dylib" \
-            "${H263_PLUGIN}" 2>/dev/null || true
-        
-        install_name_tool -change \
-            "${HOMEBREW_DIR}/opt/ffmpeg/lib/libavutil.60.dylib" \
-            "@executable_path/../Frameworks/libavutil.60.dylib" \
-            "${H263_PLUGIN}" 2>/dev/null || true
-        
-        # ローカルビルドの依存関係も修正
-        install_name_tool -change \
-            "/usr/local/lib/libavcodec.62.dylib" \
-            "@executable_path/../Frameworks/libavcodec.62.dylib" \
-            "${H263_PLUGIN}" 2>/dev/null || true
-        
-        install_name_tool -change \
-            "/usr/local/lib/libavutil.60.dylib" \
-            "@executable_path/../Frameworks/libavutil.60.dylib" \
-            "${H263_PLUGIN}" 2>/dev/null || true
+        [ -n "$AVCODEC_NAME" ] && change_dep_if_present "${H263_PLUGIN}" "libavcodec.*\\.dylib" "@executable_path/../Frameworks/${AVCODEC_NAME}"
+        [ -n "$AVUTIL_NAME" ] && change_dep_if_present "${H263_PLUGIN}" "libavutil.*\\.dylib" "@executable_path/../Frameworks/${AVUTIL_NAME}"
     fi
     
     # --- H.261-vic プラグインの依存関係を修正 ---
@@ -622,112 +715,37 @@ fix_library_paths() {
     log_info "  FFmpeg ライブラリの内部依存を修正..."
     
     # libavcodec -> libavutil, libswresample
-    install_name_tool -change \
-        "${HOMEBREW_DIR}/opt/ffmpeg/lib/libavutil.60.dylib" \
-        "@executable_path/../Frameworks/libavutil.60.dylib" \
-        "${FRAMEWORKS}/libavcodec.62.dylib"
-    
-    install_name_tool -change \
-        "${HOMEBREW_DIR}/opt/ffmpeg/lib/libswresample.6.dylib" \
-        "@executable_path/../Frameworks/libswresample.6.dylib" \
-        "${FRAMEWORKS}/libavcodec.62.dylib"
+    if [ -n "$AVCODEC_NAME" ]; then
+        [ -n "$AVUTIL_NAME" ] && change_dep_if_present "${FRAMEWORKS}/${AVCODEC_NAME}" "libavutil.*\\.dylib" "@executable_path/../Frameworks/${AVUTIL_NAME}"
+        [ -n "$SWRESAMPLE_NAME" ] && change_dep_if_present "${FRAMEWORKS}/${AVCODEC_NAME}" "libswresample.*\\.dylib" "@executable_path/../Frameworks/${SWRESAMPLE_NAME}"
+    fi
     
     # libswscale -> libavutil
-    install_name_tool -change \
-        "${HOMEBREW_DIR}/opt/ffmpeg/lib/libavutil.60.dylib" \
-        "@executable_path/../Frameworks/libavutil.60.dylib" \
-        "${FRAMEWORKS}/libswscale.9.dylib"
+    if [ -n "$SWSCALE_NAME" ] && [ -n "$AVUTIL_NAME" ]; then
+        change_dep_if_present "${FRAMEWORKS}/${SWSCALE_NAME}" "libavutil.*\\.dylib" "@executable_path/../Frameworks/${AVUTIL_NAME}"
+    fi
     
     # libswresample -> libavutil
-    install_name_tool -change \
-        "${HOMEBREW_DIR}/opt/ffmpeg/lib/libavutil.60.dylib" \
-        "@executable_path/../Frameworks/libavutil.60.dylib" \
-        "${FRAMEWORKS}/libswresample.6.dylib"
+    if [ -n "$SWRESAMPLE_NAME" ] && [ -n "$AVUTIL_NAME" ]; then
+        change_dep_if_present "${FRAMEWORKS}/${SWRESAMPLE_NAME}" "libavutil.*\\.dylib" "@executable_path/../Frameworks/${AVUTIL_NAME}"
+    fi
     
     # --- FFmpeg 追加依存ライブラリのパス修正 ---
     log_info "  FFmpeg 追加依存ライブラリのパスを修正..."
     
-    # すべてのdylibのIDを設定し、Homebrew参照を修正
+    # すべてのdylibのIDを設定し、Homebrew参照を@executable_pathへ修正
     for lib in "${FRAMEWORKS}"/*.dylib; do
         local libname=$(basename "$lib")
-        # IDを設定
         install_name_tool -id "@executable_path/../Frameworks/${libname}" "$lib" 2>/dev/null || true
     done
     
-    # Homebrewパスを@executable_pathに一括置換
-    local HOMEBREW_LIBS=(
-        "libvpx.11.dylib"
-        "libwebpmux.3.dylib"
-        "libwebp.7.dylib"
-        "libsharpyuv.0.dylib"
-        "liblzma.5.dylib"
-        "libaribb24.0.dylib"
-        "libdav1d.7.dylib"
-        "libopencore-amrwb.0.dylib"
-        "libopencore-amrnb.0.dylib"
-        "libsnappy.1.dylib"
-        "libaom.3.dylib"
-        "libvmaf.3.dylib"
-        "libjxl.0.11.dylib"
-        "libjxl_threads.0.11.dylib"
-        "libjxl_cms.0.11.dylib"
-        "libmp3lame.0.dylib"
-        "libopenjp2.7.dylib"
-        "libopus.0.dylib"
-        "librav1e.0.8.dylib"
-        "libspeex.1.dylib"
-        "libSvtAv1Enc.3.dylib"
-        "libtheoraenc.2.dylib"
-        "libtheoradec.2.dylib"
-        "libogg.0.dylib"
-        "libvorbis.0.dylib"
-        "libvorbisenc.2.dylib"
-        "libx265.215.dylib"
-        "libsoxr.0.dylib"
-        "libX11.6.dylib"
-        "libxcb.1.dylib"
-        "libXau.6.dylib"
-        "libXdmcp.6.dylib"
-        "libbrotlidec.1.dylib"
-        "libbrotlienc.1.dylib"
-        "libbrotlicommon.1.dylib"
-        "libhwy.1.dylib"
-        "libhwy_contrib.1.dylib"
-        "liblcms2.2.dylib"
-        "libjpeg.8.dylib"
-        "libpng16.16.dylib"
-    )
-    
-    # 各ライブラリの依存関係を修正
     for target in "${FRAMEWORKS}"/*.dylib "${FRAMEWORKS}"/Qt*.framework/Versions/A/Qt*; do
         [ -f "$target" ] || continue
-        for hblib in "${HOMEBREW_LIBS[@]}"; do
-            # 様々なHomebrewパスパターンに対応
-            install_name_tool -change "/opt/homebrew/opt/${hblib%.*}*/lib/${hblib}" \
-                "@executable_path/../Frameworks/${hblib}" "$target" 2>/dev/null || true
-            install_name_tool -change "/opt/homebrew/Cellar/*/${hblib}" \
-                "@executable_path/../Frameworks/${hblib}" "$target" 2>/dev/null || true
-        done
-    done
-    
-    # 特定のHomebrewパスを直接修正（よく使われるパターン）
-    for target in "${FRAMEWORKS}"/*.dylib; do
-        [ -f "$target" ] || continue
-        # FFmpegのCellarパス
-        install_name_tool -change "/opt/homebrew/Cellar/ffmpeg/HEAD-fc3893f/lib/libavutil.60.dylib" \
-            "@executable_path/../Frameworks/libavutil.60.dylib" "$target" 2>/dev/null || true
-        install_name_tool -change "/opt/homebrew/Cellar/ffmpeg/HEAD-fc3893f/lib/libswresample.6.dylib" \
-            "@executable_path/../Frameworks/libswresample.6.dylib" "$target" 2>/dev/null || true
-        install_name_tool -change "/opt/homebrew/Cellar/openssl@3/3.6.0/lib/libcrypto.3.dylib" \
-            "@executable_path/../Frameworks/libcrypto.3.dylib" "$target" 2>/dev/null || true
-        # 一般的なoptパス
-        for hblib in "${HOMEBREW_LIBS[@]}"; do
-            local pkgname="${hblib%%.*}"
-            pkgname="${pkgname#lib}"
-            install_name_tool -change "/opt/homebrew/opt/${pkgname}/lib/${hblib}" \
-                "@executable_path/../Frameworks/${hblib}" "$target" 2>/dev/null || true
-            install_name_tool -change "/opt/homebrew/opt/lib${pkgname}/lib/${hblib}" \
-                "@executable_path/../Frameworks/${hblib}" "$target" 2>/dev/null || true
+        otool -L "$target" 2>/dev/null | awk 'NR>1 {print $1}' | grep "/opt/homebrew" | while read oldpath; do
+            local libname=$(basename "$oldpath")
+            if [ -f "${FRAMEWORKS}/${libname}" ]; then
+                install_name_tool -change "$oldpath" "@executable_path/../Frameworks/${libname}" "$target" 2>/dev/null || true
+            fi
         done
     done
     
@@ -747,10 +765,7 @@ fix_library_paths() {
     install_name_tool -id "@executable_path/../Resources/plugins/vidinput/vidinput_macos_pwplugin.dylib" \
         "${PLUGINS}/vidinput/vidinput_macos_pwplugin.dylib"
     
-    install_name_tool -change \
-        "/Users/example/ptlib/lib_Darwin_aarch64/libpt.2.10.9.dylib" \
-        "@executable_path/../Frameworks/libpt.dylib" \
-        "${PLUGINS}/vidinput/vidinput_macos_pwplugin.dylib"
+    change_dep_if_present "${PLUGINS}/vidinput/vidinput_macos_pwplugin.dylib" "libpt.*\\.dylib" "@executable_path/../Frameworks/libpt.dylib"
     
     # --- sound_portaudio プラグインの修正 ---
     log_info "  sound_portaudio プラグインの依存関係を修正..."
@@ -758,15 +773,10 @@ fix_library_paths() {
     install_name_tool -id "@executable_path/../Resources/plugins/sound/portaudio_pwplugin.dylib" \
         "${PLUGINS}/sound/portaudio_pwplugin.dylib"
     
-    install_name_tool -change \
-        "/opt/homebrew/opt/portaudio/lib/libportaudio.2.dylib" \
-        "@executable_path/../Frameworks/libportaudio.2.dylib" \
-        "${PLUGINS}/sound/portaudio_pwplugin.dylib"
-    
-    install_name_tool -change \
-        "/Users/example/ptlib/lib_Darwin_aarch64/libpt.2.10.9.dylib" \
-        "@executable_path/../Frameworks/libpt.dylib" \
-        "${PLUGINS}/sound/portaudio_pwplugin.dylib"
+    if [ -n "$PORTAUDIO_NAME" ]; then
+        change_dep_if_present "${PLUGINS}/sound/portaudio_pwplugin.dylib" "libportaudio.*\\.dylib" "@executable_path/../Frameworks/${PORTAUDIO_NAME}"
+    fi
+    change_dep_if_present "${PLUGINS}/sound/portaudio_pwplugin.dylib" "libpt.*\\.dylib" "@executable_path/../Frameworks/libpt.dylib"
     
     # --- Qt6 プラットフォームプラグインの修正 ---
     log_info "  Qt6 プラットフォームプラグインの依存関係を修正..."
@@ -990,6 +1000,7 @@ main() {
     check_prerequisites
     create_bundle_structure
     create_info_plist
+    prepare_app_icon
     copy_executable
     copy_libraries
     copy_plugins
