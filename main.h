@@ -76,6 +76,8 @@ class Qt6VideoOutputDevice : public PVideoOutputDevice
     Qt6VideoOutputDevice();
     virtual ~Qt6VideoOutputDevice();
     
+    void SetIsContentDisplay(bool isContent) { m_isContentDisplay = isContent; }
+    
     static PStringArray GetOutputDeviceNames();
     virtual PStringArray GetDeviceNames() const { return GetOutputDeviceNames(); }
     
@@ -100,6 +102,7 @@ class Qt6VideoOutputDevice : public PVideoOutputDevice
     unsigned m_frameWidth, m_frameHeight;
     bool m_isStarted, m_isOpen;
     bool m_isRemoteDisplay;  // true=リモート受信用, false=ローカルプレビュー用
+    bool m_isContentDisplay; // true=H.239コンテンツ用
     PTime m_lastFrame;
     unsigned m_frameCount;
     PMutex m_mutex;
@@ -576,7 +579,7 @@ class MyH323Connection : public H323Connection
     virtual void OnClosedLogicalChannel(const H323Channel & channel);
     
     // 🚀 ENHANCEMENT: H.264 RTP processing for display
-    void ProcessH264RTPForDisplay(const RTP_DataFrame & frame);
+    void ProcessH264RTPForDisplay(const RTP_DataFrame & frame, unsigned sessionID);
 
     CallDetail details;
     
@@ -668,9 +671,10 @@ class MyH323Connection : public H323Connection
         } m_metrics;
         
         PTime m_lastMetricsLog;
+        unsigned m_sessionID;
         
     public:
-        RFC6184Depacketizer(MyH323Connection* connection);
+        RFC6184Depacketizer(MyH323Connection* connection, unsigned sessionID);
         
         // Main processing function
         bool ProcessRTPPacket(const uint8_t* rtpPayload, size_t payloadSize, 
@@ -730,7 +734,7 @@ class MyH323Connection : public H323Connection
     };
     
     // RFC 6184 Depacketizer instance for this connection
-    std::unique_ptr<RFC6184Depacketizer> m_h264Depacketizer;
+    std::map<unsigned, std::unique_ptr<RFC6184Depacketizer>> m_h264Depacketizers;
     
     // OLD MediaSessionInfo struct (keeping for backward compatibility)
     struct MediaSessionInfo {
@@ -752,6 +756,8 @@ class MyH323Connection : public H323Connection
     // *** VIDEO SESSION TRACKING VARIABLES ***
     unsigned m_videoSessionID;
     PBoolean m_videoChannelActive;
+    unsigned m_contentSessionID;
+    PBoolean m_contentChannelActive;
     
     // *** H.245 Truth Table Management Methods ***
     void RecordH245SessionTruth(unsigned sessionID, unsigned dynamicPT, 
@@ -768,7 +774,7 @@ class MyH323Connection : public H323Connection
     void DumpH245TruthTable() const;
     
     // *** RFC 6184 Integration Methods ***
-    void InitializeH264Depacketizer();
+    void InitializeH264Depacketizer(unsigned sessionID);
     void ProcessIncomingRTPWithDepacketizer(RTP_Session* rtpSession, unsigned sessionID);
     void OnH264AccessUnitReady(const std::vector<uint8_t>& accessUnit);
     

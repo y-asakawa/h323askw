@@ -16,6 +16,7 @@
 #include <QMainWindow>
 #include <QWidget>
 #include <QImage>
+#include <QByteArray>
 #include <QMutex>
 #include <QTimer>
 #include <QDateTime>
@@ -445,6 +446,29 @@ public:
 };
 
 /**
+ * @class QtContentWindow
+ * @brief H.239コンテンツ表示用の単純なウィンドウ
+ */
+class QtContentWindow : public QMainWindow
+{
+    Q_OBJECT
+public:
+    explicit QtContentWindow(QWidget* parent = nullptr);
+    virtual ~QtContentWindow();
+
+    void enqueueContentFrame(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize);
+
+signals:
+    void contentFrameReady(const QByteArray& yuvData, unsigned width, unsigned height);
+
+private slots:
+    void onContentFrameReady(const QByteArray& yuvData, unsigned width, unsigned height);
+
+private:
+    QtVideoWidget* m_contentVideo;
+};
+
+/**
  * @class QtVideoManager
  * @brief MainThreadSDL2Managerの置き換え
  * 
@@ -474,6 +498,7 @@ public:
     bool createWindow(int width = 1280, int height = 720);
     bool createLocalWindow(int width, int height);
     bool createRemoteWindow(int width, int height);
+    bool createContentWindow(int width, int height);
     
     /**
      * @brief ウィンドウを表示
@@ -485,6 +510,7 @@ public:
      */
     void enqueueLocalFrame(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize);
     void enqueueRemoteFrame(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize);
+    void enqueueContentFrame(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize);
     
     /**
      * @brief フレームをキューに追加（Qt6VideoOutputDevice互換）
@@ -494,6 +520,9 @@ public:
     }
     void queueRemoteFrame(const unsigned char* data, size_t dataSize, unsigned width, unsigned height) {
         enqueueRemoteFrame(data, width, height, dataSize);
+    }
+    void queueContentFrame(const unsigned char* data, size_t dataSize, unsigned width, unsigned height) {
+        enqueueContentFrame(data, width, height, dataSize);
     }
 
     /**
@@ -552,12 +581,14 @@ public:
     bool hasWindow() const { return m_mainWindow != nullptr; }
     bool hasLocalWindow() const { return m_mainWindow != nullptr; }
     bool hasRemoteWindow() const { return m_mainWindow != nullptr; }
+    bool hasContentWindow() const { return m_contentWindow != nullptr; }
 
     /**
      * @brief メインウィンドウを取得
      */
     QtVideoMainWindow* mainWindow() const { return m_mainWindow; }
     QtVideoMainWindow* getMainWindow() const { return m_mainWindow; }
+    QtContentWindow* getContentWindow() const { return m_contentWindow; }
 
     /**
      * @brief ミュート状態を更新
@@ -593,6 +624,7 @@ private:
     void setupSignalConnections();
 
     QtVideoMainWindow* m_mainWindow;
+    QtContentWindow* m_contentWindow;
     class MyH323EndPoint* m_endpoint;
     bool m_initialized;
     

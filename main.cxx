@@ -1796,6 +1796,8 @@ void H323ASKW::Main()
         int duration = (args.HasOption("h239duration")) ? args.GetOptionString("h239duration").AsInteger() : -1;
         h323->SetH239Duration(duration);
     }
+    // Make sure H.239 capabilities are advertised in the capability table
+    h323->AddAllExtendedVideoCapabilities(0, P_MAX_INDEX);
   } else {
     cout << "Disabling H.239" << endl;
     h323->RemoveCapabilities(PStringArray("H.239"));
@@ -4374,6 +4376,8 @@ MyH323Connection::MyH323Connection(MyH323EndPoint & ep, unsigned callRef)
   // Declaration order (in main.h) places these before 'endpoint', so initialize here.
   m_videoSessionID = 0;         // Initialize video session tracking
   m_videoChannelActive = FALSE; // Initialize video channel state
+  m_contentSessionID = 0;       // Initialize H.239 content session tracking
+  m_contentChannelActive = FALSE;
   m_proactiveVideoRetryCount = 0; // Initialize proactive video retry counter
   m_lastVideoSSRC = 0; // Initialize last video SSRC
   m_videoFallbackAttempted = FALSE;
@@ -4402,8 +4406,8 @@ MyH323Connection::MyH323Connection(MyH323EndPoint & ep, unsigned callRef)
     m_rtpPollingActive = false;
     
     // *** TASK 1: Initialize H.245 Session Truth Table and RFC 6184 Depacketizer ***
-    PTRACE(1, "H323ASKW\t*** TASK 1: Initializing H.245 Truth Table & RFC 6184 Depacketizer ***");
-    InitializeH264Depacketizer();
+  PTRACE(1, "H323ASKW\t*** TASK 1: Initializing H.245 Truth Table & RFC 6184 Depacketizer ***");
+  InitializeH264Depacketizer(kSID_Video);
     
     // *** RFC 4585: Initialize RTCP Feedback Manager ***
     m_rtcpFeedback.reset(new RTCPFeedbackManager(this));
@@ -5804,7 +5808,8 @@ void MyH323Connection::OnRTPStatistics(const RTP_Session & session) const
   // *** TASK 2: RFC6184 PROCESSING - Activate depacketizer when video data detected ***
   if (session.GetSessionID() == 2 && session.GetOctetsReceived() > 1000) {
     MyH323Connection* nonConstThis = const_cast<MyH323Connection*>(this);
-    if (nonConstThis->m_h264Depacketizer) {
+    unsigned sid = session.GetSessionID();
+    if (nonConstThis->m_h264Depacketizers.find(sid) != nonConstThis->m_h264Depacketizers.end()) {
       PTRACE(1, "H323ASKW\tRFC6184: Video data detected on session " << session.GetSessionID() 
              << ", octets=" << session.GetOctetsReceived());
       PTRACE(1, "H323ASKW\tRFC6184: Depacketizer ready for packet processing");
@@ -6025,7 +6030,7 @@ PBoolean MyH323Connection::OnReceiveRTPPacket(RTP_Session & session, RTP_DataFra
         MyH323EndPoint& endpoint = dynamic_cast<MyH323EndPoint&>(GetEndPoint());
         if (endpoint.IsUsingQt6Display()) {
             PTRACE(1, "H323ASKW\t🚀 PROCESSING: H.264 frame → Qt6 display pipeline");
-            ProcessH264RTPForDisplay(frame);
+            ProcessH264RTPForDisplay(frame, sessionID);
             
             // MCU異常パケット処理の成功記録
             if (sessionCorrected) {
@@ -6106,15 +6111,19 @@ PBoolean MyH323Connection::OnStartLogicalChannel(H323Channel & channel) {
       PTRACE(1, "H323ASKW\t🎯 Setting up H.264 RTV receive monitoring for sessionID=" << sessionID);
       
       // Initialize H.264 depacketizer for this session
-      if (!m_h264Depacketizer) {
-        InitializeH264Depacketizer();
-      }
+      InitializeH264Depacketizer(sessionID);
       
       // Store session information for RTP monitoring
       // Note: UseSession requires additional parameters in H323Plus, so we'll use alternative approach
-      m_videoSessionID = sessionID;
-      
-      PTRACE(1, "H323ASKW\t✅ H.264 video session registered for monitoring: SessionID=" << sessionID);
+      if (sessionID > 2) {
+        m_contentSessionID = sessionID;
+        m_contentChannelActive = TRUE;
+        PTRACE(1, "H323ASKW\t✅ H.239 content session registered for monitoring: SessionID=" << sessionID);
+      } else {
+        m_videoSessionID = sessionID;
+        m_videoChannelActive = TRUE;
+        PTRACE(1, "H323ASKW\t✅ H.264 video session registered for monitoring: SessionID=" << sessionID);
+      }
       PTRACE(1, "H323ASKW\t⚡ H.264 RTP monitoring setup complete - ready for packet processing");
     }
     
@@ -6662,10 +6671,15 @@ void MyH323Connection::InitiateQt6VideoDisplay(const H323Channel & channel) {
     PTRACE(1, "H323ASKW\t⚡ CRITICAL: RX Video channel - this should feed Qt6 display");
     
     // Record this session for video processing
-    m_videoSessionID = sessionID;
-    m_videoChannelActive = TRUE;
-    
-    PTRACE(1, "H323ASKW\t✅ Video session " << sessionID << " registered for Qt6 display");
+    if (sessionID > 2) {
+      m_contentSessionID = sessionID;
+      m_contentChannelActive = TRUE;
+      PTRACE(1, "H323ASKW\t✅ H.239 content session " << sessionID << " registered for Qt6 display");
+    } else {
+      m_videoSessionID = sessionID;
+      m_videoChannelActive = TRUE;
+      PTRACE(1, "H323ASKW\t✅ Video session " << sessionID << " registered for Qt6 display");
+    }
   }
   
   PTRACE(1, "H323ASKW\t✅ Qt6 video display pipeline initiated");
@@ -7184,7 +7198,7 @@ void MyH323Connection::OnCleared()
 }
 
 // 🚀 ENHANCEMENT: H.264 RTP packet processing for Qt6 display
-void MyH323Connection::ProcessH264RTPForDisplay(const RTP_DataFrame & frame)
+void MyH323Connection::ProcessH264RTPForDisplay(const RTP_DataFrame & frame, unsigned sessionID)
 {
     PTRACE(1, "H323ASKW\t🎯 ProcessH264RTPForDisplay: Processing H.264 RTP for Qt6 display");
     
@@ -7200,16 +7214,14 @@ void MyH323Connection::ProcessH264RTPForDisplay(const RTP_DataFrame & frame)
            << ", M=" << (markerBit ? 1 : 0));
     
     // Initialize depacketizer if not done yet
-    if (!m_h264Depacketizer) {
-        PTRACE(1, "H323ASKW\t⚡ Initializing H.264 depacketizer on first RTP packet");
-        InitializeH264Depacketizer();
-    }
+    InitializeH264Depacketizer(sessionID);
     
     // Process with RFC6184 depacketizer
-    if (m_h264Depacketizer) {
-        PTRACE(1, "H323ASKW\t🔧 Calling RFC6184 depacketizer with " << payloadSize << " bytes");
+    auto it = m_h264Depacketizers.find(sessionID);
+    if (it != m_h264Depacketizers.end()) {
+        PTRACE(1, "H323ASKW\t🔧 Calling RFC6184 depacketizer with " << payloadSize << " bytes for session " << sessionID);
         WORD sequenceNumber = frame.GetSequenceNumber();
-        bool result = m_h264Depacketizer->ProcessRTPPacket(payload, payloadSize, timestamp, sequenceNumber, markerBit);
+        bool result = it->second->ProcessRTPPacket(payload, payloadSize, timestamp, sequenceNumber, markerBit);
         PTRACE(1, "H323ASKW\t✅ RFC6184 processing result: " << (result ? "SUCCESS" : "FAILED"));
     } else {
         PTRACE(1, "H323ASKW\t❌ H.264 depacketizer not initialized - cannot process packet");
@@ -7462,14 +7474,6 @@ PBoolean MyH323Connection::OpenVideoChannel(PBoolean isEncoding, H323VideoCodec 
   isH239 = codec.GetRTPSessionID() > 2;
 #endif
   
-  // H.239 (Content Sharing) チャンネルは現時点ではサポートしない
-  // 通常のビデオチャンネルと競合してクラッシュするため、ここでスキップ
-  if (isH239) {
-    PTRACE(1, "H323ASKW\t⚠️  H.239 Content Sharing channel detected - skipping (not supported yet)");
-    PTRACE(1, "H323ASKW\t    SessionID=" << codec.GetRTPSessionID() << ", isEncoding=" << isEncoding);
-    return FALSE;  // H.239 は現時点では非対応としてチャンネルを開かない
-  }
-  
   PString deviceName;
   
   // 🎥 Camera candidate structure to track driver+device pairs
@@ -7659,17 +7663,17 @@ PBoolean MyH323Connection::OpenVideoChannel(PBoolean isEncoding, H323VideoCodec 
   } else {
     // For decoding (incoming video) - Enhanced display system selection
 #ifdef USE_QT6
-    if (g_enableQt6Display && !isH239) {
+    if (g_enableQt6Display) {
       PTRACE(1, "H323ASKW\t*** USING Qt6 VIDEO DISPLAY SYSTEM ***");
       // Qt6VideoOutputDeviceを直接使用
       deviceName = "Qt6";
     } else
 #endif
-    if (endpoint.IsUsingQt6Display() && !isH239) {
-    } else if (endpoint.IsUsingConsoleDisplay() && !isH239) {
+    if (endpoint.IsUsingQt6Display()) {
+    } else if (endpoint.IsUsingConsoleDisplay()) {
       PTRACE(1, "H323ASKW\t*** USING CONSOLE VIDEO DISPLAY SYSTEM ***");
       deviceName = "Console";
-    } else if (endpoint.IsUsingMetalDisplay() && !isH239) {
+    } else if (endpoint.IsUsingMetalDisplay()) {
 #ifdef __APPLE__
       PTRACE(1, "H323ASKW\t*** USING METAL VIDEO DISPLAY SYSTEM ***");
       deviceName = "Metal";
@@ -7729,6 +7733,7 @@ PBoolean MyH323Connection::OpenVideoChannel(PBoolean isEncoding, H323VideoCodec 
       PTRACE(1, "H323ASKW\t*** DIRECTLY CREATING Qt6 VIDEO OUTPUT DEVICE (REMOTE) ***");
       Qt6VideoOutputDevice* qt6Device = new Qt6VideoOutputDevice();
       qt6Device->SetIsRemoteDisplay(true);  // 🎯 受信ビデオ用に設定
+      qt6Device->SetIsContentDisplay(isH239); // 🎯 コンテンツ共有用フラグ
       device = (PVideoDevice *)qt6Device;
       PTRACE(1, "H323ASKW\t*** Qt6 REMOTE device created: " << (device ? "SUCCESS" : "FAILED") << " ***");
     } else
@@ -10336,7 +10341,7 @@ PBoolean ConsoleVideoOutputDevice::EndFrame()
 
 // Qt6 implementation (class declared in main.h)
 Qt6VideoOutputDevice::Qt6VideoOutputDevice()
-  : m_frameWidth(0), m_frameHeight(0), m_isStarted(false), m_isOpen(false), m_isRemoteDisplay(false), m_frameCount(0)
+  : m_frameWidth(0), m_frameHeight(0), m_isStarted(false), m_isOpen(false), m_isRemoteDisplay(false), m_isContentDisplay(false), m_frameCount(0)
 {
     colourFormat = "YUV420P";
     m_colourFormat = "YUV420P";
@@ -10472,7 +10477,10 @@ PBoolean Qt6VideoOutputDevice::SetFrameData(unsigned x, unsigned y, unsigned wid
     // Queue frame to Qt6 video manager
     QtVideoManager& manager = QtVideoManager::instance();
     
-    if (m_isRemoteDisplay) {
+    if (m_isContentDisplay) {
+        PTRACE(4, "Qt6\t📺 Sending CONTENT frame to Qt6: " << width << "x" << height);
+        manager.queueContentFrame(data, bufferSize, width, height);
+    } else if (m_isRemoteDisplay) {
         PTRACE(4, "Qt6\t📺 Sending REMOTE frame to Qt6: " << width << "x" << height);
         manager.queueRemoteFrame(data, bufferSize, width, height);
     } else {
@@ -12791,7 +12799,7 @@ void MyH323Connection::DumpH245TruthTable() const
 ///////////////////////////////////////////////////////////////////////////////
 
 // RFC6184Depacketizer Constructor - ENHANCED with Proposal Integration
-MyH323Connection::RFC6184Depacketizer::RFC6184Depacketizer(MyH323Connection* connection)
+MyH323Connection::RFC6184Depacketizer::RFC6184Depacketizer(MyH323Connection* connection, unsigned sessionID)
     : m_spsValid(false)
     , m_ppsValid(false)
     , m_hasSPS(false)
@@ -12800,6 +12808,7 @@ MyH323Connection::RFC6184Depacketizer::RFC6184Depacketizer(MyH323Connection* con
     , insert_sps_pps_before_idr(true)  // 🎯 ENHANCED: IDR前SPS/PPS自動挿入
     , m_lastMetricsLog(PTime())
     , m_connection(connection)
+    , m_sessionID(sessionID)
 {
     PTRACE(1, "H323ASKW\t*** 🚀 ENHANCED RFC 6184 Depacketizer with Advanced SPS/PPS Management ***");
     PTRACE(2, "H323ASKW\t🔧 ENHANCED features: Auto SPS/PPS insertion, Enhanced caching, RFC compliance");
@@ -12975,14 +12984,14 @@ bool MyH323Connection::RFC6184Depacketizer::ProcessAccessUnit(uint32_t timestamp
     }
 }
 
-void MyH323Connection::InitializeH264Depacketizer()
+void MyH323Connection::InitializeH264Depacketizer(unsigned sessionID)
 {
-    if (!m_h264Depacketizer) {
-        m_h264Depacketizer.reset(new RFC6184Depacketizer(this));
-        PTRACE(1, "H323ASKW\t✅ RFC 6184 H.264 Depacketizer initialized successfully");
-        PTRACE(1, "H323ASKW\t⚡ InitializeH264Depacketizer: SUCCESS - Ready for H.264 RTP processing");
+    if (m_h264Depacketizers.find(sessionID) == m_h264Depacketizers.end()) {
+        m_h264Depacketizers[sessionID] = std::unique_ptr<RFC6184Depacketizer>(new RFC6184Depacketizer(this, sessionID));
+        PTRACE(1, "H323ASKW\t✅ RFC 6184 H.264 Depacketizer initialized successfully for session " << sessionID);
+        PTRACE(1, "H323ASKW\t⚡ InitializeH264Depacketizer: SUCCESS - Ready for H.264 RTP processing (session " << sessionID << ")");
     } else {
-        PTRACE(1, "H323ASKW\t⚠️ H.264 Depacketizer already initialized - skipping");
+        PTRACE(1, "H323ASKW\t⚠️ H.264 Depacketizer already initialized for session " << sessionID << " - skipping");
     }
 }
 
@@ -13615,10 +13624,13 @@ PBoolean MyH323Connection::RFC6184Depacketizer::SendToQt6Display(const uint8_t* 
         PTRACE(1, "H323ASKW\t⚠️  REMOTE Qt6 window not created - frame will be queued for main thread processing");
     }
     
-    PTRACE(1, "H323ASKW\t🎬 Enqueueing REMOTE YUV420P frame for Qt6 display");
-    
-    // Enqueue to REMOTE frame queue
-    manager.queueRemoteFrame(yuvData, totalSize, width, height);
+    if (m_sessionID > 2) {
+        PTRACE(1, "H323ASKW\t🎬 Enqueueing H.239 CONTENT frame for Qt6 display (session " << m_sessionID << ")");
+        manager.queueContentFrame(yuvData, totalSize, width, height);
+    } else {
+        PTRACE(1, "H323ASKW\t🎬 Enqueueing REMOTE YUV420P frame for Qt6 display");
+        manager.queueRemoteFrame(yuvData, totalSize, width, height);
+    }
     
     PTRACE(1, "H323ASKW\t✅ REMOTE YUV420P frame enqueued for Qt6 display");
     
@@ -13718,7 +13730,7 @@ void MyH323Connection::RecordRTPPacket(unsigned payloadType, unsigned sessionID,
     m_selfTestMetrics.totalRTPPacketsReceived++;
     
     // *** RFC6184 DEPACKETIZER STATUS CHECK ***
-    if (sessionID == 2 && m_h264Depacketizer && !m_selfTestMetrics.depacketizerActivated) {
+    if (sessionID >= 2 && m_h264Depacketizers.find(sessionID) != m_h264Depacketizers.end() && !m_selfTestMetrics.depacketizerActivated) {
         m_selfTestMetrics.depacketizerActivated = true;
         PTRACE(1, "H323ASKW\t🧪 SELF_TEST: RFC6184 Depacketizer ACTIVATED for video session");
     }
@@ -13728,7 +13740,7 @@ void MyH323Connection::RecordRTPPacket(unsigned payloadType, unsigned sessionID,
     }
     m_selfTestMetrics.lastPacketTime = now;
     
-    if (sessionID == 2) {  // Video session
+    if (sessionID >= 2) {  // Video sessions (main or H.239)
         m_selfTestMetrics.videoPacketsReceived++;
     } else if (sessionID == 1) {  // Audio session
         m_selfTestMetrics.audioPacketsReceived++;

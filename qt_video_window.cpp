@@ -1232,6 +1232,48 @@ void QtVideoMainWindow::onCameraDeviceChanged(int index)
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// QtContentWindow Implementation
+///////////////////////////////////////////////////////////////////////////////
+
+QtContentWindow::QtContentWindow(QWidget* parent)
+    : QMainWindow(parent)
+    , m_contentVideo(nullptr)
+{
+    setWindowTitle("H.239 Content");
+    QWidget* central = new QWidget(this);
+    setCentralWidget(central);
+
+    QVBoxLayout* layout = new QVBoxLayout(central);
+    m_contentVideo = new QtVideoWidget("Content Sharing", central);
+    layout->addWidget(m_contentVideo);
+
+    connect(this, &QtContentWindow::contentFrameReady,
+            this, &QtContentWindow::onContentFrameReady,
+            Qt::QueuedConnection);
+
+    QT_TRACE(1, "QtContentWindow created");
+}
+
+QtContentWindow::~QtContentWindow() = default;
+
+void QtContentWindow::enqueueContentFrame(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize)
+{
+    if (!yuvData || dataSize == 0) {
+        return;
+    }
+    QByteArray buffer(reinterpret_cast<const char*>(yuvData), static_cast<int>(dataSize));
+    emit contentFrameReady(buffer, width, height);
+}
+
+void QtContentWindow::onContentFrameReady(const QByteArray& yuvData, unsigned width, unsigned height)
+{
+    if (!m_contentVideo) {
+        return;
+    }
+    m_contentVideo->updateFrameYUV420P(reinterpret_cast<const unsigned char*>(yuvData.constData()), width, height);
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // QtVideoManager Implementation
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -1243,6 +1285,7 @@ QtVideoManager& QtVideoManager::getInstance()
 
 QtVideoManager::QtVideoManager()
     : m_mainWindow(nullptr)
+    , m_contentWindow(nullptr)
     , m_endpoint(nullptr)
     , m_initialized(false)
     , m_makeCallCb(nullptr)
@@ -1296,6 +1339,11 @@ void QtVideoManager::shutdown()
         delete m_mainWindow;
         m_mainWindow = nullptr;
     }
+    if (m_contentWindow) {
+        m_contentWindow->close();
+        delete m_contentWindow;
+        m_contentWindow = nullptr;
+    }
 
     m_initialized = false;
     QT_TRACE(1, "QtVideoManager shutdown complete");
@@ -1344,6 +1392,31 @@ bool QtVideoManager::createRemoteWindow(int width, int height)
 {
     // リモートウィンドウはメインウィンドウ内に含まれる
     return createLocalWindow(width, height);
+}
+
+bool QtVideoManager::createContentWindow(int width, int height)
+{
+    if (!m_initialized) {
+        QT_TRACE(1, "Cannot create content window - not initialized");
+        return false;
+    }
+
+    if (QThread::currentThread() != QCoreApplication::instance()->thread()) {
+        QT_TRACE(1, "createContentWindow called from non-main thread - using invokeMethod");
+        bool result = false;
+        QMetaObject::invokeMethod(QCoreApplication::instance(), [this, width, height, &result]() {
+            result = createContentWindow(width, height);
+        }, Qt::BlockingQueuedConnection);
+        return result;
+    }
+
+    if (!m_contentWindow) {
+        m_contentWindow = new QtContentWindow();
+        m_contentWindow->resize(width, height);
+        m_contentWindow->show();
+        QT_TRACE(1, "Content window created: " << width << "x" << height);
+    }
+    return true;
 }
 
 void QtVideoManager::showWindow()
@@ -1422,6 +1495,22 @@ void QtVideoManager::enqueueRemoteFrame(const unsigned char* yuvData, unsigned w
     if (m_mainWindow && yuvData && width > 0 && height > 0) {
         // enqueueRemoteFrameはシグナル経由でQueuedConnectionを使うのでスレッドセーフ
         m_mainWindow->enqueueRemoteFrame(yuvData, width, height);
+    }
+}
+
+void QtVideoManager::enqueueContentFrame(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize)
+{
+    if (!yuvData || width == 0 || height == 0) {
+        return;
+    }
+
+    // コンテンツ用ウィンドウを遅延生成
+    if (!m_contentWindow) {
+        createContentWindow(static_cast<int>(width), static_cast<int>(height));
+    }
+
+    if (m_contentWindow) {
+        m_contentWindow->enqueueContentFrame(yuvData, width, height, dataSize);
     }
 }
 
