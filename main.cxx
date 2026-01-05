@@ -7124,6 +7124,17 @@ void MyH323Connection::OnClosedLogicalChannel(const H323Channel & channel)
     PTRACE(2, "H323ASKW\tChannel " << (channel.GetDirection() == H323Channel::IsTransmitter ? "TX" : "RX")
            << " for " << channel.GetCapability().GetFormatName() << " closed");
     
+    // H.239コンテンツチャネルが閉じられたらQtウインドウを閉じる
+#if defined(USE_QT6) && defined(H323_H239)
+    if (channel.GetCapability().GetMainType() == H323Capability::e_Video &&
+        channel.GetCapability().GetSubType() == H245_VideoCapability::e_extendedVideoCapability) {
+        PTRACE(1, "H323ASKW\t📺 H.239 content channel closed - closing content window");
+        QtVideoManager::instance().closeContentWindow(true);
+        m_contentChannelActive = FALSE;
+        m_contentSessionID = 0;
+    }
+#endif
+
     // Reset videoTxReady flag when Video TX channel is closed
     if (sessionID == VIDEO_SESSION_ID && channel.GetDirection() == H323Channel::IsTransmitter) {
         PTRACE(1, "H323ASKW\tVideo TX channel closed - resetting state via state machine");

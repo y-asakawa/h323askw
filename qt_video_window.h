@@ -308,6 +308,11 @@ public:
      * @brief 接続状態を更新
      */
     void setConnectionStatus(const QString& status);
+    
+    /**
+     * @brief コンテンツボタンの有効/無効を設定
+     */
+    void setContentButtonEnabled(bool enabled);
 
     /**
      * @brief ローカルビデオのミュート状態を設定
@@ -384,6 +389,7 @@ private slots:
     void onSpeakerDeviceChanged(int index);
     void onCameraDeviceChanged(int index);
     void onSeparateWindowsClicked();
+    void onContentWindowClicked();
     void onRemoteWindowClosed();
     void onAddressActivated(int index);
 
@@ -413,6 +419,7 @@ private:
     QPushButton* m_disconnectButton;
     QCheckBox* m_muteCheckbox;
     QCheckBox* m_cameraCheckbox;
+    QPushButton* m_contentButton;  // コンテンツ再表示ボタン
     
     // デバイス選択
     QComboBox* m_micCombo;
@@ -582,6 +589,10 @@ public:
     bool hasLocalWindow() const { return m_mainWindow != nullptr; }
     bool hasRemoteWindow() const { return m_mainWindow != nullptr; }
     bool hasContentWindow() const { return m_contentWindow != nullptr; }
+    void closeContentWindow(bool disableAvailability = false);
+    void openContentWindow();
+    void setContentAvailable(bool available);
+    void clearContentWindowPointer() { m_contentWindow = nullptr; }
 
     /**
      * @brief メインウィンドウを取得
@@ -627,6 +638,9 @@ private:
     QtContentWindow* m_contentWindow;
     class MyH323EndPoint* m_endpoint;
     bool m_initialized;
+    int m_lastContentWidth;
+    int m_lastContentHeight;
+    bool m_contentAvailable;
     
     // コールバック関数（各コールバックごとに専用のuserDataを保持）
     MakeCallCallback m_makeCallCb;

@@ -733,6 +733,7 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_disconnectButton(nullptr)
     , m_muteCheckbox(nullptr)
     , m_cameraCheckbox(nullptr)
+    , m_contentButton(nullptr)
     , m_micCombo(nullptr)
     , m_speakerCombo(nullptr)
     , m_cameraCombo(nullptr)
@@ -862,6 +863,12 @@ void QtVideoMainWindow::setupUI()
     m_separateButton = new QPushButton("↗ Separate", this);
     m_separateButton->setToolTip("Separate local and remote video into different windows");
     controlLayout->addWidget(m_separateButton);
+    
+    // コンテンツ再表示ボタン
+    m_contentButton = new QPushButton("Content", this);
+    m_contentButton->setToolTip("Show H.239 content window");
+    m_contentButton->setEnabled(false); // 初期は無効（コンテンツ到着後に有効化）
+    controlLayout->addWidget(m_contentButton);
 
     mainLayout->addLayout(controlLayout);
 
@@ -906,6 +913,8 @@ void QtVideoMainWindow::setupConnections()
 
     // ウィンドウ分離ボタン
     connect(m_separateButton, &QPushButton::clicked, this, &QtVideoMainWindow::onSeparateWindowsClicked);
+    // コンテンツ再表示ボタン
+    connect(m_contentButton, &QPushButton::clicked, this, &QtVideoMainWindow::onContentWindowClicked);
 
     // デバイス選択
     connect(m_micCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), 
@@ -1083,6 +1092,15 @@ void QtVideoMainWindow::setConnectionStatus(const QString& status)
         m_statusLabel->setText(status);
     }
     statusBar()->showMessage(status, 3000);
+}
+
+void QtVideoMainWindow::setContentButtonEnabled(bool enabled)
+{
+    if (!m_contentButton) {
+        return;
+    }
+    m_contentButton->setEnabled(enabled);
+    m_contentButton->setToolTip(enabled ? "Show H.239 content window" : "Content not available");
 }
 
 void QtVideoMainWindow::setLocalMuted(bool muted)
@@ -1288,6 +1306,9 @@ QtVideoManager::QtVideoManager()
     , m_contentWindow(nullptr)
     , m_endpoint(nullptr)
     , m_initialized(false)
+    , m_lastContentWidth(1280)
+    , m_lastContentHeight(720)
+    , m_contentAvailable(false)
     , m_makeCallCb(nullptr)
     , m_makeCallUserData(nullptr)
     , m_hangupCallCb(nullptr)
@@ -1333,6 +1354,9 @@ void QtVideoManager::shutdown()
     if (!m_initialized) return;
 
     QT_TRACE(1, "QtVideoManager shutting down...");
+    
+    // コンテンツボタンを無効化しておく
+    setContentAvailable(false);
 
     if (m_mainWindow) {
         m_mainWindow->close();
@@ -1412,11 +1436,51 @@ bool QtVideoManager::createContentWindow(int width, int height)
 
     if (!m_contentWindow) {
         m_contentWindow = new QtContentWindow();
+        // ウインドウが閉じられた／破棄されたときにポインタをクリアする
+        QObject::connect(m_contentWindow, &QObject::destroyed, m_contentWindow, [this]() {
+            QT_TRACE(1, "Content window destroyed - clearing pointer");
+            m_contentWindow = nullptr;
+        });
         m_contentWindow->resize(width, height);
         m_contentWindow->show();
         QT_TRACE(1, "Content window created: " << width << "x" << height);
     }
+    
+    // コンテンツボタンを有効化
+    setContentAvailable(true);
     return true;
+}
+
+void QtVideoManager::closeContentWindow(bool disableAvailability)
+{
+    // コンテンツウィンドウが無ければ何もしない
+    if (!m_contentWindow) {
+        if (disableAvailability) {
+            setContentAvailable(false);
+        }
+        return;
+    }
+
+    // メインスレッドでのみウィンドウを閉じる
+    if (QThread::currentThread() != QCoreApplication::instance()->thread()) {
+        // 終了処理中でもデッドロックしないよう非同期で依頼
+        if (disableAvailability) {
+            setContentAvailable(false);
+        }
+        QMetaObject::invokeMethod(QCoreApplication::instance(), [this, disableAvailability]() {
+            closeContentWindow(disableAvailability);
+        }, Qt::QueuedConnection);
+        return;
+    }
+
+    PTRACE(1, "QtVideo\tClosing content window");
+    m_contentWindow->close();
+    delete m_contentWindow;
+    m_contentWindow = nullptr;
+    
+    if (disableAvailability) {
+        setContentAvailable(false);
+    }
 }
 
 void QtVideoManager::showWindow()
@@ -1503,6 +1567,11 @@ void QtVideoManager::enqueueContentFrame(const unsigned char* yuvData, unsigned 
     if (!yuvData || width == 0 || height == 0) {
         return;
     }
+    
+    // 最新サイズを記録し、ボタンを有効化
+    m_lastContentWidth = static_cast<int>(width);
+    m_lastContentHeight = static_cast<int>(height);
+    setContentAvailable(true);
 
     // コンテンツ用ウィンドウを遅延生成
     if (!m_contentWindow) {
@@ -1550,6 +1619,54 @@ void QtVideoManager::updateMuteState(bool localMuted, bool remoteMuted)
     } else {
         m_mainWindow->setLocalMuted(localMuted);
         m_mainWindow->setRemoteMuted(remoteMuted);
+    }
+}
+
+void QtVideoManager::setContentAvailable(bool available)
+{
+    m_contentAvailable = available;
+    
+    if (!m_mainWindow) {
+        return;
+    }
+    
+    auto app = QCoreApplication::instance();
+    if (!app) {
+        return;
+    }
+    
+    if (QThread::currentThread() != app->thread()) {
+        QMetaObject::invokeMethod(app, [this, available]() {
+            if (m_mainWindow) {
+                m_mainWindow->setContentButtonEnabled(available);
+            }
+        }, Qt::QueuedConnection);
+    } else {
+        m_mainWindow->setContentButtonEnabled(available);
+    }
+}
+
+void QtVideoManager::openContentWindow()
+{
+    // デフォルトサイズは最後のコンテンツサイズを使用
+    int cw = (m_lastContentWidth > 0) ? m_lastContentWidth : 1280;
+    int ch = (m_lastContentHeight > 0) ? m_lastContentHeight : 720;
+    
+    if (QThread::currentThread() != QCoreApplication::instance()->thread()) {
+        QMetaObject::invokeMethod(QCoreApplication::instance(), [this, cw, ch]() {
+            if (createContentWindow(cw, ch) && m_contentWindow) {
+                m_contentWindow->show();
+                m_contentWindow->raise();
+                m_contentWindow->activateWindow();
+            }
+        }, Qt::BlockingQueuedConnection);
+        return;
+    }
+    
+    if (createContentWindow(cw, ch) && m_contentWindow) {
+        m_contentWindow->show();
+        m_contentWindow->raise();
+        m_contentWindow->activateWindow();
     }
 }
 
@@ -2004,6 +2121,12 @@ void QtVideoMainWindow::onSeparateWindowsClicked()
         
         QT_TRACE(1, "Video windows combined");
     }
+}
+
+void QtVideoMainWindow::onContentWindowClicked()
+{
+    QT_TRACE(1, "Content button clicked - requesting content window");
+    QtVideoManager::instance().openContentWindow();
 }
 
 void QtVideoMainWindow::onRemoteWindowClosed()
