@@ -5084,6 +5084,78 @@ PBoolean MyVideoChannel::Write(const void * buf, PINDEX len)
     return result;
 }
 
+#ifdef H323_H239
+// H.239 Content video channel implementation
+MyContentVideoChannel::MyContentVideoChannel(MyH323Connection * connection, PBoolean isEncoding)
+  : PVideoChannel(), m_connection(connection), m_isEncoding(isEncoding)
+{
+    PTRACE(1, "H323ASKW\t*** MyContentVideoChannel created for H.239 content ***");
+    PTRACE(1, "H323ASKW\t   isEncoding=" << isEncoding);
+    PTRACE(1, "H323ASKW\t   connection=" << (void*)connection);
+}
+
+MyContentVideoChannel::~MyContentVideoChannel()
+{
+    PTRACE(1, "H323ASKW\t*** MyContentVideoChannel destroyed ***");
+    PTRACE(1, "H323ASKW\t   Total frames received: " << m_contentFrameCount);
+    PTRACE(1, "H323ASKW\t   Total bytes received: " << m_totalContentBytes);
+}
+
+PBoolean MyContentVideoChannel::Read(void * buf, PINDEX len)
+{
+    PTRACE(5, "H323ASKW\t*** MyContentVideoChannel::Read() called, len=" << len << " ***");
+    // For H.239 content transmission (not implemented yet)
+    return PVideoChannel::Read(buf, len);
+}
+
+PBoolean MyContentVideoChannel::Write(const void * buf, PINDEX len)
+{
+    PTRACE(1, "H323ASKW\t*** MyContentVideoChannel::Write() called! len=" << len << " ***");
+    
+    // Monitor incoming H.239 content frames
+    if (!m_isEncoding) {
+        m_contentFrameCount++;
+        m_totalContentBytes += len;
+        PTime currentTime = PTime();
+        
+        PTRACE(1, "H323ASKW\t*** H.239 CONTENT FRAME #" << m_contentFrameCount 
+               << " - Size=" << len << " bytes, Total=" << m_totalContentBytes << " bytes ***");
+        
+        if (m_contentFrameCount == 1) {
+            PTRACE(1, "H323ASKW\t*** FIRST H.239 CONTENT FRAME RECEIVED! New Qt6 window should appear ***");
+        }
+        
+        if (m_lastContentFrameTime.IsValid()) {
+            PTimeInterval interval = currentTime - m_lastContentFrameTime;
+            double fps = 1000.0 / interval.GetMilliSeconds();
+            if (m_contentFrameCount % 10 == 0) { // Every 10th frame
+                PTRACE(1, "H323ASKW\tH.239 Content FPS=" << fps 
+                       << ", Frame Rate=" << interval.GetMilliSeconds() << "ms");
+            }
+        }
+        
+        m_lastContentFrameTime = currentTime;
+    }
+    
+    PBoolean result = PVideoChannel::Write(buf, len);
+    
+    if (result && m_connection) {
+        unsigned width = GetGrabWidth();
+        unsigned height = GetGrabHeight();
+        
+        PTRACE(1, "H323ASKW\t*** Content frame dimensions: " << width << "x" << height << " ***");
+        
+        if (width > 0 && height > 0 && !m_isEncoding) {
+            // Display incoming H.239 content in separate window
+            PTRACE(3, "H323ASKW\t*** CALLING DisplayContentFrame FOR H.239 CONTENT *** " << width << "x" << height);
+            m_connection->DisplayContentFrame((const BYTE*)buf, len, width, height);
+        }
+    }
+    
+    return result;
+}
+#endif // H323_H239
+
 #ifdef H323_VIDEO
 // 🎯 FIX: Custom RTP Channel Implementation to prevent callback crashes
 MyH323RTPChannel::MyH323RTPChannel(H323Connection & connection,
@@ -5475,6 +5547,28 @@ void MyH323Connection::DisplayVideoFrame(const BYTE * frameData, PINDEX frameSiz
 #endif // USE_QT6
 }
 
+#ifdef H323_H239
+// Display H.239 content frame in separate window
+void MyH323Connection::DisplayContentFrame(const BYTE * frameData, PINDEX frameSize, unsigned width, unsigned height)
+{
+#ifdef USE_QT6
+    // CRITICAL SAFETY CHECK: Validate buffer size before passing to Qt6
+    size_t requiredSize = width * height * 3 / 2; // YUV420P
+    
+    if (frameSize < requiredSize) {
+        PTRACE(5, "H323ASKW\t⏭️ H.239 content frame skipped (insufficient data)");
+        return;
+    }
+    
+    // Qt6 display path - content window
+    QtVideoManager& qt6Manager = QtVideoManager::instance();
+    
+    PTRACE(3, "H323ASKW\t📺 Enqueueing H.239 CONTENT frame: " << width << "x" << height);
+    qt6Manager.enqueueContentFrame(frameData, width, height, requiredSize);
+#endif // USE_QT6
+}
+#endif // H323_H239
+
 // NEW: Send video frame directly to H.264 encoder for transmission
 void MyH323Connection::SendVideoFrameToEncoder(const BYTE * frameData, PINDEX frameSize, unsigned width, unsigned height)
 {
@@ -5806,7 +5900,7 @@ void MyH323Connection::OnRTPStatistics(const RTP_Session & session) const
   );
   
   // *** TASK 2: RFC6184 PROCESSING - Activate depacketizer when video data detected ***
-  if (session.GetSessionID() == 2 && session.GetOctetsReceived() > 1000) {
+  if ((session.GetSessionID() == 2 || session.GetSessionID() == 32) && session.GetOctetsReceived() > 1000) {
     MyH323Connection* nonConstThis = const_cast<MyH323Connection*>(this);
     unsigned sid = session.GetSessionID();
     if (nonConstThis->m_h264Depacketizers.find(sid) != nonConstThis->m_h264Depacketizers.end()) {
@@ -5816,8 +5910,8 @@ void MyH323Connection::OnRTPStatistics(const RTP_Session & session) const
     }
   }
   
-  // CRITICAL FIX: Check both session 1 and 2 for video data since MCU might use session 1
-  if (session.GetSessionID() == 1 || session.GetSessionID() == 2) { 
+  // CRITICAL FIX: Check session 1, 2, and 32 for video data
+  if (session.GetSessionID() == 1 || session.GetSessionID() == 2 || session.GetSessionID() == 32) { 
     // Check if this session has video data based on packet activity
     if (session.GetOctetsReceived() > 5000) { // LOWERED threshold for video data (was 10000)
       static int videoStatCount = 0;
@@ -5826,7 +5920,8 @@ void MyH323Connection::OnRTPStatistics(const RTP_Session & session) const
       PTRACE(1, "H323ASKW\tTASK 4: RTP VIDEO SESSION STATISTICS #" << videoStatCount);
       unsigned actualSessionID = session.GetSessionID();
       PTRACE(1, "H323ASKW\tVideo Channel RTP Status - SessionID=" << actualSessionID 
-             << (actualSessionID == 1 ? " (MCU using Audio session for Video)" : " (Correct Video session)"));
+             << (actualSessionID == 1 ? " (MCU using Audio session for Video)" : 
+                (actualSessionID == 32 ? " (H.239 CONTENT session)" : " (Correct Video session)")));
       PTRACE(1, "H323ASKW\t📊 MCU PayloadType Analysis: Most recent PT detected in Video context");
       PTRACE(1, "H323ASKW\tPackets Received=" << session.GetPacketsReceived());
       PTRACE(1, "H323ASKW\tOctets Received=" << session.GetOctetsReceived());
@@ -9579,8 +9674,82 @@ PBoolean MyH323Connection::OnInitialFlowRestriction(H323Channel & channel)
 
 PBoolean MyH323Connection::OpenExtendedVideoChannel(PBoolean isEncoding, H323VideoCodec & codec)
 {
-    // send same test pattern as regular video channel
-    return OpenVideoChannel(isEncoding, codec);
+    PTRACE(1, "H323ASKW\t*** OpenExtendedVideoChannel called for H.239 content ***");
+    PTRACE(1, "H323ASKW\t   isEncoding=" << isEncoding);
+    PTRACE(1, "H323ASKW\t   codec=" << codec.GetMediaFormat());
+    
+    if (!isEncoding) {
+        // For H.239 content reception - create Qt6 video output device for content display
+        PTRACE(1, "H323ASKW\t📺 Setting up H.239 content reception in new window");
+        
+        // Create H.239 content video channel
+        PVideoChannel * channel = new MyContentVideoChannel(this, isEncoding);
+        PTRACE(1, "H323ASKW\t   MyContentVideoChannel created at address: " << (void*)channel);
+        
+#ifdef USE_QT6
+        // Create Qt6 video output device for H.239 content
+        Qt6VideoOutputDevice * qt6Device = new Qt6VideoOutputDevice();
+        qt6Device->SetIsContentDisplay(true);  // Mark as H.239 content display
+        
+        // Configure device before attaching to codec
+        unsigned targetWidth = codec.GetWidth();
+        unsigned targetHeight = codec.GetHeight();
+        if (targetWidth == 0 || targetHeight == 0) {
+            targetWidth = 1280;
+            targetHeight = 720;
+        }
+        qt6Device->SetFrameSize(targetWidth, targetHeight);
+        qt6Device->SetColourFormatConverter("YUV420P");
+        qt6Device->SetFrameRate(endpoint.GetFrameRate());
+
+        // Open and start the Qt6 content display immediately
+        if (!qt6Device->Open("Qt6", TRUE)) {
+            PTRACE(1, "H323ASKW\t❌ Failed to open Qt6 video output device for H.239 content");
+            delete qt6Device;
+            delete channel;
+            return FALSE;
+        }
+
+        PTRACE(1, "H323ASKW\t   Qt6VideoOutputDevice created for CONTENT display");
+        
+        PVideoOutputDevice * device = (PVideoOutputDevice *)qt6Device;
+#else
+        // Fallback for non-Qt6 builds
+        PVideoOutputDevice * device = PVideoOutputDevice::CreateOpenedDevice("NULL", "NULL");
+#endif
+        
+        if (device == NULL) {
+            PTRACE(1, "H323ASKW\t❌ Failed to create video output device for H.239 content");
+            delete channel;
+            return FALSE;
+        }
+        
+        PTRACE(1, "H323ASKW\t   Video output device created at address: " << (void*)device);
+        
+        // Attach the video player to the channel
+        channel->AttachVideoPlayer(device);
+        
+        PTRACE(1, "H323ASKW\t   Attempting to attach channel to codec...");
+        
+        // Attach the channel to the codec (codec takes ownership with autoDelete=TRUE)
+        if (!codec.AttachChannel(channel, TRUE)) {
+            PTRACE(1, "H323ASKW\t❌ Failed to attach H.239 content channel to codec");
+            return FALSE;
+        }
+        
+        PTRACE(1, "H323ASKW\t✅ H.239 content channel attached to codec successfully");
+        
+        // ❌ DO NOT CALL codec.Open() HERE - it causes infinite loop!
+        // The codec will be opened by H323Plus framework automatically.
+        // codec.Open() internally calls OpenExtendedVideoChannel again, creating infinite recursion.
+        
+        PTRACE(1, "H323ASKW\t✅ H.239 content channel setup complete - new window will appear on first frame");
+        return TRUE;
+    } else {
+        // For H.239 content transmission (not implemented yet)
+        PTRACE(1, "H323ASKW\t⚠️  H.239 content transmission not implemented yet");
+        return FALSE;
+    }
 }
 #endif // H323_H239
 

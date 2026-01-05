@@ -257,6 +257,28 @@ class MyVideoChannel : public PVideoChannel
     PINDEX m_totalBytes = 0;            // Total bytes received by this channel
 };
 
+#ifdef H323_H239
+// H.239 Content video channel - displays in separate window
+class MyContentVideoChannel : public PVideoChannel
+{
+    PCLASSINFO(MyContentVideoChannel, PVideoChannel);
+  public:
+    MyContentVideoChannel(MyH323Connection * connection, PBoolean isEncoding = FALSE);
+    virtual ~MyContentVideoChannel();
+    
+    virtual PBoolean Read(void * buf, PINDEX len);
+    virtual PBoolean Write(const void * buf, PINDEX len);
+    
+  protected:
+    MyH323Connection * m_connection;
+    PBoolean m_isEncoding;  // TRUE for outgoing (encoding), FALSE for incoming (decoding)
+    
+    unsigned m_contentFrameCount = 0;
+    PTime m_lastContentFrameTime;
+    PINDEX m_totalContentBytes = 0;
+};
+#endif // H323_H239
+
 // 🎯 FIX: Custom RTP Channel to prevent callback crashes
 class MyH323RTPChannel : public H323_RTPChannel
 {
@@ -454,6 +476,9 @@ class MyH323Connection : public H323Connection
     // Custom video frame hook for Qt6 display
 #ifdef USE_QT6
     void DisplayVideoFrame(const BYTE * frameData, PINDEX frameSize, unsigned width, unsigned height, PBoolean isOutgoing = TRUE);
+#ifdef H323_H239
+    void DisplayContentFrame(const BYTE * frameData, PINDEX frameSize, unsigned width, unsigned height);
+#endif
     void InitializePreviewDecoder();  // Initialize H.264 decoder for outgoing preview
     PBoolean DecodePreviewFrame(const BYTE * data, PINDEX len, unsigned width, unsigned height);  // Decode H.264 for preview
     
