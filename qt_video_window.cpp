@@ -15,6 +15,8 @@
 #include <atomic>
 #include <cmath>
 #include <cstdlib>  // for _exit()
+#include <algorithm>
+#include "main.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -734,6 +736,7 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_muteCheckbox(nullptr)
     , m_cameraCheckbox(nullptr)
     , m_contentButton(nullptr)
+    , m_contentSendButton(nullptr)
     , m_micCombo(nullptr)
     , m_speakerCombo(nullptr)
     , m_cameraCombo(nullptr)
@@ -870,6 +873,12 @@ void QtVideoMainWindow::setupUI()
     m_contentButton->setEnabled(false); // 初期は無効（コンテンツ到着後に有効化）
     controlLayout->addWidget(m_contentButton);
 
+    // コンテンツ送信ボタン
+    m_contentSendButton = new QPushButton("Send Content", this);
+    m_contentSendButton->setToolTip("Select a window to share via H.239");
+    m_contentSendButton->setEnabled(false); // 接続後に有効化
+    controlLayout->addWidget(m_contentSendButton);
+
     mainLayout->addLayout(controlLayout);
 
     // デバイス選択パネル
@@ -915,6 +924,8 @@ void QtVideoMainWindow::setupConnections()
     connect(m_separateButton, &QPushButton::clicked, this, &QtVideoMainWindow::onSeparateWindowsClicked);
     // コンテンツ再表示ボタン
     connect(m_contentButton, &QPushButton::clicked, this, &QtVideoMainWindow::onContentWindowClicked);
+    // コンテンツ送信ボタン
+    connect(m_contentSendButton, &QPushButton::clicked, this, &QtVideoMainWindow::onContentSendClicked);
 
     // デバイス選択
     connect(m_micCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), 
@@ -993,6 +1004,8 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
                 safeThis->m_connectButton->setEnabled(false);
                 safeThis->m_muteCheckbox->setEnabled(true);
                 safeThis->m_cameraCheckbox->setEnabled(true);
+                if (safeThis->m_contentSendButton)
+                    safeThis->m_contentSendButton->setEnabled(true);
             } else {
                 QT_TRACE(1, "H323Connection cleared - UI controls reset (via invokeMethod)");
                 safeThis->m_disconnectButton->setEnabled(false);
@@ -1001,6 +1014,8 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
                 safeThis->m_cameraCheckbox->setEnabled(false);
                 safeThis->m_muteCheckbox->setChecked(false);
                 safeThis->m_cameraCheckbox->setChecked(false);
+                if (safeThis->m_contentSendButton)
+                    safeThis->m_contentSendButton->setEnabled(false);
             }
         }, Qt::QueuedConnection);
     } else {
@@ -1011,6 +1026,8 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
             m_connectButton->setEnabled(false);
             m_muteCheckbox->setEnabled(true);
             m_cameraCheckbox->setEnabled(true);
+            if (m_contentSendButton)
+                m_contentSendButton->setEnabled(true);
         } else {
             QT_TRACE(1, "H323Connection cleared - UI controls reset (direct call)");
             m_disconnectButton->setEnabled(false);
@@ -1019,6 +1036,8 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
             m_cameraCheckbox->setEnabled(false);
             m_muteCheckbox->setChecked(false);
             m_cameraCheckbox->setChecked(false);
+            if (m_contentSendButton)
+                m_contentSendButton->setEnabled(false);
         }
     }
 }
@@ -1309,6 +1328,7 @@ QtVideoManager::QtVideoManager()
     , m_lastContentWidth(1280)
     , m_lastContentHeight(720)
     , m_contentAvailable(false)
+    , m_contentSendTarget()
     , m_makeCallCb(nullptr)
     , m_makeCallUserData(nullptr)
     , m_hangupCallCb(nullptr)
@@ -1668,6 +1688,224 @@ void QtVideoManager::openContentWindow()
         m_contentWindow->raise();
         m_contentWindow->activateWindow();
     }
+}
+
+void QtVideoManager::startContentCapture(const QString& targetTitle)
+{
+    m_contentSendTarget = targetTitle;
+    PTRACE(2, "QtVideo\tContent capture enabled for target=" << targetTitle.toStdString());
+    setContentAvailable(true);
+    
+    // Start periodic frame capture in main thread using timer
+    m_contentCaptureTimer.setInterval(100); // 10fps (100ms interval)
+    QObject::connect(&m_contentCaptureTimer, &QTimer::timeout, [this]() { this->captureContentFrame(); });
+    m_contentCaptureTimer.start();
+    PTRACE(2, "QtVideo\tTimer started for periodic capture (10fps)");
+
+    // プレイヤー初期化: ターゲット解像度の黒フレームを用意して幅/高さを明示
+    const int initW = 1280;
+    const int initH = 720;
+    {
+        QMutexLocker locker(&m_contentFrameMutex);
+        m_captureWidth = initW;
+        m_captureHeight = initH;
+        const int initSize = (initW * initH * 3) / 2;
+        m_lastCapturedFrame.resize(initSize);
+        memset(m_lastCapturedFrame.data(), 16, initW * initH); // Y
+        memset(m_lastCapturedFrame.data() + initW * initH, 128, initSize - initW * initH); // UV
+    }
+}
+
+void QtVideoManager::stopContentCapture()
+{
+    PTRACE(2, "QtVideo\tStopping content capture");
+    m_contentCaptureTimer.stop();
+}
+
+// Timer callback - runs in main thread periodically to capture screen
+void QtVideoManager::captureContentFrame()
+{
+    if (!m_contentSendTarget.isEmpty()) {
+        // This runs in main thread, safe to use Qt GUI operations
+        QWindow* targetWin = nullptr;
+        const auto wins = QGuiApplication::topLevelWindows();
+        for (auto* w : wins) {
+            if (w && w->title() == m_contentSendTarget) {
+                targetWin = w;
+                break;
+            }
+        }
+        
+        QScreen* screen = QGuiApplication::primaryScreen();
+        if (!screen) return;
+        
+        QPixmap grab;
+        if (targetWin) {
+            grab = screen->grabWindow(targetWin->winId());
+        } else {
+            grab = screen->grabWindow(0);
+        }
+        
+        QImage img = grab.toImage().convertToFormat(QImage::Format_RGB32);
+        if (img.isNull()) return;
+        
+        // Scale to 720P (1280x720)
+        // 🎬 HIGH QUALITY: Use 720P for better content sharing experience
+        // H.264 encoder expects exactly 1280x720, so we must provide that size
+        const int targetW = 1280;
+        const int targetH = 720;
+        img = img.scaled(targetW, targetH, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        
+        int w = img.width() & ~1;
+        int h = img.height() & ~1;
+        if (img.width() != w || img.height() != h) {
+            img = img.copy(0, 0, w, h);
+        }
+        if (w < 16 || h < 16) return;
+        
+        PTRACE(4, "QtVideo\tCaptured " << w << "x" << h << " frame in main thread");
+
+        QMutexLocker locker(&m_contentFrameMutex);
+
+        m_captureWidth = w;
+        m_captureHeight = h;
+
+        // RGB32 → YUV420P conversion
+        const int ySize = w * h;
+        const int uvSize = (w * h) / 4;
+        m_lastCapturedFrame.resize(ySize + uvSize * 2);
+        unsigned char* yuv = reinterpret_cast<unsigned char*>(m_lastCapturedFrame.data());
+        unsigned char* yPlane = yuv;
+        unsigned char* uPlane = yuv + ySize;
+        unsigned char* vPlane = yuv + ySize + uvSize;
+        
+        const uchar* rgb = img.bits();
+        const int stride = img.bytesPerLine();
+        
+        // Convert Y plane
+        for (int j = 0; j < h; j++) {
+            for (int i = 0; i < w; i++) {
+                const int rgbIdx = j * stride + i * 4;
+                const int r = rgb[rgbIdx + 2];
+                const int g = rgb[rgbIdx + 1];
+                const int b = rgb[rgbIdx + 0];
+                
+                int y = static_cast<int>(0.257 * r + 0.504 * g + 0.098 * b + 16);
+                yPlane[j * w + i] = static_cast<unsigned char>(std::clamp(y, 0, 255));
+            }
+        }
+        
+        // Convert UV planes (subsampled 2x2)
+        for (int j = 0; j < h; j += 2) {
+            for (int i = 0; i < w; i += 2) {
+                int rSum = 0, gSum = 0, bSum = 0;
+                for (int dy = 0; dy < 2 && (j + dy) < h; dy++) {
+                    for (int dx = 0; dx < 2 && (i + dx) < w; dx++) {
+                        const int rgbIdx = (j + dy) * stride + (i + dx) * 4;
+                        rSum += rgb[rgbIdx + 2];
+                        gSum += rgb[rgbIdx + 1];
+                        bSum += rgb[rgbIdx + 0];
+                    }
+                }
+                rSum /= 4;
+                gSum /= 4;
+                bSum /= 4;
+                
+                int u = static_cast<int>(-0.148 * rSum - 0.291 * gSum + 0.439 * bSum + 128);
+                int v = static_cast<int>(0.439 * rSum - 0.368 * gSum - 0.071 * bSum + 128);
+                
+                const int uvIdx = (j / 2) * (w / 2) + (i / 2);
+                uPlane[uvIdx] = static_cast<unsigned char>(std::clamp(u, 0, 255));
+                vPlane[uvIdx] = static_cast<unsigned char>(std::clamp(v, 0, 255));
+            }
+        }
+    }
+}
+
+void QtVideoManager::captureContentFrameNow()
+{
+    // 🔧 SOLUTION: Don't call Qt GUI operations from encoder thread!
+    // Instead, just return the last captured frame from buffer
+    // (Frame buffer is updated periodically by timer in main thread)
+    
+    PTRACE(4, "QtVideo\tcaptureContentFrameNow() - using buffered frame");
+    
+    // Safety check: if timer hasn't started yet, fill with black frame
+    {
+        QMutexLocker locker(&m_contentFrameMutex);
+        if (m_lastCapturedFrame.isEmpty()) {
+            PTRACE(2, "QtVideo\tWARNING: Timer not started yet, using black frame");
+            int w = 1280;
+            int h = 720;
+            m_captureWidth = w;
+            m_captureHeight = h;
+            int yuvSize = (w * h * 3) / 2;
+            m_lastCapturedFrame.resize(yuvSize);
+            memset(m_lastCapturedFrame.data(), 16, w * h);      // Y plane (black)
+            memset(m_lastCapturedFrame.data() + w*h, 128, (w*h)/2); // UV planes (neutral)
+        }
+    }
+    
+    // Frame is already in m_lastCapturedFrame buffer from timer-based capture
+    // No need to do anything here - encoder will read from buffer
+    return;
+}
+
+bool QtVideoManager::getLatestContentFrame(QByteArray& outFrame, unsigned& width, unsigned& height)
+{
+    QMutexLocker locker(&m_contentFrameMutex);
+    if (m_lastCapturedFrame.isEmpty()) {
+        return false;
+    }
+    
+    // Make a deep copy to ensure data stability
+    outFrame = m_lastCapturedFrame;
+    width = static_cast<unsigned>(m_captureWidth);
+    height = static_cast<unsigned>(m_captureHeight);
+    
+    // Validate before returning
+    if (width < 2 || height < 2 || outFrame.size() != (width * height * 3 / 2)) {
+        PTRACE(2, "QtVideo\tgetLatestContentFrame: Invalid data - w=" << width 
+               << " h=" << height << " size=" << outFrame.size());
+        return false;
+    }
+    
+    return true;
+}
+
+void QtVideoManager::requestContentSend(const QString& targetTitle)
+{
+    m_contentSendTarget = targetTitle;
+    PTRACE(1, "QtVideo\tContent send target set to: " << targetTitle.toStdString());
+    
+    if (m_mainWindow) {
+        m_mainWindow->setConnectionStatus("Content source selected: " + targetTitle);
+    }
+    
+    // コンテンツキャプチャ開始
+    startContentCapture(targetTitle);
+    
+#ifndef H323_H239
+    PTRACE(1, "QtVideo\tH.239 not compiled in this build - cannot start content TX");
+    return;
+#else
+    // H.239送信チャネル開始（接続中のとき）
+    MyH323Connection* conn = getH323Connection();
+    MyH323EndPoint* ep = getH323Endpoint();
+    PTRACE(1, "QtVideo\tH.239 TX preflight - endpoint=" << (void*)ep << " conn=" << (void*)conn);
+    if (ep) {
+        ep->SetStartH239(true); // UIから送信を許可
+        PTRACE(1, "QtVideo\tH.239 start flag set on endpoint");
+    } else {
+        PTRACE(1, "QtVideo\tEndpoint not set - cannot set H.239 start flag");
+    }
+    if (conn) {
+        PTRACE(1, "QtVideo\tRequesting H.239 transmission start");
+        conn->StartH239Transmission();
+    } else {
+        PTRACE(1, "QtVideo\tNo active connection - cannot start H.239 transmission");
+    }
+#endif
 }
 
 void QtVideoManager::updateCameraState(bool cameraMuted)
@@ -2127,6 +2365,55 @@ void QtVideoMainWindow::onContentWindowClicked()
 {
     QT_TRACE(1, "Content button clicked - requesting content window");
     QtVideoManager::instance().openContentWindow();
+}
+
+void QtVideoMainWindow::onContentSendClicked()
+{
+    QT_TRACE(1, "Content send button clicked - selecting window to share");
+
+    if (!m_h323Connection) {
+        setConnectionStatus("Connect first to send content");
+        return;
+    }
+
+    QStringList windowTitles;
+    // 取得できるトップレベルウインドウのタイトルを列挙
+    const auto windows = QGuiApplication::topLevelWindows();
+    for (auto* win : windows) {
+        if (win) {
+            const QString title = win->title();
+            if (!title.isEmpty()) {
+                windowTitles << title;
+            }
+        }
+    }
+
+    // フォールバック
+    if (windowTitles.isEmpty()) {
+        windowTitles << "Current Application Window";
+    }
+
+    bool ok = false;
+    const QString selected = QInputDialog::getItem(
+        this,
+        tr("Select content window"),
+        tr("Window to share:"),
+        windowTitles,
+        0,
+        false,
+        &ok
+    );
+
+    if (!ok || selected.isEmpty()) {
+        QT_TRACE(1, "Content send cancelled or no selection");
+        return;
+    }
+
+    QtVideoManager::instance().requestContentSend(selected);
+    setConnectionStatus("Content source selected: " + selected);
+    QMessageBox::information(this,
+                             tr("Content source set"),
+                             tr("Sharing source: %1\n(送信パイプラインはこの後のステップで実装)").arg(selected));
 }
 
 void QtVideoMainWindow::onRemoteWindowClosed()

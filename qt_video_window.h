@@ -20,6 +20,8 @@
 #include <QMutex>
 #include <QTimer>
 #include <QDateTime>
+#include <thread>
+#include <atomic>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QSplitter>
@@ -35,6 +37,12 @@
 #include <QStringList>
 #include <QSettings>
 #include <QCompleter>
+#include <QInputDialog>
+#include <QGuiApplication>
+#include <QWindow>
+#include <QMessageBox>
+#include <QScreen>
+#include <QPixmap>
 #include <atomic>
 
 // Forward declarations
@@ -390,6 +398,7 @@ private slots:
     void onCameraDeviceChanged(int index);
     void onSeparateWindowsClicked();
     void onContentWindowClicked();
+    void onContentSendClicked();
     void onRemoteWindowClosed();
     void onAddressActivated(int index);
 
@@ -420,6 +429,7 @@ private:
     QCheckBox* m_muteCheckbox;
     QCheckBox* m_cameraCheckbox;
     QPushButton* m_contentButton;  // コンテンツ再表示ボタン
+    QPushButton* m_contentSendButton; // コンテンツ送信ボタン
     
     // デバイス選択
     QComboBox* m_micCombo;
@@ -592,6 +602,13 @@ public:
     void closeContentWindow(bool disableAvailability = false);
     void openContentWindow();
     void setContentAvailable(bool available);
+    void requestContentSend(const QString& targetTitle);
+    QString getContentSendTarget() const { return m_contentSendTarget; }
+    void startContentCapture(const QString& targetTitle);
+    void stopContentCapture();
+    void captureContentFrame();      // Timer callback - captures in main thread
+    void captureContentFrameNow();   // Called by encoder - returns buffered frame
+    bool getLatestContentFrame(QByteArray& outFrame, unsigned& width, unsigned& height);
     void clearContentWindowPointer() { m_contentWindow = nullptr; }
 
     /**
@@ -641,6 +658,16 @@ private:
     int m_lastContentWidth;
     int m_lastContentHeight;
     bool m_contentAvailable;
+    QString m_contentSendTarget;
+    QTimer m_contentCaptureTimer;
+    QByteArray m_lastCapturedFrame;
+    int m_captureWidth = 1280;
+    int m_captureHeight = 720;
+    QMutex m_contentFrameMutex; // protects content capture buffer
+    
+    // 🔧 Thread-based content capture (QTimer doesn't work in non-Qt threads)
+    std::atomic<bool> m_captureThreadRunning{false};
+    std::thread m_captureThread;
     
     // コールバック関数（各コールバックごとに専用のuserDataを保持）
     MakeCallCallback m_makeCallCb;

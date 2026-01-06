@@ -48,6 +48,7 @@
 #include <mutex>
 #include <thread>
 #include <vector>  // For Polycom TCS fix
+#include <algorithm>
 #include <dlfcn.h>  // 🎬 For dlsym (preview callback workaround)
 
 // ============================================================================
@@ -5103,9 +5104,25 @@ MyContentVideoChannel::~MyContentVideoChannel()
 
 PBoolean MyContentVideoChannel::Read(void * buf, PINDEX len)
 {
-    PTRACE(5, "H323ASKW\t*** MyContentVideoChannel::Read() called, len=" << len << " ***");
-    // For H.239 content transmission (not implemented yet)
-    return PVideoChannel::Read(buf, len);
+    PTRACE(4, "H323ASKW\t*** MyContentVideoChannel::Read() called for H.239 content TX, len=" << len << " ***");
+    
+    if (!m_isEncoding) {
+        // For receiving content - use base class
+        PTRACE(4, "H323ASKW\tMyContentVideoChannel::Read - RX mode, using base class");
+        return PVideoChannel::Read(buf, len);
+    }
+    
+    // 🔧 CRITICAL FIX: For H.239 content transmission, actually read from the input device
+    // The base class PVideoChannel::Read() will call the attached input device's GetFrameData()
+    PBoolean result = PVideoChannel::Read(buf, len);
+    
+    if (result) {
+        PTRACE(5, "H323ASKW\t✅ MyContentVideoChannel::Read succeeded, read " << len << " bytes");
+    } else {
+        PTRACE(2, "H323ASKW\t❌ MyContentVideoChannel::Read failed for H.239 content");
+    }
+    
+    return result;
 }
 
 PBoolean MyContentVideoChannel::Write(const void * buf, PINDEX len)
@@ -5157,6 +5174,276 @@ PBoolean MyContentVideoChannel::Write(const void * buf, PINDEX len)
 #endif // H323_H239
 
 #ifdef H323_VIDEO
+
+#ifdef H323_H239
+// ========================================================================
+// Qt6 CONTENT INPUT DEVICE (H.239 TX)
+// ========================================================================
+class QtContentInputDevice : public PVideoInputDevice
+{
+    PCLASSINFO(QtContentInputDevice, PVideoInputDevice);
+public:
+    QtContentInputDevice()
+      : m_isOpen(false)
+      , m_isCapturing(false)
+      , m_frameWidth(1280)
+      , m_frameHeight(720)
+      , m_alignedBuffer(nullptr)
+      , m_alignedBufferSize(0)
+    {
+        colourFormat = "YUV420P";
+        AllocateAlignedBuffer(1280, 720);
+    }
+    
+    ~QtContentInputDevice() {
+        FreeAlignedBuffer();
+    }
+
+    PBoolean Open(const PString &, PBoolean startImmediate) override {
+        m_isOpen = true;
+        // 720P content at 10fps for smooth sharing
+        SetFrameRate(10);
+        if (startImmediate)
+            return Start();
+        return true;
+    }
+
+    PBoolean IsOpen() override { return m_isOpen; }
+    PBoolean Close() override { m_isOpen = false; m_isCapturing = false; return true; }
+    PBoolean Start() override {
+        // Set frame rate to 10fps for 720P content
+        SetFrameRate(10);
+        m_isCapturing = true;
+        return true;
+    }
+    PBoolean Stop() override { m_isCapturing = false; return true; }
+
+    PBoolean SetFrameSize(unsigned width, unsigned height) override {
+        // Guard against invalid sizes and keep even dimensions for H.264
+        if (width < 2 || height < 2) {
+            PTRACE(2, "H323ASKW\tQtContentInputDevice: Invalid SetFrameSize(" << width << "x" << height << "), using defaults");
+            width = 1280;
+            height = 720;
+        }
+        
+        // 🎬 Support 720P for high-quality content sharing
+        // Modern x264 encoder handles 720P well on current hardware
+        const unsigned maxW = 1280;  // 720P width
+        const unsigned maxH = 720;   // 720P height
+        
+        if (width > maxW) {
+            PTRACE(2, "H323ASKW\tQtContentInputDevice: Width " << width << " exceeds max " << maxW << ", capping");
+            width = maxW;
+        }
+        if (height > maxH) {
+            PTRACE(2, "H323ASKW\tQtContentInputDevice: Height " << height << " exceeds max " << maxH << ", capping");
+            height = maxH;
+        }
+        
+        // Ensure even dimensions for H.264
+        width  &= ~1u;
+        height &= ~1u;
+        
+        if (width == 0 || height == 0) {
+            PTRACE(2, "H323ASKW\tQtContentInputDevice: Dimensions became zero after rounding, using defaults");
+            width = 352;
+            height = 288;
+        }
+        
+        m_frameWidth = width;
+        m_frameHeight = height;
+        
+        // Sync base class dimensions
+        frameWidth  = m_frameWidth;
+        frameHeight = m_frameHeight;
+        
+        // Reallocate aligned buffer for new frame size
+        AllocateAlignedBuffer(m_frameWidth, m_frameHeight);
+        
+        PTRACE(3, "H323ASKW\tQtContentInputDevice SetFrameSize -> " << m_frameWidth << "x" << m_frameHeight);
+        return true;
+    }
+
+    PBoolean GetFrameSize(unsigned & width, unsigned & height) const override {
+        width = m_frameWidth;
+        height = m_frameHeight;
+        return true;
+    }
+
+    PINDEX GetMaxFrameBytes() override {
+        // 🔧 CRITICAL FIX: Always use current frame dimensions, no fallback
+        // Fallback to safe defaults only if completely uninitialized
+        unsigned w = m_frameWidth;
+        unsigned h = m_frameHeight;
+        
+        // Only use fallback if dimensions are invalid
+        if (w < 2 || h < 2) {
+            w = 1280;
+            h = 720;
+        }
+        
+        // Ensure even dimensions
+        w &= ~1u;
+        h &= ~1u;
+        
+        // Validate final dimensions
+        if (w == 0) w = 1280;
+        if (h == 0) h = 720;
+        
+        const PINDEX bytes = w * h * 3 / 2; // YUV420P
+        PTRACE(6, "H323ASKW\tQtContentInputDevice::GetMaxFrameBytes: " << w << "x" << h << " = " << bytes << " bytes");
+        return bytes;
+    }
+
+    PStringArray GetDeviceNames() const override {
+        PStringArray names;
+        names.AppendString("QtContent");
+        return names;
+    }
+
+    PBoolean IsCapturing() override {
+        return m_isCapturing;
+    }
+
+    PBoolean GetFrameData(BYTE * buffer, PINDEX * bytesReturned) override {
+        if (!m_isCapturing || !m_isOpen || buffer == nullptr) {
+            PTRACE(2, "H323ASKW\tQtContentInputDevice::GetFrameData: Invalid state (not capturing or not open)");
+            return false;
+        }
+
+        // Ensure we always have sane, even output dimensions
+        if (m_frameWidth < 2 || m_frameHeight < 2) {
+            PTRACE(2, "H323ASKW\tQtContentInputDevice: Invalid frame size, using defaults");
+            m_frameWidth = 1280;
+            m_frameHeight = 720;
+        }
+        m_frameWidth  &= ~1u;
+        m_frameHeight &= ~1u;
+
+        const unsigned dstW = m_frameWidth;
+        const unsigned dstH = m_frameHeight;
+        const PINDEX required = dstW * dstH * 3 / 2; // avoid relying on base GetMaxFrameBytes
+
+        PTRACE(5, "H323ASKW\tQtContentInputDevice::GetFrameData: dstW=" << dstW << " dstH=" << dstH << " required=" << required);
+
+        // 🔧 CRITICAL: Validate buffer pointer before use
+        if (!buffer) {
+            PTRACE(1, "H323ASKW\tQtContentInputDevice::GetFrameData: NULL buffer pointer!");
+            return false;
+        }
+        
+        // 🔧 CRITICAL: Check buffer alignment for x264 encoder
+        uintptr_t bufferAddr = reinterpret_cast<uintptr_t>(buffer);
+        if (bufferAddr % 16 != 0) {
+            PTRACE(2, "H323ASKW\tQtContentInputDevice: WARNING - Buffer not 16-byte aligned: " << (void*)buffer);
+        }
+
+        // Pre-clear buffer to black to avoid leaking stale data
+        if (buffer && required > 0) {
+            memset(buffer, 0, required);
+        }
+
+        // 🔧 Get actual captured frame from Qt6 manager
+        QByteArray frameData;
+        unsigned actualW = 0, actualH = 0;
+        
+        QtVideoManager& qtMgr = QtVideoManager::getInstance();
+        
+        if (!qtMgr.getLatestContentFrame(frameData, actualW, actualH)) {
+            PTRACE(4, "H323ASKW\tQtContentInputDevice: No captured frame available yet");
+            goto fallback_black_frame;
+        }
+        
+        PTRACE(5, "H323ASKW\tQtContentInputDevice: Got frame from Qt - " 
+               << actualW << "x" << actualH << " size=" << frameData.size());
+        
+        // Validate frame data before copying
+        if (frameData.isEmpty() || frameData.size() <= 0) {
+            PTRACE(3, "H323ASKW\tQtContentInputDevice: Frame data is empty");
+            goto fallback_black_frame;
+        }
+        
+        if (actualW < 2 || actualH < 2 || actualW > 4096 || actualH > 4096) {
+            PTRACE(2, "H323ASKW\tQtContentInputDevice: Invalid dimensions " << actualW << "x" << actualH);
+            goto fallback_black_frame;
+        }
+        
+        // Copy captured frame data to output buffer
+        if (actualW == dstW && actualH == dstH && frameData.size() == static_cast<int>(required)) {
+            const unsigned char* srcData = reinterpret_cast<const unsigned char*>(frameData.constData());
+            if (!srcData) {
+                PTRACE(2, "H323ASKW\tQtContentInputDevice: Frame data pointer is NULL");
+                goto fallback_black_frame;
+            }
+            memcpy(buffer, srcData, required);
+            if (bytesReturned) *bytesReturned = required;
+            PTRACE(6, "H323ASKW\tQtContentInputDevice: Sent captured frame " << actualW << "x" << actualH);
+            return true;
+        } else {
+            PTRACE(3, "H323ASKW\tQtContentInputDevice: Size mismatch - expected " 
+                   << dstW << "x" << dstH << " (" << required << " bytes), got " 
+                   << actualW << "x" << actualH << " (" << frameData.size() << " bytes)");
+            // Fall through to black frame
+        }
+        
+    fallback_black_frame:
+        // Generate black frame in ALIGNED buffer first
+        if (!m_alignedBuffer || m_alignedBufferSize < required) {
+            PTRACE(1, "H323ASKW\tQtContentInputDevice: ERROR - Aligned buffer not ready!");
+            return false;
+        }
+        
+        BYTE* yPlane = m_alignedBuffer;
+        BYTE* uPlane = m_alignedBuffer + dstW * dstH;
+        BYTE* vPlane = uPlane + (dstW * dstH) / 4;
+        
+        // Y = 16 (black in video range)
+        memset(yPlane, 16, dstW * dstH);
+        // U, V = 128 (neutral chroma)
+        memset(uPlane, 128, (dstW * dstH) / 4);
+        memset(vPlane, 128, (dstW * dstH) / 4);
+        
+        // Copy from aligned buffer to H323Plus buffer
+        memcpy(buffer, m_alignedBuffer, required);
+
+        if (bytesReturned) *bytesReturned = required;
+        PTRACE(4, "H323ASKW\tQtContentInputDevice::GetFrameData: Sending fallback black frame (from aligned buffer)");
+        return true;
+    }
+
+    PBoolean GetFrameDataNoDelay(BYTE * buffer, PINDEX * bytesReturned) override {
+        return GetFrameData(buffer, bytesReturned);
+    }
+
+private:
+    void AllocateAlignedBuffer(unsigned w, unsigned h) {
+        FreeAlignedBuffer();
+        m_alignedBufferSize = (w * h * 3) / 2;
+        // Allocate 16-byte aligned buffer for x264
+        posix_memalign(reinterpret_cast<void**>(&m_alignedBuffer), 16, m_alignedBufferSize);
+        if (m_alignedBuffer) {
+            memset(m_alignedBuffer, 0, m_alignedBufferSize);
+            PTRACE(3, "H323ASKW\tAllocated 16-byte aligned buffer: " << m_alignedBufferSize << " bytes at " << (void*)m_alignedBuffer);
+        }
+    }
+    
+    void FreeAlignedBuffer() {
+        if (m_alignedBuffer) {
+            free(m_alignedBuffer);
+            m_alignedBuffer = nullptr;
+            m_alignedBufferSize = 0;
+        }
+    }
+
+    bool m_isOpen;
+    bool m_isCapturing;
+    unsigned m_frameWidth;
+    unsigned m_frameHeight;
+    BYTE* m_alignedBuffer;
+    size_t m_alignedBufferSize;
+};
+#endif // H323_H239
+
 // 🎯 FIX: Custom RTP Channel Implementation to prevent callback crashes
 MyH323RTPChannel::MyH323RTPChannel(H323Connection & connection,
                                    const H323Capability & capability,
@@ -6191,6 +6478,21 @@ PBoolean MyH323Connection::OnStartLogicalChannel(H323Channel & channel) {
   
   if (result) {
     PTRACE(1, "H323ASKW\t✅ Channel successfully started");
+
+#if defined(USE_QT6) && defined(H323_H239)
+    // 🚀 When an H.239 extended video channel starts (remote content share), open the content window
+    if (channel.GetCapability().GetMainType() == H323Capability::e_Video &&
+        channel.GetCapability().GetSubType() == H245_VideoCapability::e_extendedVideoCapability &&
+        direction == H323Channel::IsReceiver) {
+      m_contentSessionID = sessionID;
+      m_contentChannelActive = TRUE;
+      PTRACE(1, "H323ASKW\t📺 H.239 content channel started - requesting Qt content window (session "
+                << sessionID << ")");
+      QtVideoManager & qtManager = QtVideoManager::instance();
+      qtManager.setContentAvailable(true);
+      qtManager.openContentWindow();
+    }
+#endif
     
     // *** CRITICAL: RTP Session Monitoring Setup for H.264 video ***
     if (channel.GetCapability().GetMainType() == H323Capability::e_Video && 
@@ -7132,6 +7434,7 @@ void MyH323Connection::OnClosedLogicalChannel(const H323Channel & channel)
         QtVideoManager::instance().closeContentWindow(true);
         m_contentChannelActive = FALSE;
         m_contentSessionID = 0;
+        QtVideoManager::instance().setContentAvailable(false);
     }
 #endif
 
@@ -8587,6 +8890,17 @@ void MyH323Connection::OnSelectLogicalChannels()
 #ifdef H323_H239
 void MyH323Connection::StartH239Transmission()
 {
+    PTRACE(1, "H323ASKW\tStartH239Transmission called - StartFlag=" << endpoint.IsStartH239()
+           << " started=" << m_haveStartedH239);
+#if defined(USE_QT6)
+    // コンテンツ送信先が選ばれていない場合は送信を開始しない（x264クラッシュ防止）
+    QtVideoManager& qtMgr = QtVideoManager::instance();
+    if (endpoint.IsStartH239() && qtMgr.getContentSendTarget().isEmpty()) {
+        PTRACE(1, "H323ASKW\tStartH239Transmission skipped - no content send target selected");
+        return;
+    }
+#endif
+
     if (endpoint.IsStartH239() && !m_haveStartedH239) {
         PTRACE(1, "Starting H.239");
         if (OpenH239Channel()) {
@@ -8600,6 +8914,10 @@ void MyH323Connection::StartH239Transmission()
         } else {
             PTRACE(1, "H.239 channel failed");
         }
+    } else if (!endpoint.IsStartH239()) {
+        PTRACE(1, "H323ASKW\tStartH239Transmission skipped - StartH239 flag is FALSE");
+    } else {
+        PTRACE(1, "H323ASKW\tStartH239Transmission skipped - already started");
     }
 }
 
@@ -9757,9 +10075,48 @@ PBoolean MyH323Connection::OpenExtendedVideoChannel(PBoolean isEncoding, H323Vid
         PTRACE(1, "H323ASKW\t✅ H.239 content channel setup complete - new window will appear on first frame");
         return TRUE;
     } else {
-        // For H.239 content transmission (not implemented yet)
-        PTRACE(1, "H323ASKW\t⚠️  H.239 content transmission not implemented yet");
-        return FALSE;
+        // H.239 content transmission
+        PTRACE(1, "H323ASKW\t🚀 Setting up H.239 content transmission");
+
+#if defined(USE_QT6)
+        // コンテンツ送信先が未設定なら、安全のため送信チャネルを開かない
+        QtVideoManager& qtMgr = QtVideoManager::instance();
+        if (qtMgr.getContentSendTarget().isEmpty()) {
+            PTRACE(1, "H323ASKW\t⚠️  H.239 TX aborted - no content send target selected");
+            return FALSE;
+        }
+#endif
+
+        // 🎬 H.239 TX: 720P (1280x720) at 10fps for high-quality content sharing
+        unsigned txWidth = 1280;
+        unsigned txHeight = 720;
+        unsigned txFps = 10;
+        codec.SetFrameSize(txWidth, txHeight);
+        PTRACE(1, "H323ASKW\tH.239 TX parameters set: " << txWidth << "x" << txHeight << " @" << txFps << "fps");
+        
+        // Create capture device backed by Qt window capture
+        QtContentInputDevice* inputDevice = new QtContentInputDevice();
+        inputDevice->SetFrameSize(txWidth, txHeight);
+        inputDevice->SetFrameRate(txFps);
+        inputDevice->SetColourFormat("YUV420P");
+        if (!inputDevice->Open("QtContent", TRUE)) {
+            PTRACE(1, "H323ASKW\t❌ Failed to open QtContentInputDevice");
+            delete inputDevice;
+            return FALSE;
+        }
+        
+        // Create video channel and attach reader
+        PVideoChannel * channel = new MyContentVideoChannel(this, isEncoding);
+        channel->AttachVideoReader(inputDevice);
+        
+        // Attach the channel to the codec
+        if (!codec.AttachChannel(channel, TRUE)) {
+            PTRACE(1, "H323ASKW\t❌ Failed to attach H.239 content TX channel to codec");
+            return FALSE;
+        }
+        
+        PTRACE(1, "H323ASKW\t✅ H.239 content TX channel attached to codec successfully");
+        return TRUE;
     }
 }
 #endif // H323_H239
@@ -10690,6 +11047,7 @@ PBoolean Qt6VideoOutputDevice::EndFrame()
     // Nothing special needed - frames are already queued
     return true;
 }
+
 
 #endif // USE_QT6
 
