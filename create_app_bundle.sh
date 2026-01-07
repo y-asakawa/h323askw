@@ -29,6 +29,7 @@ BUNDLE_ID="com.h323askw.app"
 # ソースパス (スクリプト位置から相対的に導出)
 CALLGEN_DIR="${SCRIPT_DIR}"
 H323PLUS_DIR="${SCRIPT_DIR}/../h323plus"
+H323PLUS_PLUGINS_DIR="${SCRIPT_DIR}/../h323plus-plugins"
 PTLIB_DIR="${SCRIPT_DIR}/../ptlib"
 
 # Homebrew ディレクトリ (環境変数または自動検出)
@@ -140,6 +141,7 @@ check_prerequisites() {
     log_info "必要なファイルを確認中..."
     log_info "  CALLGEN_DIR: ${CALLGEN_DIR}"
     log_info "  H323PLUS_DIR: ${H323PLUS_DIR}"
+    log_info "  H323PLUS_PLUGINS_DIR: ${H323PLUS_PLUGINS_DIR}"
     log_info "  PTLIB_DIR: ${PTLIB_DIR}"
     log_info "  HOMEBREW_DIR: ${HOMEBREW_DIR}"
     
@@ -196,10 +198,12 @@ check_prerequisites() {
         fi
     done
     
-    # プラグイン
-    if [ ! -f "${H323PLUS_DIR}/plugins/video/H.264/h264_video_pwplugin.dylib" ]; then
-        log_error "H.264 プラグインが見つかりません"
+    # プラグイン（h323plus-pluginsディレクトリから）
+    if [ ! -f "${H323PLUS_PLUGINS_DIR}/H.264/h264_video_pwplugin.dylib" ]; then
+        log_error "H.264 プラグインが見つかりません: ${H323PLUS_PLUGINS_DIR}/H.264/h264_video_pwplugin.dylib"
         missing=1
+    else
+        log_info "  Found H.264 plugin: ${H323PLUS_PLUGINS_DIR}/H.264/h264_video_pwplugin.dylib"
     fi
     
     # アイコン素材
@@ -486,28 +490,35 @@ copy_plugins() {
         cp -R "${HOMEBREW_DIR}/opt/qt/share/qt/plugins/styles/"* "${QT_PLUGINS}/styles/" 2>/dev/null || true
     fi
     
-    # Video codecs (H323plusと同じディレクトリ構造を維持)
+    # Video codecs (h323plus-pluginsディレクトリ構造に合わせる)
     mkdir -p "${PLUGINS}/video/H.264"
     mkdir -p "${PLUGINS}/video/H.263-ffmpeg"
     mkdir -p "${PLUGINS}/video/H.261-vic"
     
-    # H.264 plugin
-    cp "${H323PLUS_DIR}/plugins/video/H.264/h264_video_pwplugin.dylib" "${PLUGINS}/video/H.264/"
+    # H.264 plugin (h323plus-plugins/H.264/から)
+    log_info "  H.264 プラグインをコピー中: ${H323PLUS_PLUGINS_DIR}/H.264/h264_video_pwplugin.dylib"
+    if [ -f "${H323PLUS_PLUGINS_DIR}/H.264/h264_video_pwplugin.dylib" ]; then
+        cp "${H323PLUS_PLUGINS_DIR}/H.264/h264_video_pwplugin.dylib" "${PLUGINS}/video/H.264/"
+        log_info "  ✅ H.264 プラグインをコピーしました"
+    else
+        log_error "  H.264 プラグインが見つかりません"
+        exit 1
+    fi
     
     # H.263-ffmpeg plugin (FFmpeg-based H.263 codec)
-    if [ -f "${H323PLUS_DIR}/plugins/video/H.263-ffmpeg/h263-ffmpeg_video_pwplugin.dylib" ]; then
-        cp "${H323PLUS_DIR}/plugins/video/H.263-ffmpeg/h263-ffmpeg_video_pwplugin.dylib" "${PLUGINS}/video/H.263-ffmpeg/"
-        log_info "  H.263-ffmpeg プラグインをコピーしました"
+    if [ -f "${H323PLUS_PLUGINS_DIR}/H.263-ffmpeg/h263-ffmpeg_video_pwplugin.dylib" ]; then
+        cp "${H323PLUS_PLUGINS_DIR}/H.263-ffmpeg/h263-ffmpeg_video_pwplugin.dylib" "${PLUGINS}/video/H.263-ffmpeg/"
+        log_info "  ✅ H.263-ffmpeg プラグインをコピーしました"
     else
-        log_warn "  H.263-ffmpeg プラグインが見つかりません"
+        log_warn "  H.263-ffmpeg プラグインが見つかりません: ${H323PLUS_PLUGINS_DIR}/H.263-ffmpeg/"
     fi
     
     # H.261-vic plugin
-    if [ -f "${H323PLUS_DIR}/plugins/video/H.261-vic/h261-vic_video_pwplugin.dylib" ]; then
-        cp "${H323PLUS_DIR}/plugins/video/H.261-vic/h261-vic_video_pwplugin.dylib" "${PLUGINS}/video/H.261-vic/"
-        log_info "  H.261-vic プラグインをコピーしました"
+    if [ -f "${H323PLUS_PLUGINS_DIR}/H.261-vic/h261-vic_video_pwplugin.dylib" ]; then
+        cp "${H323PLUS_PLUGINS_DIR}/H.261-vic/h261-vic_video_pwplugin.dylib" "${PLUGINS}/video/H.261-vic/"
+        log_info "  ✅ H.261-vic プラグインをコピーしました"
     else
-        log_warn "  H.261-vic プラグインが見つかりません"
+        log_warn "  H.261-vic プラグインが見つかりません: ${H323PLUS_PLUGINS_DIR}/H.261-vic/"
     fi
     
     # Video input

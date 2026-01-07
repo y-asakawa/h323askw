@@ -1631,6 +1631,7 @@ void H323ASKW::Main()
 #endif
 #ifdef H323_H239
             "  --h239enable         Enable sending and receiving H.239 presentations\n"
+            "  --no-h239            Disable H.239 (enabled by default when built with H.239)\n"
             "  --h239videopattern   Set video pattern to send for H.239, eg. 'Fake', 'Fake/BouncingBoxes' or 'Fake/MovingBlocks'\n"
             "  --h239delay          Delay the start of the H.239 transmission in seconds [1 sec]\n"
             "  --h239duration       Duration the H.239 transmission in seconds [-1 - unlimited]\n"
@@ -1786,9 +1787,13 @@ void H323ASKW::Main()
   }
 
 #ifdef H323_H239
-  if (args.HasOption("h239enable")) {
+  // H.239 はビルド時に有効ならデフォルトで広告する。--no-h239 で明示的に無効化。
+  bool enableH239Caps = !args.HasOption("no-h239");
+  if (enableH239Caps) {
     cout << "Enabling H.239" << endl;
-    if (!listenMode) {
+
+    // CLI で H.239 送信を指示された場合のみ送信側の自動開始設定を行う
+    if (args.HasOption("h239enable") && !listenMode) {
         h323->SetStartH239(true);   // only the calling call generator starts a H.239 channel
 
         int delay = (args.HasOption("h239delay")) ? args.GetOptionString("h239delay").AsInteger() : 1;
@@ -1797,8 +1802,8 @@ void H323ASKW::Main()
         int duration = (args.HasOption("h239duration")) ? args.GetOptionString("h239duration").AsInteger() : -1;
         h323->SetH239Duration(duration);
     }
-    // Make sure H.239 capabilities are advertised in the capability table
-    h323->AddAllExtendedVideoCapabilities(0, P_MAX_INDEX);
+
+    // 能力広告は後段の AddAllCapabilities() に任せる
   } else {
     cout << "Disabling H.239" << endl;
     h323->RemoveCapabilities(PStringArray("H.239"));
@@ -1809,6 +1814,13 @@ void H323ASKW::Main()
   // This includes H.264, H.263, H.261 (video) and audio codecs
   h323->AddAllCapabilities(0, P_MAX_INDEX, "*");
   h323->AddAllUserInputCapabilities(0, P_MAX_INDEX);
+
+#ifdef H323_H239
+  if (enableH239Caps) {
+    // 受信側で H.263 ベースの H.239 を外し、H.264 優先にする（相手 MCU が H.263 を投げると即クローズする対策）
+    h323->RemoveCapabilities(PStringArray("H.239(H.263"));
+  }
+#endif
 
   h323->RemoveCapabilities(args.GetOptionString('D').Lines());
   
@@ -9116,6 +9128,26 @@ void MyH323Connection::StartH239TransmissionTrigger(PTimer &, H323_INT)
 void MyH323Connection::StopH239TransmissionTrigger(PTimer &, H323_INT)
 {
     StopH239Transmission();
+}
+
+PBoolean MyH323Connection::SendH239GenericResponse(PBoolean response)
+{
+    // H.239レスポンスで ChannelId=0 を返さないよう、必要なら受信チャネル番号を補完する
+    H239Control * ctrl = (H239Control *)const_cast<H323Capabilities &>(GetRemoteCapabilities())
+                              .FindCapability("H.239 Control");
+    if (ctrl) {
+        unsigned rxChan = ctrl->GetChannelNum(H323Capability::e_Receive);
+        if (rxChan == 0) {
+            int requested = ctrl->GetRequestedChanNum();
+            if (requested <= 0)
+                requested = ctrl->GetChannelNum(H323Capability::e_Transmit);
+            if (requested > 0) {
+                ctrl->SetChannelNum((unsigned)requested, H323Capability::e_Receive);
+                PTRACE(2, "H323ASKW\tH.239 RX channel id missing; using requested/transmit channel " << requested);
+            }
+        }
+    }
+    return H323Connection::SendH239GenericResponse(response);
 }
 
 void MyH323Connection::OnEstablished()

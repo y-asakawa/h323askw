@@ -506,6 +506,7 @@ class MyH323Connection : public H323Connection
     void StopH239Transmission();
     PDECLARE_NOTIFIER(PTimer, MyH323Connection, StartH239TransmissionTrigger);
     PDECLARE_NOTIFIER(PTimer, MyH323Connection, StopH239TransmissionTrigger);
+    virtual PBoolean SendH239GenericResponse(PBoolean response);
     virtual PBoolean OnInitialFlowRestriction(H323Channel & channel);
 	virtual PBoolean OpenExtendedVideoChannel(PBoolean isEncoding, H323VideoCodec & codec);
 #endif
