@@ -1861,6 +1861,27 @@ void QtVideoManager::stopContentCapture()
     m_contentWindowId = kCGNullWindowID;
     m_contentSendTarget.clear();
     
+#ifndef H323_H239
+    PTRACE(1, "QtVideo\tH.239 not compiled in this build - skipping content TX stop");
+#else
+    // Stop H.239 transmission so remote can take the presentation token.
+    MyH323Connection* conn = getH323Connection();
+    MyH323EndPoint* ep = getH323Endpoint();
+    PTRACE(1, "QtVideo\tH.239 TX stop preflight - endpoint=" << (void*)ep << " conn=" << (void*)conn);
+    if (conn) {
+        PTRACE(1, "QtVideo\tRequesting H.239 transmission stop");
+        conn->StopH239Transmission();
+    } else {
+        PTRACE(1, "QtVideo\tNo active connection - cannot stop H.239 transmission");
+    }
+    if (ep) {
+        ep->SetStartH239(false);
+        PTRACE(1, "QtVideo\tH.239 start flag cleared on endpoint");
+    } else {
+        PTRACE(1, "QtVideo\tEndpoint not set - cannot clear H.239 start flag");
+    }
+#endif
+
     // ローカルプレビューウィンドウを閉じる
     closeLocalContentPreview();
     

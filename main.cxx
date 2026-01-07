@@ -7540,6 +7540,20 @@ void MyH323Connection::OnClosedLogicalChannel(const H323Channel & channel)
         m_contentChannelActive = FALSE;
         m_contentSessionID = 0;
         QtVideoManager::instance().setContentAvailable(false);
+        if (channel.GetDirection() == H323Channel::IsTransmitter && m_haveStartedH239) {
+            m_haveStartedH239 = false;
+            PTRACE(1, "H323ASKW\tH.239 TX state cleared after channel close");
+        }
+
+        // リモートが再度 H.239 を要求できるように、H.239 Control のチャネル番号をリセットする
+        H239Control * ctrl = (H239Control *)const_cast<H323Capabilities &>(GetRemoteCapabilities())
+                                   .FindCapability("H.239 Control");
+        if (ctrl) {
+            ctrl->SetChannelNum(0, H323Capability::e_Receive);
+            ctrl->SetChannelNum(0, H323Capability::e_Transmit);
+            ctrl->SetRequestedChanNum(0);
+            PTRACE(2, "H323ASKW\tH.239 control state reset after content channel close");
+        }
     }
 #endif
 
@@ -9114,6 +9128,10 @@ void MyH323Connection::StopH239Transmission()
   if (endpoint.IsStartH239()) {
     PTRACE(1, "Stopping H.239");
     CloseH239Channel();
+  }
+  if (m_haveStartedH239) {
+    m_haveStartedH239 = false;
+    PTRACE(1, "H323ASKW\tH.239 start state cleared");
   }
 }
 
