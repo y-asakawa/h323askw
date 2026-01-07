@@ -5537,9 +5537,11 @@ PBoolean MyH323RTPChannel::OnSendingPDU(H245_H2250LogicalChannelParameters & par
     if (result && !receiver && !param.HasOptionalField(H245_H2250LogicalChannelParameters::e_mediaChannel)) {
         unsigned sessionID = GetSessionID();
         
+        PTRACE(1, "H323ASKW\t🔍 OnSendingPDU: sessionID=" << sessionID << " receiver=" << receiver << " hasMediaChannel=" << param.HasOptionalField(H245_H2250LogicalChannelParameters::e_mediaChannel));
+        
         // H.239コンテンツチャンネル（session 32）かどうかを確認
         if (sessionID >= 3) {  // Session 1=audio, 2=video, 3+=extended video (H.239)
-            PTRACE(1, "H323ASKW\t⚠️  H.239 TX FIX: mediaChannel missing in OLC - adding it manually");
+            PTRACE(1, "H323ASKW\t⚠️  H.239 TX FIX: mediaChannel missing in OLC - adding it manually (session " << sessionID << ")");
             
             // mediaControlChannelが既に設定されている場合、そこからデータポートを推定
             if (param.HasOptionalField(H245_H2250LogicalChannelParameters::e_mediaControlChannel)) {
@@ -5567,7 +5569,7 @@ PBoolean MyH323RTPChannel::OnSendingPDU(H245_H2250LogicalChannelParameters & par
                         mediaIPAddr.m_network = ipAddr.m_network;
                         mediaIPAddr.m_tsapIdentifier = dataPort;
                         
-                        PTRACE(1, "H323ASKW\t✅ H.239 TX FIX: mediaChannel successfully added");
+                        PTRACE(1, "H323ASKW\t✅ H.239 TX FIX: mediaChannel successfully added - sending OLC with mediaChannel=" << dataPort);
                     }
                 }
             } else {
