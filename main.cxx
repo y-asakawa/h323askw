@@ -5474,6 +5474,52 @@ PBoolean MyH323RTPChannel::OnReceivedPDU(const H245_H2250LogicalChannelParameter
 {
     PTRACE(3, "H323ASKW\t🔧 MyH323RTPChannel::OnReceivedPDU called");
     
+    // ★ H.239 FIX: mediaChannel が指定されていない場合の対処 ★
+    // 一部のH.323実装（特にH.239）では、mediaChannelを省略してmediaControlChannelのみを送信する場合がある
+    // この場合、mediaChannelはmediaControlChannelのポート番号-1と推定する（RFC 1889/3550の慣例）
+    if (receiver && 
+        param.HasOptionalField(H245_H2250LogicalChannelParameters::e_mediaControlChannel) &&
+        !param.HasOptionalField(H245_H2250LogicalChannelParameters::e_mediaChannel)) {
+        
+        PTRACE(1, "H323ASKW\t⚠️  H.239 FIX: mediaChannel missing in OLC - deriving from mediaControlChannel");
+        
+        // mediaControlChannelから情報を取得
+        const H245_TransportAddress & controlAddr = param.m_mediaControlChannel;
+        if (controlAddr.GetTag() == H245_TransportAddress::e_unicastAddress) {
+            const H245_UnicastAddress & uniAddr = controlAddr;
+            if (uniAddr.GetTag() == H245_UnicastAddress::e_iPAddress) {
+                const H245_UnicastAddress_iPAddress & ipAddr = uniAddr;
+                
+                // コントロールポート番号から-1してデータポート番号を推定
+                WORD controlPort = ipAddr.m_tsapIdentifier;
+                WORD dataPort = controlPort - 1;
+                
+                PTRACE(1, "H323ASKW\t🔧 Derived mediaChannel port: " << dataPort << " from mediaControlChannel port: " << controlPort);
+                
+                // paramのコピーを作成してmediaChannelを追加
+                H245_H2250LogicalChannelParameters modifiedParam = param;
+                
+                // mediaChannelを構築
+                modifiedParam.IncludeOptionalField(H245_H2250LogicalChannelParameters::e_mediaChannel);
+                H245_TransportAddress & mediaAddr = modifiedParam.m_mediaChannel;
+                mediaAddr.SetTag(H245_TransportAddress::e_unicastAddress);
+                H245_UnicastAddress & mediaUniAddr = mediaAddr;
+                mediaUniAddr.SetTag(H245_UnicastAddress::e_iPAddress);
+                H245_UnicastAddress_iPAddress & mediaIPAddr = mediaUniAddr;
+                
+                // IPアドレスとポートを設定
+                // PASN_OctetStringのコピーには代入演算子を使用
+                mediaIPAddr.m_network = ipAddr.m_network;
+                mediaIPAddr.m_tsapIdentifier = dataPort;
+                
+                PTRACE(1, "H323ASKW\t✅ H.239 FIX: mediaChannel added to parameters");
+                
+                // 修正されたパラメータで基底クラスを呼び出す
+                return H323_RTPChannel::OnReceivedPDU(modifiedParam, errorCode);
+            }
+        }
+    }
+    
     // Call base class implementation safely
     return H323_RTPChannel::OnReceivedPDU(param, errorCode);
 }
@@ -5484,6 +5530,51 @@ PBoolean MyH323RTPChannel::OnSendingPDU(H245_H2250LogicalChannelParameters & par
     
     // Call base class implementation - use its PayloadType (not remote's)
     PBoolean result = H323_RTPChannel::OnSendingPDU(param);
+    
+    // ★ H.239 FIX: mediaChannelが設定されていない場合に明示的に設定 ★
+    // 一部のH.323実装では、extendedVideoCapability（H.239）の場合にmediaChannelが
+    // 正しく設定されないことがある。この場合、手動でmediaChannelを設定する。
+    if (result && !receiver && !param.HasOptionalField(H245_H2250LogicalChannelParameters::e_mediaChannel)) {
+        unsigned sessionID = GetSessionID();
+        
+        // H.239コンテンツチャンネル（session 32）かどうかを確認
+        if (sessionID >= 3) {  // Session 1=audio, 2=video, 3+=extended video (H.239)
+            PTRACE(1, "H323ASKW\t⚠️  H.239 TX FIX: mediaChannel missing in OLC - adding it manually");
+            
+            // mediaControlChannelが既に設定されている場合、そこからデータポートを推定
+            if (param.HasOptionalField(H245_H2250LogicalChannelParameters::e_mediaControlChannel)) {
+                const H245_TransportAddress & controlAddr = param.m_mediaControlChannel;
+                if (controlAddr.GetTag() == H245_TransportAddress::e_unicastAddress) {
+                    const H245_UnicastAddress & uniAddr = controlAddr;
+                    if (uniAddr.GetTag() == H245_UnicastAddress::e_iPAddress) {
+                        const H245_UnicastAddress_iPAddress & ipAddr = uniAddr;
+                        
+                        // コントロールポート番号から-1してデータポート番号を推定
+                        WORD controlPort = ipAddr.m_tsapIdentifier;
+                        WORD dataPort = controlPort - 1;
+                        
+                        PTRACE(1, "H323ASKW\t🔧 Derived mediaChannel port: " << dataPort << " from mediaControlChannel port: " << controlPort);
+                        
+                        // mediaChannelを設定
+                        param.IncludeOptionalField(H245_H2250LogicalChannelParameters::e_mediaChannel);
+                        H245_TransportAddress & mediaAddr = param.m_mediaChannel;
+                        mediaAddr.SetTag(H245_TransportAddress::e_unicastAddress);
+                        H245_UnicastAddress & mediaUniAddr = mediaAddr;
+                        mediaUniAddr.SetTag(H245_UnicastAddress::e_iPAddress);
+                        H245_UnicastAddress_iPAddress & mediaIPAddr = mediaUniAddr;
+                        
+                        // IPアドレスとポートを設定（mediaControlChannelと同じIPアドレス）
+                        mediaIPAddr.m_network = ipAddr.m_network;
+                        mediaIPAddr.m_tsapIdentifier = dataPort;
+                        
+                        PTRACE(1, "H323ASKW\t✅ H.239 TX FIX: mediaChannel successfully added");
+                    }
+                }
+            } else {
+                PTRACE(1, "H323ASKW\t⚠️  H.239 TX FIX: mediaControlChannel not yet set, cannot derive mediaChannel");
+            }
+        }
+    }
     
     // ★★★ NOTE: We use OUR OLC's PayloadType (not remote's) ★★★
     // Our TX OLC declares the PT we will use to SEND

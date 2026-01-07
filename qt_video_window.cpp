@@ -1448,6 +1448,7 @@ QtVideoManager& QtVideoManager::getInstance()
 QtVideoManager::QtVideoManager()
     : m_mainWindow(nullptr)
     , m_contentWindow(nullptr)
+    , m_localContentWindow(nullptr)
     , m_endpoint(nullptr)
     , m_initialized(false)
     , m_lastContentWidth(1280)
@@ -1513,6 +1514,11 @@ void QtVideoManager::shutdown()
         m_contentWindow->close();
         delete m_contentWindow;
         m_contentWindow = nullptr;
+    }
+    if (m_localContentWindow) {
+        m_localContentWindow->close();
+        delete m_localContentWindow;
+        m_localContentWindow = nullptr;
     }
 
     m_initialized = false;
@@ -1852,6 +1858,17 @@ void QtVideoManager::stopContentCapture()
 {
     PTRACE(2, "QtVideo\tStopping content capture");
     m_contentCaptureTimer.stop();
+    m_contentWindowId = kCGNullWindowID;
+    m_contentSendTarget.clear();
+    
+    // ローカルプレビューウィンドウを閉じる
+    closeLocalContentPreview();
+    
+    // メインウィンドウのボタンテキストをリセット
+    if (m_mainWindow && m_mainWindow->m_contentSendButton) {
+        m_mainWindow->m_contentSendButton->setText("Send Content");
+        m_mainWindow->m_contentSendButton->setToolTip("Select a window to share via H.239");
+    }
 }
 
 // Timer callback - runs in main thread periodically to capture screen
@@ -1970,6 +1987,11 @@ void QtVideoManager::captureContentFrame()
             vPlane[uvIdx] = static_cast<unsigned char>(std::clamp(v, 0, 255));
         }
     }
+    
+    // ローカルプレビューウィンドウを更新
+    QByteArray frameCopy = m_lastCapturedFrame;  // mutexの外でコピー
+    locker.unlock();
+    updateLocalContentPreview(frameCopy, w, h);
 }
 
 void QtVideoManager::captureContentFrameNow()
@@ -2521,12 +2543,25 @@ void QtVideoMainWindow::onContentWindowClicked()
 
 void QtVideoMainWindow::onContentSendClicked()
 {
-    QT_TRACE(1, "Content send button clicked - selecting window to share");
+    QT_TRACE(1, "Content send button clicked");
 
     if (!m_h323Connection) {
         setConnectionStatus("Connect first to send content");
         return;
     }
+
+    // コンテンツ送信中の場合は停止
+    if (QtVideoManager::instance().isContentSending()) {
+        QT_TRACE(1, "Stopping content send");
+        QtVideoManager::instance().stopContentCapture();
+        m_contentSendButton->setText("Send Content");
+        m_contentSendButton->setToolTip("Select a window to share via H.239");
+        setConnectionStatus("Content sharing stopped");
+        return;
+    }
+
+    // コンテンツ送信開始
+    QT_TRACE(1, "Selecting window to share");
 
 #ifdef Q_OS_MAC
     QStringList windowLabels;
@@ -2622,6 +2657,10 @@ void QtVideoMainWindow::onContentSendClicked()
 #endif
 
     QtVideoManager::instance().requestContentSend(selected, selectedId);
+    
+    // ボタンテキストを変更
+    m_contentSendButton->setText("Stop Content");
+    m_contentSendButton->setToolTip("Stop sharing content");
     setConnectionStatus("Content source selected: " + selected);
     QMessageBox::information(this,
                              tr("Content source set"),
@@ -2670,6 +2709,30 @@ bool QtVideoMainWindow::isClearHistoryItem(int index) const
         return false;
     QVariant marker = m_addressCombo->itemData(index, Qt::UserRole + 1);
     return marker.isValid() && marker.toBool();
+}
+
+void QtVideoManager::updateLocalContentPreview(const QByteArray& frame, unsigned width, unsigned height)
+{
+    if (!m_localContentWindow) {
+        m_localContentWindow = new QtContentWindow();
+        m_localContentWindow->setWindowTitle("Local Content (Sending)");
+        m_localContentWindow->show();
+    }
+    m_localContentWindow->enqueueContentFrame(
+        reinterpret_cast<const unsigned char*>(frame.constData()),
+        width, 
+        height, 
+        static_cast<size_t>(frame.size())
+    );
+}
+
+void QtVideoManager::closeLocalContentPreview()
+{
+    if (m_localContentWindow) {
+        m_localContentWindow->close();
+        delete m_localContentWindow;
+        m_localContentWindow = nullptr;
+    }
 }
 
 #endif // USE_QT6

@@ -619,6 +619,21 @@ public:
     void captureContentFrameNow();   // Called by encoder - returns buffered frame
     bool getLatestContentFrame(QByteArray& outFrame, unsigned& width, unsigned& height);
     void clearContentWindowPointer() { m_contentWindow = nullptr; }
+    
+    /**
+     * @brief コンテンツ送信状態を確認
+     */
+    bool isContentSending() const { return !m_contentSendTarget.isEmpty(); }
+    
+    /**
+     * @brief ローカルコンテンツプレビューウィンドウを開く/更新
+     */
+    void updateLocalContentPreview(const QByteArray& frame, unsigned width, unsigned height);
+    
+    /**
+     * @brief ローカルコンテンツプレビューウィンドウを閉じる
+     */
+    void closeLocalContentPreview();
 
     /**
      * @brief メインウィンドウを取得
@@ -661,7 +676,8 @@ private:
     void setupSignalConnections();
 
     QtVideoMainWindow* m_mainWindow;
-    QtContentWindow* m_contentWindow;
+    QtContentWindow* m_contentWindow;  // リモートコンテンツ受信用
+    QtContentWindow* m_localContentWindow;  // ローカルコンテンツ送信プレビュー用
     class MyH323EndPoint* m_endpoint;
     bool m_initialized;
     int m_lastContentWidth;
