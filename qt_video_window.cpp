@@ -5,18 +5,143 @@
 
 #ifdef USE_QT6
 
+#ifdef nil
+#undef nil
+#endif
+
 #include "qt_video_window.h"
 #include <QDebug>
 #include <QThread>
 #include <QCoreApplication>
 #include <QPainterPath>
 #include <QPointer>
+#include <QList>
 #include <QResizeEvent>
+#ifdef Q_OS_MAC
+#include <CoreGraphics/CoreGraphics.h>
+#include <dlfcn.h>
+#  ifdef nil
+#    undef nil
+#  endif
+#endif
 #include <atomic>
 #include <cmath>
 #include <cstdlib>  // for _exit()
 #include <algorithm>
 #include "main.h"
+
+#ifndef kCGNullWindowID
+#define kCGNullWindowID 0
+#endif
+
+#ifdef Q_OS_MAC
+// Convert CGImageRef to QImage using public CoreGraphics API
+static QImage QImageFromCGImageRef(CGImageRef image)
+{
+    if (!image) {
+        return QImage();
+    }
+
+    const size_t width = CGImageGetWidth(image);
+    const size_t height = CGImageGetHeight(image);
+    if (width == 0 || height == 0) {
+        return QImage();
+    }
+
+    QImage img(static_cast<int>(width), static_cast<int>(height), QImage::Format_ARGB32_Premultiplied);
+    if (img.isNull()) {
+        return QImage();
+    }
+
+    CGContextRef ctx = CGBitmapContextCreate(
+        img.bits(),
+        width,
+        height,
+        8,
+        static_cast<size_t>(img.bytesPerLine()),
+        CGImageGetColorSpace(image),
+        kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Host);
+
+    if (!ctx) {
+        return QImage();
+    }
+
+    CGContextDrawImage(ctx, CGRectMake(0, 0, width, height), image);
+    CGContextRelease(ctx);
+    return img;
+}
+
+// macOS 15 SDK marks CGWindowListCreateImage unavailable; resolve it dynamically.
+static CGImageRef CallCGWindowListCreateImage(CGRect bounds,
+                                              CGWindowListOption listOpts,
+                                              CGWindowID windowID,
+                                              CGWindowImageOption opts)
+{
+    using CGWindowListCreateImageFunc =
+        CGImageRef (*)(CGRect, CGWindowListOption, CGWindowID, CGWindowImageOption);
+    static CGWindowListCreateImageFunc func = nullptr;
+    static bool resolved = false;
+
+    if (!resolved) {
+        // Try RTLD_DEFAULT first; CoreGraphics is already loaded in most cases.
+        func = reinterpret_cast<CGWindowListCreateImageFunc>(
+            dlsym(RTLD_DEFAULT, "CGWindowListCreateImage"));
+        if (!func) {
+            void* handle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY);
+            if (handle) {
+                func = reinterpret_cast<CGWindowListCreateImageFunc>(
+                    dlsym(handle, "CGWindowListCreateImage"));
+            }
+        }
+        resolved = true;
+    }
+
+    if (!func) {
+        PTRACE(1, "QtVideo\tCGWindowListCreateImage symbol not available (macOS 15 SDK); returning null");
+        return nullptr;
+    }
+
+    return func(bounds, listOpts, windowID, opts);
+}
+
+// Request/verify Screen Recording permission to avoid black frames
+static bool EnsureScreenCaptureAccess()
+{
+    using ScreenCaptureAccessFunc = bool (*)(void);
+
+    static bool checked = false;
+    static bool allowed = true;
+
+    if (checked)
+        return allowed;
+
+    checked = true;
+
+    ScreenCaptureAccessFunc preflight = reinterpret_cast<ScreenCaptureAccessFunc>(
+        dlsym(RTLD_DEFAULT, "CGPreflightScreenCaptureAccess"));
+    ScreenCaptureAccessFunc request = reinterpret_cast<ScreenCaptureAccessFunc>(
+        dlsym(RTLD_DEFAULT, "CGRequestScreenCaptureAccess"));
+
+    if (!preflight) {
+        // Older SDKs may not have these symbols; assume allowed and proceed
+        return allowed;
+    }
+
+    allowed = preflight();
+    if (!allowed && request) {
+        allowed = request();
+    }
+
+    if (!allowed) {
+        PTRACE(1, "QtVideo\tScreen Recording permission denied; H.239 content capture will be black. "
+                   "Enable screen recording for this app in macOS Privacy & Security.");
+    } else {
+        PTRACE(2, "QtVideo\tScreen Recording permission granted for content capture");
+    }
+
+    return allowed;
+}
+#endif
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -1328,6 +1453,7 @@ QtVideoManager::QtVideoManager()
     , m_lastContentWidth(1280)
     , m_lastContentHeight(720)
     , m_contentAvailable(false)
+    , m_contentWindowId(kCGNullWindowID)
     , m_contentSendTarget()
     , m_makeCallCb(nullptr)
     , m_makeCallUserData(nullptr)
@@ -1690,12 +1816,18 @@ void QtVideoManager::openContentWindow()
     }
 }
 
-void QtVideoManager::startContentCapture(const QString& targetTitle)
+void QtVideoManager::startContentCapture(CGWindowID windowId, const QString& label)
 {
-    m_contentSendTarget = targetTitle;
-    PTRACE(2, "QtVideo\tContent capture enabled for target=" << targetTitle.toStdString());
+    m_contentWindowId = windowId;
+    m_contentSendTarget = label;
+    PTRACE(2, "QtVideo\tContent capture enabled for target=" << label.toStdString()
+           << " (windowId=" << windowId << ")");
     setContentAvailable(true);
     
+    // Reset any previous timer connections to avoid duplicate callbacks
+    m_contentCaptureTimer.stop();
+    m_contentCaptureTimer.disconnect();
+
     // Start periodic frame capture in main thread using timer
     m_contentCaptureTimer.setInterval(100); // 10fps (100ms interval)
     QObject::connect(&m_contentCaptureTimer, &QTimer::timeout, [this]() { this->captureContentFrame(); });
@@ -1725,99 +1857,117 @@ void QtVideoManager::stopContentCapture()
 // Timer callback - runs in main thread periodically to capture screen
 void QtVideoManager::captureContentFrame()
 {
-    if (!m_contentSendTarget.isEmpty()) {
-        // This runs in main thread, safe to use Qt GUI operations
-        QWindow* targetWin = nullptr;
-        const auto wins = QGuiApplication::topLevelWindows();
-        for (auto* w : wins) {
-            if (w && w->title() == m_contentSendTarget) {
-                targetWin = w;
-                break;
-            }
-        }
-        
-        QScreen* screen = QGuiApplication::primaryScreen();
-        if (!screen) return;
-        
-        QPixmap grab;
-        if (targetWin) {
-            grab = screen->grabWindow(targetWin->winId());
-        } else {
-            grab = screen->grabWindow(0);
-        }
-        
-        QImage img = grab.toImage().convertToFormat(QImage::Format_RGB32);
-        if (img.isNull()) return;
-        
-        // Scale to 720P (1280x720)
-        // 🎬 HIGH QUALITY: Use 720P for better content sharing experience
-        // H.264 encoder expects exactly 1280x720, so we must provide that size
-        const int targetW = 1280;
-        const int targetH = 720;
-        img = img.scaled(targetW, targetH, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-        
-        int w = img.width() & ~1;
-        int h = img.height() & ~1;
-        if (img.width() != w || img.height() != h) {
-            img = img.copy(0, 0, w, h);
-        }
-        if (w < 16 || h < 16) return;
-        
-        PTRACE(4, "QtVideo\tCaptured " << w << "x" << h << " frame in main thread");
+    if (m_contentSendTarget.isEmpty() && m_contentWindowId == kCGNullWindowID) {
+        return;
+    }
 
-        QMutexLocker locker(&m_contentFrameMutex);
+    QImage img;
 
-        m_captureWidth = w;
-        m_captureHeight = h;
+#ifdef Q_OS_MAC
+    const CGWindowID targetId = m_contentWindowId;
+    const CGWindowImageOption imgOpts = kCGWindowImageBoundsIgnoreFraming | kCGWindowImageShouldBeOpaque;
+    const CGWindowListOption listOpts = (targetId == kCGNullWindowID)
+        ? kCGWindowListOptionOnScreenOnly
+        : kCGWindowListOptionIncludingWindow;
 
-        // RGB32 → YUV420P conversion
-        const int ySize = w * h;
-        const int uvSize = (w * h) / 4;
-        m_lastCapturedFrame.resize(ySize + uvSize * 2);
-        unsigned char* yuv = reinterpret_cast<unsigned char*>(m_lastCapturedFrame.data());
-        unsigned char* yPlane = yuv;
-        unsigned char* uPlane = yuv + ySize;
-        unsigned char* vPlane = yuv + ySize + uvSize;
-        
-        const uchar* rgb = img.bits();
-        const int stride = img.bytesPerLine();
-        
-        // Convert Y plane
-        for (int j = 0; j < h; j++) {
-            for (int i = 0; i < w; i++) {
-                const int rgbIdx = j * stride + i * 4;
-                const int r = rgb[rgbIdx + 2];
-                const int g = rgb[rgbIdx + 1];
-                const int b = rgb[rgbIdx + 0];
-                
-                int y = static_cast<int>(0.257 * r + 0.504 * g + 0.098 * b + 16);
-                yPlane[j * w + i] = static_cast<unsigned char>(std::clamp(y, 0, 255));
-            }
+    if (!EnsureScreenCaptureAccess()) {
+        // Permission not granted; keep sending black frames (handled by fallback)
+        return;
+    }
+
+    // CGRectInfinite captures the full desktop; CGRectNull with includingWindow captures only the target window
+    CGImageRef cgImg = (targetId == kCGNullWindowID)
+        ? CallCGWindowListCreateImage(CGRectInfinite, listOpts, kCGNullWindowID, imgOpts)
+        : CallCGWindowListCreateImage(CGRectNull, listOpts, targetId, imgOpts);
+
+    if (cgImg) {
+        img = QImageFromCGImageRef(cgImg).convertToFormat(QImage::Format_RGB32);
+        CGImageRelease(cgImg);
+    } else {
+        PTRACE(1, "QtVideo\tFailed to capture CGWindow image for windowId=" << targetId
+                  << " (no screen recording permission or invalid window)");
+        return;
+    }
+#else
+    QScreen* screen = QGuiApplication::primaryScreen();
+    if (!screen) return;
+    QPixmap grab = screen->grabWindow(0);
+    img = grab.toImage().convertToFormat(QImage::Format_RGB32);
+    if (img.isNull()) return;
+#endif
+
+    if (img.isNull()) {
+        return;
+    }
+
+    // Scale to 720P (1280x720)
+    // 🎬 HIGH QUALITY: Use 720P for better content sharing experience
+    // H.264 encoder expects exactly 1280x720, so we must provide that size
+    const int targetW = 1280;
+    const int targetH = 720;
+    img = img.scaled(targetW, targetH, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    
+    int w = img.width() & ~1;
+    int h = img.height() & ~1;
+    if (img.width() != w || img.height() != h) {
+        img = img.copy(0, 0, w, h);
+    }
+    if (w < 16 || h < 16) return;
+    
+    PTRACE(4, "QtVideo\tCaptured " << w << "x" << h << " frame in main thread");
+
+    QMutexLocker locker(&m_contentFrameMutex);
+
+    m_captureWidth = w;
+    m_captureHeight = h;
+
+    // RGB32 → YUV420P conversion
+    const int ySize = w * h;
+    const int uvSize = (w * h) / 4;
+    m_lastCapturedFrame.resize(ySize + uvSize * 2);
+    unsigned char* yuv = reinterpret_cast<unsigned char*>(m_lastCapturedFrame.data());
+    unsigned char* yPlane = yuv;
+    unsigned char* uPlane = yuv + ySize;
+    unsigned char* vPlane = yuv + ySize + uvSize;
+    
+    const uchar* rgb = img.bits();
+    const int stride = img.bytesPerLine();
+    
+    // Convert Y plane
+    for (int j = 0; j < h; j++) {
+        for (int i = 0; i < w; i++) {
+            const int rgbIdx = j * stride + i * 4;
+            const int r = rgb[rgbIdx + 2];
+            const int g = rgb[rgbIdx + 1];
+            const int b = rgb[rgbIdx + 0];
+            
+            int y = static_cast<int>(0.257 * r + 0.504 * g + 0.098 * b + 16);
+            yPlane[j * w + i] = static_cast<unsigned char>(std::clamp(y, 0, 255));
         }
-        
-        // Convert UV planes (subsampled 2x2)
-        for (int j = 0; j < h; j += 2) {
-            for (int i = 0; i < w; i += 2) {
-                int rSum = 0, gSum = 0, bSum = 0;
-                for (int dy = 0; dy < 2 && (j + dy) < h; dy++) {
-                    for (int dx = 0; dx < 2 && (i + dx) < w; dx++) {
-                        const int rgbIdx = (j + dy) * stride + (i + dx) * 4;
-                        rSum += rgb[rgbIdx + 2];
-                        gSum += rgb[rgbIdx + 1];
-                        bSum += rgb[rgbIdx + 0];
-                    }
+    }
+    
+    // Convert UV planes (subsampled 2x2)
+    for (int j = 0; j < h; j += 2) {
+        for (int i = 0; i < w; i += 2) {
+            int rSum = 0, gSum = 0, bSum = 0;
+            for (int dy = 0; dy < 2 && (j + dy) < h; dy++) {
+                for (int dx = 0; dx < 2 && (i + dx) < w; dx++) {
+                    const int rgbIdx = (j + dy) * stride + (i + dx) * 4;
+                    rSum += rgb[rgbIdx + 2];
+                    gSum += rgb[rgbIdx + 1];
+                    bSum += rgb[rgbIdx + 0];
                 }
-                rSum /= 4;
-                gSum /= 4;
-                bSum /= 4;
-                
-                int u = static_cast<int>(-0.148 * rSum - 0.291 * gSum + 0.439 * bSum + 128);
-                int v = static_cast<int>(0.439 * rSum - 0.368 * gSum - 0.071 * bSum + 128);
-                
-                const int uvIdx = (j / 2) * (w / 2) + (i / 2);
-                uPlane[uvIdx] = static_cast<unsigned char>(std::clamp(u, 0, 255));
-                vPlane[uvIdx] = static_cast<unsigned char>(std::clamp(v, 0, 255));
             }
+            rSum /= 4;
+            gSum /= 4;
+            bSum /= 4;
+            
+            int u = static_cast<int>(-0.148 * rSum - 0.291 * gSum + 0.439 * bSum + 128);
+            int v = static_cast<int>(0.439 * rSum - 0.368 * gSum - 0.071 * bSum + 128);
+            
+            const int uvIdx = (j / 2) * (w / 2) + (i / 2);
+            uPlane[uvIdx] = static_cast<unsigned char>(std::clamp(u, 0, 255));
+            vPlane[uvIdx] = static_cast<unsigned char>(std::clamp(v, 0, 255));
         }
     }
 }
@@ -1873,17 +2023,19 @@ bool QtVideoManager::getLatestContentFrame(QByteArray& outFrame, unsigned& width
     return true;
 }
 
-void QtVideoManager::requestContentSend(const QString& targetTitle)
+void QtVideoManager::requestContentSend(const QString& label, CGWindowID windowId)
 {
-    m_contentSendTarget = targetTitle;
-    PTRACE(1, "QtVideo\tContent send target set to: " << targetTitle.toStdString());
+    m_contentWindowId = windowId;
+    m_contentSendTarget = label;
+    PTRACE(1, "QtVideo\tContent send target set to: " << label.toStdString()
+           << " (windowId=" << windowId << ")");
     
     if (m_mainWindow) {
-        m_mainWindow->setConnectionStatus("Content source selected: " + targetTitle);
+        m_mainWindow->setConnectionStatus("Content source selected: " + label);
     }
     
     // コンテンツキャプチャ開始
-    startContentCapture(targetTitle);
+    startContentCapture(windowId, label);
     
 #ifndef H323_H239
     PTRACE(1, "QtVideo\tH.239 not compiled in this build - cannot start content TX");
@@ -2376,29 +2528,79 @@ void QtVideoMainWindow::onContentSendClicked()
         return;
     }
 
-    QStringList windowTitles;
-    // 取得できるトップレベルウインドウのタイトルを列挙
-    const auto windows = QGuiApplication::topLevelWindows();
-    for (auto* win : windows) {
-        if (win) {
-            const QString title = win->title();
-            if (!title.isEmpty()) {
-                windowTitles << title;
+#ifdef Q_OS_MAC
+    QStringList windowLabels;
+    QList<CGWindowID> windowIds;
+
+    // Always offer full desktop capture
+    windowLabels << tr("Entire Screen");
+    windowIds << kCGNullWindowID;
+
+    CFArrayRef windowList = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        kCGNullWindowID);
+
+    if (windowList) {
+        const CFIndex count = CFArrayGetCount(windowList);
+        for (CFIndex i = 0; i < count; ++i) {
+            CFDictionaryRef info = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(windowList, i));
+            if (!info) continue;
+
+            CFNumberRef windowIdRef = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowNumber));
+            CFStringRef ownerRef = static_cast<CFStringRef>(CFDictionaryGetValue(info, kCGWindowOwnerName));
+            CFStringRef nameRef = static_cast<CFStringRef>(CFDictionaryGetValue(info, kCGWindowName));
+            CFNumberRef layerRef = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowLayer));
+
+            if (!windowIdRef || !ownerRef) {
+                continue;
             }
+
+            // Skip non-app layers (menubar, dock, etc.)
+            int layer = 0;
+            if (layerRef) {
+                CFNumberGetValue(layerRef, kCFNumberIntType, &layer);
+                if (layer != 0)
+                    continue;
+            }
+
+            CGWindowID winId = kCGNullWindowID;
+            if (!CFNumberGetValue(windowIdRef, kCGWindowIDCFNumberType, &winId)) {
+                continue;
+            }
+
+            QString owner = QString::fromCFString(ownerRef).trimmed();
+            QString title = nameRef ? QString::fromCFString(nameRef).trimmed() : QString();
+            if (title.isEmpty())
+                title = tr("(Untitled)");
+
+            QString label = owner;
+            if (!title.isEmpty())
+                label += " — " + title;
+
+            windowLabels << label;
+            windowIds << winId;
         }
+        CFRelease(windowList);
     }
 
     // フォールバック
-    if (windowTitles.isEmpty()) {
-        windowTitles << "Current Application Window";
+    if (windowLabels.isEmpty()) {
+        windowLabels << tr("Entire Screen");
+        windowIds << kCGNullWindowID;
     }
+#else
+    QStringList windowLabels;
+    QList<CGWindowID> windowIds;
+    windowLabels << tr("Entire Screen");
+    windowIds << 0;
+#endif
 
     bool ok = false;
     const QString selected = QInputDialog::getItem(
         this,
         tr("Select content window"),
         tr("Window to share:"),
-        windowTitles,
+        windowLabels,
         0,
         false,
         &ok
@@ -2409,11 +2611,21 @@ void QtVideoMainWindow::onContentSendClicked()
         return;
     }
 
-    QtVideoManager::instance().requestContentSend(selected);
+#ifdef Q_OS_MAC
+    CGWindowID selectedId = kCGNullWindowID;
+    int idx = windowLabels.indexOf(selected);
+    if (idx >= 0 && idx < windowIds.size()) {
+        selectedId = windowIds[idx];
+    }
+#else
+    CGWindowID selectedId = 0;
+#endif
+
+    QtVideoManager::instance().requestContentSend(selected, selectedId);
     setConnectionStatus("Content source selected: " + selected);
     QMessageBox::information(this,
                              tr("Content source set"),
-                             tr("Sharing source: %1\n(送信パイプラインはこの後のステップで実装)").arg(selected));
+                             tr("Sharing source: %1").arg(selected));
 }
 
 void QtVideoMainWindow::onRemoteWindowClosed()
