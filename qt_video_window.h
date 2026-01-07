@@ -45,15 +45,6 @@
 #include <QPixmap>
 #include <atomic>
 
-#ifdef Q_OS_MAC
-#ifndef __MAC_OS_X_DISABLE_AVAILABILITY
-#define __MAC_OS_X_DISABLE_AVAILABILITY 1
-#endif
-#include <ApplicationServices/ApplicationServices.h>
-#else
-typedef unsigned int CGWindowID;
-#endif
-
 // Forward declarations
 class MyH323Connection;
 class MyH323EndPoint;
@@ -611,9 +602,9 @@ public:
     void closeContentWindow(bool disableAvailability = false);
     void openContentWindow();
     void setContentAvailable(bool available);
-    void requestContentSend(const QString& label, CGWindowID windowId);
+    void requestContentSend(const QString& targetTitle);
     QString getContentSendTarget() const { return m_contentSendTarget; }
-    void startContentCapture(CGWindowID windowId, const QString& label);
+    void startContentCapture(const QString& targetTitle);
     void stopContentCapture();
     void captureContentFrame();      // Timer callback - captures in main thread
     void captureContentFrameNow();   // Called by encoder - returns buffered frame
@@ -667,7 +658,6 @@ private:
     int m_lastContentWidth;
     int m_lastContentHeight;
     bool m_contentAvailable;
-    CGWindowID m_contentWindowId;
     QString m_contentSendTarget;
     QTimer m_contentCaptureTimer;
     QByteArray m_lastCapturedFrame;

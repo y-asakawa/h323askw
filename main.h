@@ -1,7 +1,3 @@
-// Include guard to prevent multiple inclusion
-#ifndef H323ASKW_MAIN_H
-#define H323ASKW_MAIN_H
-
 /*
  * main.h
  *
@@ -1566,5 +1562,3 @@ namespace P4Strategy {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-
-#endif // H323ASKW_MAIN_H

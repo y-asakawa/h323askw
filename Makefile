@@ -136,9 +136,6 @@ ifeq ($(QUIET),0)
   $(info Video support enabled via H323_VIDEO)
 endif
 
-# Enable H.239 (content sharing) in this application build
-STDCCFLAGS += -DH323_H239
-
 # macOS USB camera support
 ifeq ($(OSTYPE),Darwin)
   VIDINPUT_MACOS := ../ptlib/plugins/vidinput_macos/libvidinput_macos.dylib
@@ -159,7 +156,7 @@ endif
 ifeq ($(OSTYPE),Darwin)
   STDCCFLAGS += -D_REENTRANT
   # Add macOS framework support
-  ENDLDLIBS += -framework CoreFoundation -framework CoreVideo -framework CoreMedia -framework CoreGraphics
+  ENDLDLIBS += -framework CoreFoundation -framework CoreVideo -framework CoreMedia
   # IOKit for USB HID Controller (mute button support)
   ENDLDLIBS += -framework IOKit
 endif
@@ -616,3 +613,4 @@ $(OBJDIR)/main.o: main.h version.h
 
 # Shim so `make help` runs our h323askw-help without overriding included makefiles
 help: h323askw-help
+
