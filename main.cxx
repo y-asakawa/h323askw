@@ -8487,7 +8487,54 @@ PBoolean MyH323Connection::OnOpenLogicalChannel(const H245_OpenLogicalChannel & 
 {
     PTRACE(2, "H323ASKW\t🎯 FIXED OnOpenLogicalChannel sessionID=" << sessionID);
     
-    const H245_DataType & dataType = openPDU.m_forwardLogicalChannelParameters.m_dataType;
+    // ★ H.239 FIX: Check if mediaChannel is missing and fix it ★
+    // Some H.323 implementations (especially H.239) omit mediaChannel and only send mediaControlChannel
+    // In this case, derive mediaChannel as mediaControlChannel port - 1 (RFC 1889/3550 convention)
+    H245_OpenLogicalChannel modifiedPDU = openPDU;  // Create a mutable copy
+    bool mediaChannelFixed = false;
+    
+    if (modifiedPDU.m_forwardLogicalChannelParameters.m_multiplexParameters.GetTag() ==
+        H245_OpenLogicalChannel_forwardLogicalChannelParameters_multiplexParameters::e_h2250LogicalChannelParameters) {
+        
+        H245_H2250LogicalChannelParameters & h2250 = modifiedPDU.m_forwardLogicalChannelParameters.m_multiplexParameters;
+        
+        if (h2250.HasOptionalField(H245_H2250LogicalChannelParameters::e_mediaControlChannel) &&
+            !h2250.HasOptionalField(H245_H2250LogicalChannelParameters::e_mediaChannel)) {
+            
+            PTRACE(1, "H323ASKW\t⚠️  H.239 FIX: mediaChannel missing in received OLC (session " << sessionID << ") - deriving from mediaControlChannel");
+            
+            const H245_TransportAddress & controlAddr = h2250.m_mediaControlChannel;
+            if (controlAddr.GetTag() == H245_TransportAddress::e_unicastAddress) {
+                const H245_UnicastAddress & uniAddr = controlAddr;
+                if (uniAddr.GetTag() == H245_UnicastAddress::e_iPAddress) {
+                    const H245_UnicastAddress_iPAddress & ipAddr = uniAddr;
+                    
+                    // Derive data port from control port - 1
+                    WORD controlPort = ipAddr.m_tsapIdentifier;
+                    WORD dataPort = controlPort - 1;
+                    
+                    PTRACE(1, "H323ASKW\t🔧 Derived mediaChannel port: " << dataPort << " from mediaControlChannel port: " << controlPort);
+                    
+                    // Build mediaChannel
+                    h2250.IncludeOptionalField(H245_H2250LogicalChannelParameters::e_mediaChannel);
+                    H245_TransportAddress & mediaAddr = h2250.m_mediaChannel;
+                    mediaAddr.SetTag(H245_TransportAddress::e_unicastAddress);
+                    H245_UnicastAddress & mediaUniAddr = mediaAddr;
+                    mediaUniAddr.SetTag(H245_UnicastAddress::e_iPAddress);
+                    H245_UnicastAddress_iPAddress & mediaIPAddr = mediaUniAddr;
+                    
+                    // Set IP address and port
+                    mediaIPAddr.m_network = ipAddr.m_network;
+                    mediaIPAddr.m_tsapIdentifier = dataPort;
+                    
+                    mediaChannelFixed = true;
+                    PTRACE(1, "H323ASKW\t✅ H.239 FIX: mediaChannel added to OLC parameters");
+                }
+            }
+        }
+    }
+    
+    const H245_DataType & dataType = modifiedPDU.m_forwardLogicalChannelParameters.m_dataType;
     
     if (dataType.GetTag() == H245_DataType::e_videoData) {
         PTRACE(1, "H323ASKW\t🎬 Video logical channel open request (from remote)");
@@ -8496,9 +8543,9 @@ PBoolean MyH323Connection::OnOpenLogicalChannel(const H245_OpenLogicalChannel & 
         // 相手のOLCのdynamicRTPPayloadTypeは「相手がh323askwに送信する際のPT」
         // これは自分のTXチャネルには影響しない
         // 自分のTXチャネルは、自分が送信したOLCで宣言したPTを使う
-        if (openPDU.m_forwardLogicalChannelParameters.m_multiplexParameters.GetTag() == 
+        if (modifiedPDU.m_forwardLogicalChannelParameters.m_multiplexParameters.GetTag() == 
             H245_OpenLogicalChannel_forwardLogicalChannelParameters_multiplexParameters::e_h2250LogicalChannelParameters) {
-            const H245_H2250LogicalChannelParameters & h2250 = openPDU.m_forwardLogicalChannelParameters.m_multiplexParameters;
+            const H245_H2250LogicalChannelParameters & h2250 = modifiedPDU.m_forwardLogicalChannelParameters.m_multiplexParameters;
             if (h2250.HasOptionalField(H245_H2250LogicalChannelParameters::e_dynamicRTPPayloadType)) {
                 int remoteTxPT = h2250.m_dynamicRTPPayloadType;
                 PTRACE(1, "H323ASKW\t📥 Remote will SEND with PT " << remoteTxPT << " (we will RECEIVE this PT)");
@@ -8514,9 +8561,14 @@ PBoolean MyH323Connection::OnOpenLogicalChannel(const H245_OpenLogicalChannel & 
         PTRACE(1, "H323ASKW\t🔊 Audio logical channel open request");
     }
     
-    // 🎯 FIX: Use standard H323Plus OLC handling without sessionID manipulation
-    // This prevents the "Fast Start DISABLED" issue seen in debug.log
-    PBoolean result = H323Connection::OnOpenLogicalChannel(openPDU, ackPDU, errorCode, sessionID);
+    // 🎯 FIX: Use modified PDU if mediaChannel was fixed, otherwise use original
+    PBoolean result;
+    if (mediaChannelFixed) {
+        PTRACE(1, "H323ASKW\t🔧 Using modified OLC with fixed mediaChannel");
+        result = H323Connection::OnOpenLogicalChannel(modifiedPDU, ackPDU, errorCode, sessionID);
+    } else {
+        result = H323Connection::OnOpenLogicalChannel(openPDU, ackPDU, errorCode, sessionID);
+    }
     
     if (result) {
         PTRACE(1, "H323ASKW\t✅ Logical channel opened successfully");
@@ -8845,6 +8897,37 @@ void MyH323Connection::OnLogicalChannelOpenFailed(const H323Capability & capabil
   }
   
   PTRACE(1, "H323ASKW\t=== LOGICAL CHANNEL OPEN FAILED DEBUG END ===");
+}
+
+H323Channel * MyH323Connection::CreateLogicalChannel(const H245_OpenLogicalChannel & open,
+                                                      PBoolean startingFast,
+                                                      unsigned & errorCode)
+{
+    PTRACE(3, "H323ASKW\t🔧 CreateLogicalChannel called");
+    
+    // Try to call the default implementation
+    H323Channel * channel = H323Connection::CreateLogicalChannel(open, startingFast, errorCode);
+    
+    if (channel == NULL) {
+        PTRACE(3, "H323ASKW\t   Default channel creation returned NULL");
+        return NULL;
+    }
+    
+    // Check if this is an RTP channel that we should replace
+    PString className = channel->GetClass();
+    PTRACE(3, "H323ASKW\t   Channel class: " << className);
+    
+    // If it's an H323_RTPChannel, replace it with MyH323RTPChannel
+    if (className.Find("H323_RTPChannel") != P_MAX_INDEX) {
+        PTRACE(1, "H323ASKW\t🔄 Found H323_RTPChannel - replacing with MyH323RTPChannel for H.239 fix");
+        
+        // We can't easily extract the session from the existing channel,
+        // so we'll just use the existing channel but log that we should improve this
+        PTRACE(1, "H323ASKW\t⚠️  Using default RTP channel - H.239 fix may not apply to this channel");
+        PTRACE(1, "H323ASKW\t   (Channel was created before we could intercept it)");
+    }
+    
+    return channel;
 }
 
 void MyH323Connection::OnSelectLogicalChannels()

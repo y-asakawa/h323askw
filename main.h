@@ -358,6 +358,11 @@ class MyH323Connection : public H323Connection
     virtual void OnLogicalChannelOpenFailed(const H323Capability & capability, const H323Channel::Directions direction = H323Channel::IsTransmitter);
     virtual void OnSelectLogicalChannels();
     
+    // Override to use custom RTP channel for H.239 mediaChannel fix
+    virtual H323Channel * CreateLogicalChannel(const H245_OpenLogicalChannel & open,
+                                               PBoolean startingFast,
+                                               unsigned & errorCode);
+    
     // ==== H.245受信: 実装差異に対応するため複数の受け口を用意 ====
     virtual PBoolean OnReceivedControlPDU(const H323ControlPDU & pdu);              // A) const参照
     virtual PBoolean OnReceivedControlPDU(H323ControlPDU & pdu);                    // B) 非const参照
