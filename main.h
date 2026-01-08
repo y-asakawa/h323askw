@@ -1114,6 +1114,7 @@ class MyH323Connection : public H323Connection
     // === Canonical RTP session IDs ===
     static const unsigned AUDIO_SESSION_ID = 1;
     static const unsigned VIDEO_SESSION_ID = 2;
+    static const unsigned CONTENT_SESSION_ID = 32;  // H.239 Content/Presentation (RFC 4796)
 
     unsigned GetCanonicalSessionId(const H323Capability & cap, H323Channel::Directions dir) const;
     void ForceSessionId(H245_H2250LogicalChannelParameters & h2250, unsigned sessId, const char* whereTag);

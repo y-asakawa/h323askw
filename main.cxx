@@ -4053,7 +4053,12 @@ unsigned MyH323Connection::GetCanonicalSessionId(const H323Capability & cap, H32
 {
   switch (cap.GetMainType()) {
     case H323Capability::e_Audio: return AUDIO_SESSION_ID;
-    case H323Capability::e_Video: return VIDEO_SESSION_ID;
+    case H323Capability::e_Video: {
+      if (cap.GetSubType() == H245_VideoCapability::e_extendedVideoCapability) {
+        return CONTENT_SESSION_ID;  // H.239 uses session 32
+      }
+      return VIDEO_SESSION_ID;
+    }
     default:                      return VIDEO_SESSION_ID; // data等はとりあえず別枠にせず2へ
   }
 }
@@ -4081,15 +4086,33 @@ void MyH323Connection::FixupSessionIDForOLC(H245_OpenLogicalChannel & olc, bool 
     H245_H2250LogicalChannelParameters & h2250 =
       (H245_H2250LogicalChannelParameters &)olc.m_forwardLogicalChannelParameters.m_multiplexParameters;
 
-    // Audio=1, Video=2 を強制
-    BYTE targetSessionID = isVideo ? kSID_Video : kSID_Audio;
+    bool isContent = false;
+    if (isVideo &&
+        olc.m_forwardLogicalChannelParameters.m_dataType.GetTag() == H245_DataType::e_videoData) {
+      const H245_DataType & dataType = olc.m_forwardLogicalChannelParameters.m_dataType;
+      const H245_VideoCapability & vidCap = dataType;
+      if (vidCap.GetTag() == H245_VideoCapability::e_extendedVideoCapability) {
+        isContent = true;
+      }
+    }
+
+    // Audio=1, Video=2, Content=32 を強制
+    BYTE targetSessionID;
+    if (!isVideo) {
+      targetSessionID = kSID_Audio;
+    } else if (isContent) {
+      targetSessionID = static_cast<BYTE>(CONTENT_SESSION_ID);
+    } else {
+      targetSessionID = kSID_Video;
+    }
     h2250.m_sessionID = targetSessionID;
 
     // オプションフィールドを明示
     h2250.IncludeOptionalField(H245_H2250LogicalChannelParameters::e_mediaChannel);
     h2250.IncludeOptionalField(H245_H2250LogicalChannelParameters::e_mediaControlChannel);
     
-    PTRACE(3, "H323ASKW\t🔧 SESSION: Fixed sessionID=" << (int)targetSessionID << " for " << (isVideo ? "Video" : "Audio"));
+    PTRACE(3, "H323ASKW\t🔧 SESSION: Fixed sessionID=" << (int)targetSessionID << " for "
+           << (isContent ? "H.239 Content" : (isVideo ? "People Video" : "Audio")));
   }
 }
 
@@ -6591,11 +6614,10 @@ PBoolean MyH323Connection::OnStartLogicalChannel(H323Channel & channel) {
         direction == H323Channel::IsReceiver) {
       m_contentSessionID = sessionID;
       m_contentChannelActive = TRUE;
-      PTRACE(1, "H323ASKW\t📺 H.239 content channel started - requesting Qt content window (session "
+      PTRACE(1, "H323ASKW\t📺 H.239 content channel started - content available (session "
                 << sessionID << ")");
       QtVideoManager & qtManager = QtVideoManager::instance();
       qtManager.setContentAvailable(true);
-      qtManager.openContentWindow();
     }
 #endif
     
