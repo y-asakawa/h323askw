@@ -4361,6 +4361,8 @@ MyH323Connection::MyH323Connection(MyH323EndPoint & ep, unsigned callRef)
 #endif
   , m_isH239ready(false)
   , m_haveStartedH239(false)
+  , m_h239StartPending(false)
+  , m_h239StartRetryCount(0)
   , m_requestModeSequence(1)
   , m_requestModeInProgress(false)
   , m_requestModeRetryCount(0)
@@ -5280,6 +5282,11 @@ public:
         // Ensure even dimensions for H.264
         width  &= ~1u;
         height &= ~1u;
+        // Align to macroblock boundary where possible (avoid odd pitches)
+        if (width >= 16)
+            width = (width / 16) * 16;
+        if (height >= 16)
+            height = (height / 16) * 16;
         
         if (width == 0 || height == 0) {
             PTRACE(2, "H323ASKW\tQtContentInputDevice: Dimensions became zero after rounding, using defaults");
@@ -5340,6 +5347,57 @@ public:
 
     PBoolean IsCapturing() override {
         return m_isCapturing;
+    }
+
+    // 簡易ダウンサンプル (nearest) - YUV420P 前提
+    static void ScaleYUV420P_Nearest(const BYTE* src, unsigned srcW, unsigned srcH,
+                                     BYTE* dst, unsigned dstW, unsigned dstH)
+    {
+        const unsigned srcUVWidth  = srcW >> 1;
+        const unsigned srcUVHeight = srcH >> 1;
+        const unsigned dstUVWidth  = dstW >> 1;
+        const unsigned dstUVHeight = dstH >> 1;
+
+        const BYTE* srcY = src;
+        const BYTE* srcU = srcY + srcW * srcH;
+        const BYTE* srcV = srcU + srcUVWidth * srcUVHeight;
+
+        BYTE* dstY = dst;
+        BYTE* dstU = dstY + dstW * dstH;
+        BYTE* dstV = dstU + dstUVWidth * dstUVHeight;
+
+        // Y plane
+        for (unsigned y = 0; y < dstH; ++y) {
+            unsigned sy = (y * srcH) / dstH;
+            const BYTE* srcLine = srcY + sy * srcW;
+            BYTE* dstLine = dstY + y * dstW;
+            for (unsigned x = 0; x < dstW; ++x) {
+                unsigned sx = (x * srcW) / dstW;
+                dstLine[x] = srcLine[sx];
+            }
+        }
+
+        // U plane
+        for (unsigned y = 0; y < dstUVHeight; ++y) {
+            unsigned sy = (y * srcUVHeight) / dstUVHeight;
+            const BYTE* srcLine = srcU + sy * srcUVWidth;
+            BYTE* dstLine = dstU + y * dstUVWidth;
+            for (unsigned x = 0; x < dstUVWidth; ++x) {
+                unsigned sx = (x * srcUVWidth) / dstUVWidth;
+                dstLine[x] = srcLine[sx];
+            }
+        }
+
+        // V plane
+        for (unsigned y = 0; y < dstUVHeight; ++y) {
+            unsigned sy = (y * srcUVHeight) / dstUVHeight;
+            const BYTE* srcLine = srcV + sy * srcUVWidth;
+            BYTE* dstLine = dstV + y * dstUVWidth;
+            for (unsigned x = 0; x < dstUVWidth; ++x) {
+                unsigned sx = (x * srcUVWidth) / dstUVWidth;
+                dstLine[x] = srcLine[sx];
+            }
+        }
     }
 
     PBoolean GetFrameData(BYTE * buffer, PINDEX * bytesReturned) override {
@@ -5417,10 +5475,21 @@ public:
             PTRACE(6, "H323ASKW\tQtContentInputDevice: Sent captured frame " << actualW << "x" << actualH);
             return true;
         } else {
+            // try to rescale if size matches YUV420P for actualW/actualH
+            PINDEX expectedSrc = actualW * actualH * 3 / 2;
+            if (frameData.size() == static_cast<int>(expectedSrc)) {
+                const BYTE* srcData = reinterpret_cast<const BYTE*>(frameData.constData());
+                if (srcData) {
+                    ScaleYUV420P_Nearest(srcData, actualW, actualH, buffer, dstW, dstH);
+                    if (bytesReturned) *bytesReturned = required;
+                    PTRACE(3, "H323ASKW\tQtContentInputDevice: Rescaled frame " << actualW << "x" << actualH
+                           << " -> " << dstW << "x" << dstH);
+                    return true;
+                }
+            }
             PTRACE(3, "H323ASKW\tQtContentInputDevice: Size mismatch - expected " 
                    << dstW << "x" << dstH << " (" << required << " bytes), got " 
-                   << actualW << "x" << actualH << " (" << frameData.size() << " bytes)");
-            // Fall through to black frame
+                   << actualW << "x" << actualH << " (" << frameData.size() << " bytes); sending black");
         }
         
     fallback_black_frame:
@@ -9151,6 +9220,49 @@ void MyH323Connection::StartH239Transmission()
     }
 }
 
+void MyH323Connection::TryStartPendingH239()
+{
+    if (!m_h239StartPending)
+        return;
+
+    if (videoTxReady) {
+        m_h239StartPending = false;
+        m_h239StartRetryTimer.Stop();
+        PTRACE(1, "H323ASKW\tH.239 deferred start: People TX ready -> starting now");
+        StartH239Transmission();
+    }
+}
+
+void MyH323Connection::RequestH239StartWithRetry()
+{
+    if (!endpoint.IsStartH239()) {
+        PTRACE(2, "H323ASKW\tRequestH239StartWithRetry skipped - StartH239 flag is FALSE");
+        return;
+    }
+
+    if (m_haveStartedH239) {
+        PTRACE(2, "H323ASKW\tRequestH239StartWithRetry skipped - already started");
+        return;
+    }
+
+    if (videoTxReady) {
+        PTRACE(1, "H323ASKW\tH.239 start: People TX ready, starting immediately");
+        StartH239Transmission();
+        return;
+    }
+
+    if (m_h239StartPending) {
+        PTRACE(3, "H323ASKW\tH.239 start already pending - waiting for People TX");
+        return;
+    }
+
+    m_h239StartPending = true;
+    m_h239StartRetryCount = 0;
+    m_h239StartRetryTimer.SetNotifier(PCREATE_NOTIFIER(H239StartRetryTrigger));
+    m_h239StartRetryTimer.SetInterval(300); // 300ms steps
+    PTRACE(1, "H323ASKW\tH.239 start deferred until People TX ready (retry up to ~3s)");
+}
+
 void MyH323Connection::StopH239Transmission()
 {
   if (endpoint.IsStartH239()) {
@@ -9167,8 +9279,28 @@ void MyH323Connection::StartH239TransmissionTrigger(PTimer &, H323_INT)
 {
     m_h239StartTimer.Stop();
     if (m_isH239ready) {
-      StartH239Transmission();
+      RequestH239StartWithRetry();
     }
+}
+
+void MyH323Connection::H239StartRetryTrigger(PTimer &, H323_INT)
+{
+    if (!m_h239StartPending)
+        return;
+
+    if (videoTxReady) {
+        TryStartPendingH239();
+        return;
+    }
+
+    if (++m_h239StartRetryCount > 10) { // 約3秒で諦める
+        PTRACE(1, "H323ASKW\tH.239 start cancelled: People TX not ready after retries");
+        m_h239StartPending = false;
+        m_h239StartRetryTimer.Stop();
+        return;
+    }
+
+    m_h239StartRetryTimer.SetInterval(300);
 }
 
 void MyH323Connection::StopH239TransmissionTrigger(PTimer &, H323_INT)
@@ -10295,12 +10427,44 @@ PBoolean MyH323Connection::OpenExtendedVideoChannel(PBoolean isEncoding, H323Vid
         }
 #endif
 
-        // 🎬 H.239 TX: 720P (1280x720) at 10fps for high-quality content sharing
+        // 🎬 H.239 TX: 帯域状況を見て解像度・fpsを動的に決定
+        unsigned availKbps = GetBandwidthAvailable(); // 0 の場合は未知
+        // H323Connection::bandwidthAvailable は 100bps 単位なので kbps に換算
+        if (availKbps > 0)
+            availKbps /= 10;
         unsigned txWidth = 1280;
         unsigned txHeight = 720;
         unsigned txFps = 10;
+        unsigned targetKbps = 540; // デフォルト帯域要求（kbps）
+
+        // 少帯域ならコンテンツを落として送る
+        // 目安: <300kbps → 426x240@8fps, <700kbps → 640x360@10fps, <900kbps → 854x480@10fps
+        if (availKbps > 0 && availKbps < 300) {
+            txWidth = 432;   // 16 の倍数に合わせて歪みを防止
+            txHeight = 240;
+            txFps = 8;
+            targetKbps = 200;
+        } else if (availKbps > 0 && availKbps < 700) {
+            txWidth = 640;
+            txHeight = 360;
+            targetKbps = 300;
+        } else if (availKbps > 0 && availKbps < 900) {
+            txWidth = 854;
+            txHeight = 480;
+            targetKbps = 400;
+        }
+
+        // H.245 帯域要求も下げる（kbps→bps）
+        codec.SetMaxBitRate(targetKbps * 1000);
+        codec.GetWritableMediaFormat().SetOptionInteger(OpalVideoFormat::TargetBitRateOption,
+                                                        targetKbps * 1000);
+        // H.239のターゲット帯域を保存（OLC生成時にmaxBitRateとして明示するため）
+        m_h239TargetKbps = targetKbps;
+
+        // フレームサイズセット（プラグインはサイズに応じてビットレートを下げる）
         codec.SetFrameSize(txWidth, txHeight);
-        PTRACE(1, "H323ASKW\tH.239 TX parameters set: " << txWidth << "x" << txHeight << " @" << txFps << "fps");
+        PTRACE(1, "H323ASKW\tH.239 TX parameters set: " << txWidth << "x" << txHeight
+               << " @" << txFps << "fps (avail=" << availKbps << " kbps, target=" << targetKbps << "kbps)");
         
         // Create capture device backed by Qt window capture
         QtContentInputDevice* inputDevice = new QtContentInputDevice();
@@ -12331,6 +12495,25 @@ PBoolean MyH323Connection::OnSendingPDU(H245_OpenLogicalChannel & olc) const
         PTRACE(1, "H323ASKW\t*** SUCCESS - reverseLogicalChannelParameters added to OpenLogicalChannel PDU ***");
         PTRACE(1, "H323ASKW\tLocal IP: " << localAddr.AsString() << ", RTP Port: " << rtpPort << ", RTCP Port: " << (rtpPort + 1));
         PTRACE(1, "H323ASKW\tBidirectional video channel proposal implemented");
+    }
+    
+    // 明示的にH.239 OLCの maxBitRate を設定（単位: 100bps）
+    H245_DataType & mutableDataType = const_cast<H245_DataType &>(olc.m_forwardLogicalChannelParameters.m_dataType);
+    if (mutableDataType.GetTag() == H245_DataType::e_videoData) {
+        H245_VideoCapability & videoCap = mutableDataType;
+        if (videoCap.GetTag() == H245_VideoCapability::e_extendedVideoCapability) {
+            H245_ExtendedVideoCapability & extCap = videoCap;
+            H245_ArrayOf_GenericCapability & extList = extCap.m_videoCapabilityExtension;
+            if (extList.GetSize() > 0) {
+                H245_GenericCapability & genCap = extList[0];
+                unsigned kbps = m_h239TargetKbps ? m_h239TargetKbps : 200; // 保険で200kbpsに固定
+                genCap.IncludeOptionalField(H245_GenericCapability::e_maxBitRate);
+                genCap.m_maxBitRate = kbps * 10; // 100bps単位
+                PTRACE(1, "H323ASKW\tH.239 OLC maxBitRate explicitly set: " << kbps << " kbps");
+            } else {
+                PTRACE(1, "H323ASKW\tH.239 OLC: No genericCapability entries to patch maxBitRate");
+            }
+        }
     }
     
     // Continue with normal processing
@@ -16334,6 +16517,11 @@ void MyH323Connection::syncLegacyFlagsFromStateMachine() {
         case H245StateMachine::VideoChannelState::Closed:
             videoTxReady = false;
             break;
+    }
+    
+    // People送信が確立したら、保留中のH.239開始を即時実行
+    if (videoTxReady) {
+        TryStartPendingH239();
     }
     
     // Update connection-scoped channel tracking

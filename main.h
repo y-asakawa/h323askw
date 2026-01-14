@@ -503,8 +503,12 @@ class MyH323Connection : public H323Connection
     
 #ifdef H323_H239
     void StartH239Transmission();
+    // H.239開始をPeople送信確立まで遅延させるラッパ
+    void RequestH239StartWithRetry();
+    void TryStartPendingH239();
     void StopH239Transmission();
     PDECLARE_NOTIFIER(PTimer, MyH323Connection, StartH239TransmissionTrigger);
+    PDECLARE_NOTIFIER(PTimer, MyH323Connection, H239StartRetryTrigger);
     PDECLARE_NOTIFIER(PTimer, MyH323Connection, StopH239TransmissionTrigger);
     virtual PBoolean SendH239GenericResponse(PBoolean response);
     virtual PBoolean OnInitialFlowRestriction(H323Channel & channel);
@@ -980,8 +984,13 @@ class MyH323Connection : public H323Connection
     map<unsigned, WORD> m_sessionPorts;
     bool m_isH239ready;
     bool m_haveStartedH239;
+    unsigned m_h239TargetKbps = 540; // H.239送信用に直近で設定したターゲット帯域
     PTimer m_h239StartTimer;
     PTimer m_h239StopTimer;
+    // H.239送信開始の遅延・リトライ制御（Peopleチャネル確立待ち）
+    bool m_h239StartPending = false;
+    unsigned m_h239StartRetryCount = 0;
+    PTimer m_h239StartRetryTimer;
     
     // RequestMode state management
     unsigned m_requestModeSequence;
