@@ -4349,6 +4349,7 @@ MyH323Connection::MyH323Connection(MyH323EndPoint & ep, unsigned callRef)
   : H323Connection(ep, callRef)
   , endpoint(ep)
   , videoChannelIn(NULL)
+  , contentChannelIn(NULL)
   , videoChannelOut(NULL)
 #if defined(USE_QT6)
   , outgoingVideoDisplay(NULL)
@@ -4506,11 +4507,12 @@ MyH323Connection::~MyH323Connection()
     m_tcsKickTimer.Stop();
     m_fastStartTimeoutTimer.Stop();
     
-    // ⚠️ NOTE: videoChannelIn and videoChannelOut are managed by H323Connection's
-    // logicalChannels, so we should NOT delete them here to avoid double-free.
-    // Just clear our pointers.
-    videoChannelIn = NULL;
-    videoChannelOut = NULL;
+  // ⚠️ NOTE: videoChannelIn and videoChannelOut are managed by H323Connection's
+  // logicalChannels, so we should NOT delete them here to avoid double-free.
+  // Just clear our pointers.
+  videoChannelIn = NULL;
+  contentChannelIn = NULL;
+  videoChannelOut = NULL;
     
 #if defined(USE_QT6) || defined(USE_QT6)
     // ⚠️ NOTE: Video output device objects need careful cleanup.
@@ -6263,42 +6265,46 @@ PBoolean MyH323Connection::OnSendSignalSetup(H323SignalPDU & setupPDU)
 H323Channel * MyH323Connection::CreateRealTimeLogicalChannel(const H323Capability & capability, H323Channel::Directions dir,
                                                 unsigned sessionID, const H245_H2250LogicalChannelParameters * param, RTP_QOS * rtpqos)
 {
-    if (g_forceSlowStart) {
-        PTRACE(3, "H323ASKW\tForce slow-start: using standard CreateRealTimeLogicalChannel");
+    // Even when force-slow-start,ビデオチャネルは自前のRTPチャネルで生成する
+    if (g_forceSlowStart && capability.GetMainType() != H323Capability::e_Video) {
+        PTRACE(3, "H323ASKW\tForce slow-start: using standard CreateRealTimeLogicalChannel (non-video)");
         return H323Connection::CreateRealTimeLogicalChannel(capability, dir, sessionID, param, rtpqos);
     }
-    
-    PTRACE(2, "H323ASKW\t🎯 FIXED CreateRealTimeLogicalChannel: " 
-           << capability.GetFormatName() 
+
+    PTRACE(2, "H323ASKW\t🎯 CreateRealTimeLogicalChannel: "
+           << capability.GetFormatName()
            << " dir=" << (dir == H323Channel::IsTransmitter ? "TX" : "RX")
            << " sessionID=" << sessionID);
-    
+
 #ifdef H323_VIDEO
-    // 🎯 CRITICAL FIX: Use custom RTP channel for video to prevent callback crashes
+    // 🎯 CRITICAL FIX: Videoは必ず自前の MyH323RTPChannel を生成し、セッション分離とmediaChannel補完を適用
     if (capability.GetMainType() == H323Capability::e_Video) {
-        PTRACE(1, "H323ASKW\t🎬 Video channel creation with callback-safe approach: " 
-               << (dir == H323Channel::IsTransmitter ? "transmit" : "receive"));
-        
-        // First create using standard H323Plus implementation
-        H323Channel *standardChannel = H323Connection::CreateRealTimeLogicalChannel(capability, dir, sessionID, param, rtpqos);
-        
-        if (standardChannel != NULL && PIsDescendant(standardChannel, H323_RTPChannel)) {
-            PTRACE(1, "H323ASKW\t✅ Standard video RTP channel created successfully");
-            
-            // Return the standard channel - it should work now with proper H323Plus initialization
-            return standardChannel;
+        // UseSession のロジックは H323Connection と同等に扱う
+        RTP_Session * session = NULL;
+
+        if (
+#ifdef H323_H46026
+            H46026IsMediaTunneled() ||
+#endif
+            !param || !param->HasOptionalField(H245_H2250LogicalChannelParameters::e_mediaControlChannel)) {
+            H245_TransportAddress addr;
+            GetControlChannel().SetUpTransportPDU(addr, H323Transport::UseLocalTSAP);
+            session = UseSession(sessionID, addr, dir, rtpqos);
         } else {
-            PTRACE(1, "H323ASKW\t❌ Failed to create standard video RTP channel");
-            if (standardChannel) {
-                delete standardChannel;
-            }
+            session = UseSession(sessionID, param->m_mediaControlChannel, dir, rtpqos);
+        }
+
+        if (session == NULL) {
+            PTRACE(1, "H323ASKW\t❌ Unable to obtain RTP session for video (sessionID=" << sessionID << ")");
             return NULL;
         }
+
+        PTRACE(1, "H323ASKW\t🎬 Creating MyH323RTPChannel for video session " << sessionID);
+        return new MyH323RTPChannel(*this, capability, dir, *session);
     }
 #endif
-    
-    // 🎯 FIX: For audio and other channels, use standard implementation
-    // This prevents callback initialization issues
+
+    // 🎯 FIX: Video以外は標準実装を使用
     PTRACE(2, "H323ASKW\t🔊 Creating non-video channel (audio/control) with standard H323Plus");
     return H323Connection::CreateRealTimeLogicalChannel(capability, dir, sessionID, param, rtpqos);
 }
@@ -8485,24 +8491,24 @@ PBoolean MyH323Connection::OpenVideoChannel(PBoolean isEncoding, H323VideoCodec 
   } else {
     PTRACE(1, "H323ASKW\tSetting up decoding channel");
     
-    // 🎯 既にビデオ受信チャンネルが存在し、ビデオプレイヤーがアタッチ済みの場合はスキップ
-    // これはH.239など2回目のビデオOLCが来た場合に発生する
-    if (videoChannelIn != NULL) {
-      PTRACE(1, "H323ASKW\t⚠️  Video receiver channel already exists - checking if player attached");
-      // PVideoChannelにはプレイヤーが既にアタッチされているかチェックする直接的なメソッドがないため
-      // 2回目のOpenVideoChannelではスキップする
-      PTRACE(1, "H323ASKW\t⚠️  Skipping duplicate video channel open (already have videoChannelIn)");
+    // People と Content で別チャネルを許容する
+    // 1本目を People 用、2本目を Content 用として確保し、3本目以降はスキップ
+    PVideoChannel *& targetChannel =
+        (videoChannelIn == NULL) ? videoChannelIn :
+        (contentChannelIn == NULL ? contentChannelIn : contentChannelIn);
+    if (targetChannel != NULL) {
+      PTRACE(1, "H323ASKW\t⚠️  Receiver channel already exists for this media type - skipping duplicate");
       return FALSE;
     }
     
     PTRACE(1, "H323ASKW\t*** Creating video receiver channel ***");
-    videoChannelIn = new MyVideoChannel(this, FALSE);  // FALSE = decoding (incoming)
-    PTRACE(1, "H323ASKW\t*** Video receiver channel created: " << (void*)videoChannelIn << " ***");
+    targetChannel = new MyVideoChannel(this, FALSE);  // FALSE = decoding (incoming)
+    PTRACE(1, "H323ASKW\t*** Video receiver channel created: " << (void*)targetChannel << " ***");
     
-    PTRACE(1, "H323ASKW\t  videoChannelIn=" << (void*)videoChannelIn << " device=" << (void*)device);
+    PTRACE(1, "H323ASKW\t  targetChannel=" << (void*)targetChannel << " device=" << (void*)device);
     
-    if (!videoChannelIn) {
-      PTRACE(1, "H323ASKW\t❌ ERROR: videoChannelIn is NULL after creation attempt!");
+    if (!targetChannel) {
+      PTRACE(1, "H323ASKW\t❌ ERROR: receiver channel is NULL after creation attempt!");
       return FALSE;
     }
     if (!device) {
@@ -8511,7 +8517,7 @@ PBoolean MyH323Connection::OpenVideoChannel(PBoolean isEncoding, H323VideoCodec 
     }
     
     PTRACE(1, "H323ASKW\t  Calling AttachVideoPlayer...");
-    videoChannelIn->AttachVideoPlayer((PVideoOutputDevice *)device);
+    targetChannel->AttachVideoPlayer((PVideoOutputDevice *)device);
     PTRACE(1, "H323ASKW\t  AttachVideoPlayer completed");
     
     // SPECIAL TEST: Create display for incoming video frames
@@ -9273,8 +9279,7 @@ void MyH323Connection::OnEstablished()
     
     // Start RTP polling for MCU compatibility
     StartRTPPolling();
-    */
-    
+
     // 既存の処理
     H323Connection::OnEstablished();
 
@@ -9284,58 +9289,19 @@ void MyH323Connection::OnEstablished()
     PTRACE(1, "H323ASKW\t✅ OnEstablished() reached - Video TX OLC already sent in OnSelectLogicalChannels()");
     
     return;  // EXIT - RequestMode timer will handle RX channel
-    /*
-    
+
+    /* ↓ 以下はデバッグ用に無効化した旧コード（保持のみ）
     // 🎯 CRITICAL FIX: Register FastStart channels in truth table
-    if (!g_forceSlowStart) {
-        PTRACE(1, "H323ASKW\t🎯 Registering FastStart channels in truth table");
-        RegisterFastStartChannelsInTruthTable();
-    }
+    // if (!g_forceSlowStart) {
+    //     PTRACE(1, "H323ASKW\t🎯 Registering FastStart channels in truth table");
+    //     RegisterFastStartChannelsInTruthTable();
+    // }
 
     // *** TEMPORARY: DISABLE ACTIVE VIDEO OLC CODE TO TEST IF IT'S CAUSING THE CRASH ***
-    PTRACE(1, "H323ASKW\t⚠️ ACTIVE VIDEO OLC CODE TEMPORARILY DISABLED FOR DEBUGGING");
-    /*
+    // PTRACE(1, "H323ASKW\t⚠️ ACTIVE VIDEO OLC CODE TEMPORARILY DISABLED FOR DEBUGGING");
     // ✅ FIX 2: Force Slow Startでの能動的ビデオOLC送信
     if (g_forceSlowStart || m_forceSlowStartMode) {
-        PTRACE(1, "H323ASKW\t🚀 FIX 2: Force Slow Start mode - actively sending video OLC");
-        
-        // Check if Polycom endpoint (not MCU) using remote party name
-        // 🔧 CRITICAL FIX: Use case-insensitive search for "polycom"
-        PString remotePartyName = GetRemotePartyName();
-        PString remotePartyLower = remotePartyName.ToLower();
-        bool isPolycomEndpoint = (remotePartyLower.Find("polycom") != P_MAX_INDEX) ||
-                                 (remotePartyLower.Find("group") != P_MAX_INDEX && remotePartyLower.Find("500") != P_MAX_INDEX);
-        
-        PTRACE(1, "H323ASKW\t🔍 Endpoint detection: remote party = '" << remotePartyName << "'");
-        PTRACE(1, "H323ASKW\t🔍 Is Polycom endpoint? " << (isPolycomEndpoint ? "YES" : "NO"));
-        
-        if (isPolycomEndpoint) {
-            PTRACE(1, "H323ASKW\t🎯 Polycom endpoint detected - sending video OLC for session 2");
-            PTRACE(1, "H323ASKW\t   Remote party: " << remotePartyName);
-            
-            // Get H.264 capability
-            const H323Capabilities& localCaps = GetLocalCapabilities();
-            H323Capability* h264Cap = localCaps.FindCapability("H.264");
-            
-            if (h264Cap) {
-                PTRACE(1, "H323ASKW\t✅ Found H.264 capability: " << h264Cap->GetFormatName());
-                
-                // Send video OLC for session 2 (standard video session)
-                unsigned sessionID = 2; // VIDEO_SESSION_ID
-                PTRACE(1, "H323ASKW\t📤 Opening video transmit channel on session " << sessionID);
-                
-                bool result = OpenLogicalChannel(*h264Cap, sessionID, H323Channel::IsTransmitter);
-                if (result) {
-                    PTRACE(1, "H323ASKW\t✅ Video OLC sent successfully - waiting for ACK");
-                } else {
-                    PTRACE(1, "H323ASKW\t❌ Failed to send video OLC");
-                }
-            } else {
-                PTRACE(1, "H323ASKW\t❌ No H.264 capability found for video OLC");
-            }
-        } else {
-            PTRACE(1, "H323ASKW\t⚠️ Not a Polycom endpoint - skipping active video OLC (remote: " << remotePartyName << ")");
-        }
+        ...
     }
     */
 
@@ -9351,13 +9317,7 @@ void MyH323Connection::OnEstablished()
     // *** DEBUG: Log before H.245 guarantee code ***
     PTRACE(1, "H323ASKW\t🔍 DEBUG: About to execute H.245 guarantee code");
 
-    // ===== H.264 (H.241) Capability を確実に広告 =====
-    // 1) 端末の CapabilitySet に H.264, H.263, H.261 を追加
-    //    - 文字列ベースの追加（最も移植性が高い）
-    //    - "H.264{sw}" のような表記を H323Plus は受け付けるビルドが多い
-    PTRACE(1, "H323ASKW\tEnsure video capabilities are advertised in TCS");
-    endpoint.AddAllCapabilities(0, 0, "G.711-ALaw-64k{sw},H.264{sw},H.263{sw},H.261{sw}");
-    // H.241(H.264拡張)能力の追加
+    // H.241(H.264拡張)能力の微調整（起動時にCapabilitySet済みのものをチューニング）
 #if defined(H323_H264_CAPABILITY)
     H323Capabilities const& caps = GetLocalCapabilities();
     H323Capability* base = caps.FindCapability("H.264");
@@ -13593,8 +13553,8 @@ MyH323Connection::RFC6184Depacketizer::RFC6184Depacketizer(MyH323Connection* con
     , m_hasValidParams(false)
     , insert_sps_pps_before_idr(true)  // 🎯 ENHANCED: IDR前SPS/PPS自動挿入
     , m_lastMetricsLog(PTime())
-    , m_connection(connection)
     , m_sessionID(sessionID)
+    , m_connection(connection)
 {
     PTRACE(1, "H323ASKW\t*** 🚀 ENHANCED RFC 6184 Depacketizer with Advanced SPS/PPS Management ***");
     PTRACE(2, "H323ASKW\t🔧 ENHANCED features: Auto SPS/PPS insertion, Enhanced caching, RFC compliance");

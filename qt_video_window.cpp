@@ -1725,13 +1725,33 @@ void QtVideoManager::enqueueContentFrame(const unsigned char* yuvData, unsigned 
     m_lastContentHeight = static_cast<int>(height);
     setContentAvailable(true);
 
-    // コンテンツ用ウィンドウを遅延生成
-    if (!m_contentWindow) {
-        createContentWindow(static_cast<int>(width), static_cast<int>(height));
-    }
+    // フレームデータを安全にUIスレッドへ渡すためコピーを保持
+    const QByteArray frameCopy(reinterpret_cast<const char*>(yuvData),
+                               static_cast<int>(dataSize));
+    auto showAndEnqueue = [this, frameCopy, width, height]() {
+        if (!m_contentWindow) {
+            createContentWindow(static_cast<int>(width), static_cast<int>(height));
+        }
+        if (!m_contentWindow)
+            return;
 
-    if (m_contentWindow) {
-        m_contentWindow->enqueueContentFrame(yuvData, width, height, dataSize);
+        // 表示だけ行い、前面への強制はしない
+        m_contentWindow->show();
+        m_contentWindow->enqueueContentFrame(
+            reinterpret_cast<const unsigned char*>(frameCopy.constData()),
+            width,
+            height,
+            static_cast<size_t>(frameCopy.size()));
+    };
+
+    // GUI操作は必ずメインスレッドで
+    if (QThread::currentThread() == qApp->thread()) {
+        showAndEnqueue();
+    } else {
+        QMetaObject::invokeMethod(
+            qApp,
+            showAndEnqueue,
+            Qt::QueuedConnection);
     }
 }
 

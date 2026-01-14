@@ -957,6 +957,7 @@ class MyH323Connection : public H323Connection
   protected:
     MyH323EndPoint & endpoint;
     PVideoChannel * videoChannelIn;
+    PVideoChannel * contentChannelIn;   // H.239コンテンツ用受信チャンネル
     PVideoChannel * videoChannelOut;
 #if defined(USE_QT6)
     class Qt6VideoOutputDevice * outgoingVideoDisplay;   // For displaying outgoing video frames (Qt6)
