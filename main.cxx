@@ -9194,6 +9194,11 @@ void MyH323Connection::StartH239Transmission()
 {
     PTRACE(1, "H323ASKW\tStartH239Transmission called - StartFlag=" << endpoint.IsStartH239()
            << " started=" << m_haveStartedH239);
+
+    // People側の帯域を一時的に絞ってコンテンツ用に帯域を確保する
+    // （H.264プラグインの環境変数経由で目安150kbpsに制限）
+    SetEnvironmentVariable("H323_VIDEO_TX_MAX_BITRATE", "150000"); // People TXを約150kbpsに
+    PTRACE(1, "H323ASKW\t⚠️ Throttling People video TX to ~150kbps during H.239 transmission");
 #if defined(USE_QT6)
     // コンテンツ送信先が選ばれていない場合は送信を開始しない（x264クラッシュ防止）
     QtVideoManager& qtMgr = QtVideoManager::instance();
@@ -10441,21 +10446,29 @@ PBoolean MyH323Connection::OpenExtendedVideoChannel(PBoolean isEncoding, H323Vid
         unsigned targetKbps = 540; // デフォルト帯域要求（kbps）
 
         // 少帯域でも「受信時と同等の見やすさ」を優先して底上げ
-        // 目安: <220kbps → 320x180@5fps 150kbps, <320kbps → 480x270@8fps 220kbps, <700kbps → 640x360@10fps 400kbps
+        // 目安: <220kbps → 320x180@5fps 150kbps, <320kbps → 544x306@8fps 200kbps, <700kbps → 640x360@10fps 400kbps
         if (availKbps > 0 && availKbps < 220) {
             txWidth = 320;   // 低帯域用の最小プロファイル
             txHeight = 180;
             txFps = 5;
             targetKbps = 150;
         } else if (availKbps > 0 && availKbps < 320) {
-            txWidth = 480;
-            txHeight = 270;
+            txWidth = 544;   // 16 の倍数で歪みを防ぎつつ解像度を底上げ
+            txHeight = 306;
             txFps = 8;
-            targetKbps = 220;
+            targetKbps = 200; // 映像優先で解像度を維持しつつ帯域を抑制
         } else if (availKbps > 0 && availKbps < 700) {
             txWidth = 640;
             txHeight = 360;
             targetKbps = 400;
+        }
+
+        // 利用可能帯域を超えないよう安全マージンを設定（20kbps 引く）
+        if (availKbps > 0 && targetKbps >= availKbps) {
+            unsigned guarded = (availKbps > 20) ? (availKbps - 20) : availKbps;
+            if (guarded < targetKbps) {
+                targetKbps = guarded;
+            }
         }
 
         // H.245 帯域要求も下げる（kbps→bps）
