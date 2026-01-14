@@ -5401,8 +5401,13 @@ public:
     }
 
     PBoolean GetFrameData(BYTE * buffer, PINDEX * bytesReturned) override {
-        if (!m_isCapturing || !m_isOpen || buffer == nullptr) {
-            PTRACE(2, "H323ASKW\tQtContentInputDevice::GetFrameData: Invalid state (not capturing or not open)");
+        // 先にキャプチャ用の変数を確保（gotoでスキップされないようにする）
+        QByteArray frameData;
+        unsigned actualW = 0, actualH = 0;
+        QtVideoManager& qtMgr = QtVideoManager::getInstance();
+
+        if (buffer == nullptr) {
+            PTRACE(1, "H323ASKW\tQtContentInputDevice::GetFrameData: NULL buffer pointer!");
             return false;
         }
 
@@ -5420,12 +5425,6 @@ public:
         const PINDEX required = dstW * dstH * 3 / 2; // avoid relying on base GetMaxFrameBytes
 
         PTRACE(5, "H323ASKW\tQtContentInputDevice::GetFrameData: dstW=" << dstW << " dstH=" << dstH << " required=" << required);
-
-        // 🔧 CRITICAL: Validate buffer pointer before use
-        if (!buffer) {
-            PTRACE(1, "H323ASKW\tQtContentInputDevice::GetFrameData: NULL buffer pointer!");
-            return false;
-        }
         
         // 🔧 CRITICAL: Check buffer alignment for x264 encoder
         uintptr_t bufferAddr = reinterpret_cast<uintptr_t>(buffer);
@@ -5438,12 +5437,13 @@ public:
             memset(buffer, 0, required);
         }
 
+        // キャプチャ停止・未オープン時も黒フレームを返して落ちないようにする
+        if (!m_isCapturing || !m_isOpen) {
+            PTRACE(2, "H323ASKW\tQtContentInputDevice::GetFrameData: Not capturing/open - sending black frame");
+            goto fallback_black_frame;
+        }
+
         // 🔧 Get actual captured frame from Qt6 manager
-        QByteArray frameData;
-        unsigned actualW = 0, actualH = 0;
-        
-        QtVideoManager& qtMgr = QtVideoManager::getInstance();
-        
         if (!qtMgr.getLatestContentFrame(frameData, actualW, actualH)) {
             PTRACE(4, "H323ASKW\tQtContentInputDevice: No captured frame available yet");
             goto fallback_black_frame;
@@ -5473,6 +5473,7 @@ public:
             memcpy(buffer, srcData, required);
             if (bytesReturned) *bytesReturned = required;
             PTRACE(6, "H323ASKW\tQtContentInputDevice: Sent captured frame " << actualW << "x" << actualH);
+            PTRACE(2, "H323ASKW\tQtContentInputDevice: Frame delivered bytes=" << required);
             return true;
         } else {
             // try to rescale if size matches YUV420P for actualW/actualH
@@ -5484,6 +5485,7 @@ public:
                     if (bytesReturned) *bytesReturned = required;
                     PTRACE(3, "H323ASKW\tQtContentInputDevice: Rescaled frame " << actualW << "x" << actualH
                            << " -> " << dstW << "x" << dstH);
+                    PTRACE(2, "H323ASKW\tQtContentInputDevice: Frame delivered bytes=" << required);
                     return true;
                 }
             }
@@ -5493,27 +5495,28 @@ public:
         }
         
     fallback_black_frame:
-        // Generate black frame in ALIGNED buffer first
-        if (!m_alignedBuffer || m_alignedBufferSize < required) {
-            PTRACE(1, "H323ASKW\tQtContentInputDevice: ERROR - Aligned buffer not ready!");
-            return false;
+        // Generate black frame
+        if (m_alignedBuffer && m_alignedBufferSize >= required) {
+            BYTE* yPlane = m_alignedBuffer;
+            BYTE* uPlane = m_alignedBuffer + dstW * dstH;
+            BYTE* vPlane = uPlane + (dstW * dstH) / 4;
+            
+            // Y = 16 (black in video range)
+            memset(yPlane, 16, dstW * dstH);
+            // U, V = 128 (neutral chroma)
+            memset(uPlane, 128, (dstW * dstH) / 4);
+            memset(vPlane, 128, (dstW * dstH) / 4);
+            
+            // Copy from aligned buffer to H323Plus buffer
+            memcpy(buffer, m_alignedBuffer, required);
+        } else {
+            // アラインドバッファなしでも黒フレームを送出
+            PTRACE(1, "H323ASKW\tQtContentInputDevice: Aligned buffer not ready, sending direct black frame");
+            memset(buffer, 0, required);
         }
-        
-        BYTE* yPlane = m_alignedBuffer;
-        BYTE* uPlane = m_alignedBuffer + dstW * dstH;
-        BYTE* vPlane = uPlane + (dstW * dstH) / 4;
-        
-        // Y = 16 (black in video range)
-        memset(yPlane, 16, dstW * dstH);
-        // U, V = 128 (neutral chroma)
-        memset(uPlane, 128, (dstW * dstH) / 4);
-        memset(vPlane, 128, (dstW * dstH) / 4);
-        
-        // Copy from aligned buffer to H323Plus buffer
-        memcpy(buffer, m_alignedBuffer, required);
 
         if (bytesReturned) *bytesReturned = required;
-        PTRACE(4, "H323ASKW\tQtContentInputDevice::GetFrameData: Sending fallback black frame (from aligned buffer)");
+        PTRACE(4, "H323ASKW\tQtContentInputDevice::GetFrameData: Sending fallback black frame (bytes=" << required << ")");
         return true;
     }
 
@@ -9353,7 +9356,7 @@ void MyH323Connection::OnEstablished()
     
     // *** TEMPORARY: DISABLE FORCED VIDEO CHANNEL CODE TO TEST IF IT'S CAUSING THE CRASH ***
     PTRACE(1, "H323ASKW\t⚠️ FORCED VIDEO CHANNEL CODE TEMPORARILY DISABLED FOR DEBUGGING");
-    /*
+#if 0
     // *** IMMEDIATE FORCE VIDEO CHANNEL ESTABLISHMENT FOR MCU ***
     PTRACE(1, "H323ASKW\t🚀 FORCING VIDEO CHANNEL ESTABLISHMENT IMMEDIATELY IN OnEstablished");
     
@@ -9408,6 +9411,7 @@ void MyH323Connection::OnEstablished()
     } else {
         PTRACE(1, "H323ASKW\t❌ No H.264 capability found for forced session");
     }
+#endif
     
     // Start RTP polling for MCU compatibility
     StartRTPPolling();
@@ -9421,21 +9425,20 @@ void MyH323Connection::OnEstablished()
     PTRACE(1, "H323ASKW\t✅ OnEstablished() reached - Video TX OLC already sent in OnSelectLogicalChannels()");
     
     return;  // EXIT - RequestMode timer will handle RX channel
-
-    /* ↓ 以下はデバッグ用に無効化した旧コード（保持のみ）
+    
+    // ↓ 以下はデバッグ用に無効化した旧コード（保持のみ）
+#if 0
     // 🎯 CRITICAL FIX: Register FastStart channels in truth table
     // if (!g_forceSlowStart) {
     //     PTRACE(1, "H323ASKW\t🎯 Registering FastStart channels in truth table");
     //     RegisterFastStartChannelsInTruthTable();
     // }
 
-    // *** TEMPORARY: DISABLE ACTIVE VIDEO OLC CODE TO TEST IF IT'S CAUSING THE CRASH ***
-    // PTRACE(1, "H323ASKW\t⚠️ ACTIVE VIDEO OLC CODE TEMPORARILY DISABLED FOR DEBUGGING");
     // ✅ FIX 2: Force Slow Startでの能動的ビデオOLC送信
     if (g_forceSlowStart || m_forceSlowStartMode) {
-        ...
+        // 旧デバッグコード
     }
-    */
+#endif
 
     // *** FIX 1: FastStartビデオチャンネルの積極的使用 ***
     // MCUがFastStartを受け入れた場合、H.245確認を待たずにビデオ処理を開始
@@ -10437,20 +10440,21 @@ PBoolean MyH323Connection::OpenExtendedVideoChannel(PBoolean isEncoding, H323Vid
         unsigned txFps = 10;
         unsigned targetKbps = 540; // デフォルト帯域要求（kbps）
 
-        // 少帯域ならコンテンツを落として送る
-        // 目安: <300kbps → 426x240@8fps, <700kbps → 640x360@10fps, <900kbps → 854x480@10fps
-        if (availKbps > 0 && availKbps < 300) {
-            txWidth = 432;   // 16 の倍数に合わせて歪みを防止
-            txHeight = 240;
+        // 少帯域でも「受信時と同等の見やすさ」を優先して底上げ
+        // 目安: <220kbps → 320x180@5fps 150kbps, <320kbps → 480x270@8fps 220kbps, <700kbps → 640x360@10fps 400kbps
+        if (availKbps > 0 && availKbps < 220) {
+            txWidth = 320;   // 低帯域用の最小プロファイル
+            txHeight = 180;
+            txFps = 5;
+            targetKbps = 150;
+        } else if (availKbps > 0 && availKbps < 320) {
+            txWidth = 480;
+            txHeight = 270;
             txFps = 8;
-            targetKbps = 200;
+            targetKbps = 220;
         } else if (availKbps > 0 && availKbps < 700) {
             txWidth = 640;
             txHeight = 360;
-            targetKbps = 300;
-        } else if (availKbps > 0 && availKbps < 900) {
-            txWidth = 854;
-            txHeight = 480;
             targetKbps = 400;
         }
 
