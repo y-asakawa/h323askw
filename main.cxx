@@ -16763,6 +16763,18 @@ PBoolean MutableMicChannel::Read(void* buf, PINDEX len)
   // First, read actual audio from microphone
   if (!PIndirectChannel::Read(buf, len))
     return FALSE;
+
+  // Software gain: amplify 16-bit PCM to compensate for low hardware input level
+  int16_t* pcm = reinterpret_cast<int16_t*>(buf);
+  PINDEX samples = len / 2;  // 2 bytes per 16-bit sample
+  const int gain = 2;        // +6 dB; adjust if needed
+
+  for (PINDEX i = 0; i < samples; ++i) {
+    int32_t val = pcm[i] * gain;
+    if (val > 32767) val = 32767;
+    else if (val < -32768) val = -32768;
+    pcm[i] = static_cast<int16_t>(val);
+  }
   
   // If muted, replace with silence (zeros)
   if (m_connection != NULL && m_connection->IsLocalMicMuted()) {
