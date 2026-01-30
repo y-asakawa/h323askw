@@ -49,7 +49,13 @@
 #include <thread>
 #include <vector>  // For Polycom TCS fix
 #include <algorithm>
+#include <cmath>
 #include <dlfcn.h>  // 🎬 For dlsym (preview callback workaround)
+
+// ソフトウェアマイクゲイン（Qt スライダーから更新）: 1.0 = 0 dB
+std::atomic<double> g_inputGainLinear{1.0};
+// ソフトウェアスピーカーゲイン（Qt スライダーから更新）: 1.0 = 0 dB
+std::atomic<double> g_outputGainLinear{1.0};
 
 // ============================================================================
 // 🎯 CRITICAL FIX: FastStart ↔ H.245 Synchronization (Truth Table)
@@ -16767,13 +16773,16 @@ PBoolean MutableMicChannel::Read(void* buf, PINDEX len)
   // Software gain: amplify 16-bit PCM to compensate for low hardware input level
   int16_t* pcm = reinterpret_cast<int16_t*>(buf);
   PINDEX samples = len / 2;  // 2 bytes per 16-bit sample
-  const int gain = 2;        // +6 dB; adjust if needed
+  const double gain = g_inputGainLinear.load(std::memory_order_relaxed);
 
   for (PINDEX i = 0; i < samples; ++i) {
-    int32_t val = pcm[i] * gain;
-    if (val > 32767) val = 32767;
-    else if (val < -32768) val = -32768;
-    pcm[i] = static_cast<int16_t>(val);
+    const int32_t val = static_cast<int32_t>(std::lround(static_cast<double>(pcm[i]) * gain));
+    if (val > 32767)
+      pcm[i] = 32767;
+    else if (val < -32768)
+      pcm[i] = -32768;
+    else
+      pcm[i] = static_cast<int16_t>(val);
   }
   
   // If muted, replace with silence (zeros)
@@ -16801,13 +16810,27 @@ SpectrumSpeakerChannel::SpectrumSpeakerChannel(PSoundChannel* soundChannel, int 
 
 PBoolean SpectrumSpeakerChannel::Write(const void* buf, PINDEX len)
 {
-  // Send audio data to spectrum analyzer before writing to speaker
-  // len is in bytes, each sample is 2 bytes (16-bit PCM)
+  // Apply software gain to speaker output (16-bit PCM, mono assumed here)
   size_t sampleCount = len / 2;
-  UpdateRemoteAudioSpectrum(reinterpret_cast<const int16_t*>(buf), sampleCount, 1, m_sampleRate);
+  const int16_t* in = reinterpret_cast<const int16_t*>(buf);
+  std::vector<int16_t> out(sampleCount);
+
+  const double gain = g_outputGainLinear.load(std::memory_order_relaxed);
+  for (size_t i = 0; i < sampleCount; ++i) {
+    const int32_t val = static_cast<int32_t>(std::lround(static_cast<double>(in[i]) * gain));
+    if (val > 32767)
+      out[i] = 32767;
+    else if (val < -32768)
+      out[i] = -32768;
+    else
+      out[i] = static_cast<int16_t>(val);
+  }
+
+  // Send audio data to spectrum analyzer using post-gain samples
+  UpdateRemoteAudioSpectrum(out.data(), sampleCount, 1, m_sampleRate);
   
-  // Write to actual speaker
-  return PIndirectChannel::Write(buf, len);
+  // Write to actual speaker with adjusted samples
+  return PIndirectChannel::Write(out.data(), len);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

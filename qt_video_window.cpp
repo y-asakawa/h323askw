@@ -30,6 +30,12 @@
 #include <algorithm>
 #include "main.h"
 
+namespace {
+constexpr int kGainSteps = 10;
+const int kDbTable[kGainSteps]   = {-12, -6, -3, 0, 3, 6, 9, 12, 15, 18};
+const double kLinTable[kGainSteps] = {0.25, 0.50, 0.71, 1.00, 1.41, 2.00, 2.82, 4.00, 5.62, 7.94};
+}
+
 #ifndef kCGNullWindowID
 #define kCGNullWindowID 0
 #endif
@@ -865,6 +871,10 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_micCombo(nullptr)
     , m_speakerCombo(nullptr)
     , m_cameraCombo(nullptr)
+    , m_gainSlider(nullptr)
+    , m_gainValueLabel(nullptr)
+    , m_spkGainSlider(nullptr)
+    , m_spkGainValueLabel(nullptr)
     , m_statusLabel(nullptr)
     , m_localSpectrum(nullptr)
     , m_remoteSpectrum(nullptr)
@@ -950,6 +960,52 @@ void QtVideoMainWindow::setupUI()
     spectrumLayout->addLayout(remoteSpectrumBox);
     
     mainLayout->addLayout(spectrumLayout);
+
+    // 入出力ゲインスライダー（Mic / Speaker を横並び）
+    QHBoxLayout* gainRow = new QHBoxLayout();
+
+    auto buildGainBox = [this](const QString& title,
+                               QSlider** sliderOut,
+                               QLabel** valueLabelOut) -> QVBoxLayout* {
+        QVBoxLayout* box = new QVBoxLayout();
+        QLabel* titleLabel = new QLabel(title, this);
+        titleLabel->setAlignment(Qt::AlignCenter);
+        titleLabel->setStyleSheet("font-weight: 600; color: #666;");
+        box->addWidget(titleLabel);
+
+        QHBoxLayout* row = new QHBoxLayout();
+        QLabel* minL = new QLabel("MIN", this);
+        minL->setStyleSheet("color: #888; font-size: 10px;");
+        QLabel* maxL = new QLabel("MAX", this);
+        maxL->setStyleSheet("color: #888; font-size: 10px;");
+
+        QSlider* slider = new QSlider(Qt::Horizontal, this);
+        slider->setRange(0, kGainSteps - 1);   // 0=-12dB, 9=+18dB
+        slider->setTickInterval(1);
+        slider->setTickPosition(QSlider::TicksBelow);
+        slider->setPageStep(1);
+        slider->setValue(3); // 0 dB 初期値
+
+        QLabel* val = new QLabel("0 dB", this);
+        val->setMinimumWidth(50);
+        val->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+        row->addWidget(minL);
+        row->addWidget(slider, 1);
+        row->addWidget(maxL);
+        row->addWidget(val);
+
+        box->addLayout(row);
+        *sliderOut = slider;
+        *valueLabelOut = val;
+        return box;
+    };
+
+    gainRow->addLayout(buildGainBox("Mic Gain", &m_gainSlider, &m_gainValueLabel));
+    gainRow->addSpacing(12);
+    gainRow->addLayout(buildGainBox("Speaker Gain", &m_spkGainSlider, &m_spkGainValueLabel));
+
+    mainLayout->addLayout(gainRow);
 
     // コントロールパネル
     QHBoxLayout* controlLayout = new QHBoxLayout();
@@ -1065,6 +1121,29 @@ void QtVideoMainWindow::setupConnections()
             this, &QtVideoMainWindow::onLocalFrameReady, Qt::QueuedConnection);
     connect(this, &QtVideoMainWindow::remoteFrameReady, 
             this, &QtVideoMainWindow::onRemoteFrameReady, Qt::QueuedConnection);
+
+    // マイクゲインスライダー
+    auto applyGainIndex = [this](int idx) {
+        if (idx < 0) idx = 0;
+        if (idx >= kGainSteps) idx = kGainSteps - 1;
+        g_inputGainLinear.store(kLinTable[idx], std::memory_order_relaxed);
+        const int db = kDbTable[idx];
+        const QString label = QString("%1%2 dB").arg(db > 0 ? "+" : "").arg(db);
+        m_gainValueLabel->setText(label);
+    };
+    auto applySpeakerGainIndex = [this](int idx) {
+        if (idx < 0) idx = 0;
+        if (idx >= kGainSteps) idx = kGainSteps - 1;
+        g_outputGainLinear.store(kLinTable[idx], std::memory_order_relaxed);
+        const int db = kDbTable[idx];
+        const QString label = QString("%1%2 dB").arg(db > 0 ? "+" : "").arg(db);
+        m_spkGainValueLabel->setText(label);
+    };
+
+    connect(m_gainSlider, &QSlider::valueChanged, this, applyGainIndex);
+    connect(m_spkGainSlider, &QSlider::valueChanged, this, applySpeakerGainIndex);
+    applyGainIndex(m_gainSlider->value());  // 初期値反映
+    applySpeakerGainIndex(m_spkGainSlider->value());
 }
 
 void QtVideoMainWindow::populateDeviceLists()

@@ -44,6 +44,7 @@
 #include <QScreen>
 #include <QPixmap>
 #include <atomic>
+#include <QSlider>
 
 #ifdef Q_OS_MAC
 #ifndef __MAC_OS_X_DISABLE_AVAILABILITY
@@ -439,6 +440,10 @@ private:
     QCheckBox* m_cameraCheckbox;
     QPushButton* m_contentButton;  // コンテンツ再表示ボタン
     QPushButton* m_contentSendButton; // コンテンツ送信ボタン
+    QSlider* m_gainSlider;           // マイク入力ゲイン
+    QLabel* m_gainValueLabel;        // 現在のdB表示
+    QSlider* m_spkGainSlider;        // スピーカー出力ゲイン
+    QLabel* m_spkGainValueLabel;     // スピーカーのdB表示
     
     // デバイス選択
     QComboBox* m_micCombo;

@@ -38,6 +38,7 @@
 #include <set>
 #include <cstring>
 #include <string>
+#include <atomic>
 
 #include <h323.h>
 
@@ -63,6 +64,11 @@ static_assert(sizeof(PreviewCallback) == sizeof(void*) * 2,
 #ifdef USE_QT6
 #include "qt_video_window.h"
 #endif
+
+// ソフトウェアマイクゲイン（Qt スライダーで更新）
+extern std::atomic<double> g_inputGainLinear;
+// ソフトウェアスピーカーゲイン（Qt スライダーで更新）
+extern std::atomic<double> g_outputGainLinear;
 
 #if !defined(P_USE_STANDARD_CXX_BOOL) && !defined(P_USE_INTEGER_BOOL)
     typedef int PBoolean;
