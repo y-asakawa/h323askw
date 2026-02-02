@@ -54,7 +54,7 @@ include $(OPENH323DIR)/openh323u.mak
 # This is needed because the default rules may not handle .mm files
 $(OBJDIR)/%.o: %.mm
 	@if [ ! -d $(OBJDIR) ]; then mkdir -p $(OBJDIR); fi
-	$(Q_CC)$(CXX) $(STDCCFLAGS) $(CFLAGS) -c $< -o $@
+	$(Q_CC)$(CXX) $(STDCCFLAGS) $(CXXFLAGS) $(CPPFLAGS) -x objective-c++ -fobjc-arc -c $< -o $@
 
 # Robust macOS detection (use uname as fallback because OSTYPE may vary)
 DARWIN := $(shell uname -s 2>/dev/null)
@@ -66,7 +66,8 @@ ifeq ($(DARWIN),Darwin)
 USB_HID_IMPL_OBJ := $(OBJDIR)/usb_hid_impl.o
 # Use ENDLDLIBS instead of OBJS to add object file at link time
 # This ensures it's linked but we control when it's compiled
-ENDLDLIBS += $(USB_HID_IMPL_OBJ)
+PERMISSIONS_OBJ := $(OBJDIR)/Permissions.o
+ENDLDLIBS += $(USB_HID_IMPL_OBJ) $(PERMISSIONS_OBJ)
 endif
 
 # add cleanup files
@@ -182,6 +183,8 @@ ifeq ($(OSTYPE),Darwin)
   ENDLDLIBS += -framework CoreFoundation -framework CoreVideo -framework CoreMedia -framework CoreGraphics
   # IOKit for USB HID Controller (mute button support)
   ENDLDLIBS += -framework IOKit
+  # AVFoundation/Foundation for permission bootstrap (camera/mic + Bonjour trigger)
+  ENDLDLIBS += -framework AVFoundation -framework Foundation
 endif
 
 # Sanitize ENDLDLIBS using a concise shell pipeline:
@@ -462,6 +465,15 @@ $(OBJDIR)/usb_hid_impl.o: usb_hid_impl.mm usb_hid_impl.h
 # Make main.o depend on usb_hid_impl.o to ensure correct build order
 $(OBJDIR)/main.o: $(OBJDIR)/usb_hid_impl.o
 $(OBJDIR)/usb_hid_controller.o: $(OBJDIR)/usb_hid_impl.o
+
+# Permissions bootstrap (TCC / Local Network / Firewall)
+$(OBJDIR)/Permissions.o: Permissions.mm Permissions.h
+	@mkdir -p $(OBJDIR)
+	@echo "[CC] Permissions.mm (Objective-C++)"
+	$(CXX) $(STDCCFLAGS) $(CXXFLAGS) $(CPPFLAGS) -x objective-c++ -fobjc-arc -c $< -o $@
+
+# Ensure main links against permission bootstrap object
+$(OBJDIR)/main.o: $(OBJDIR)/Permissions.o
 endif
 
 video: debug-info

@@ -282,6 +282,12 @@ create_info_plist() {
     <string>H323ASKW needs access to your microphone for voice calls.</string>
     <key>NSCameraUsageDescription</key>
     <string>H323ASKW needs access to your camera for video calls.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>H323ASKW needs access to the local network to connect to H.323 endpoints on your LAN.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_perm._tcp</string>
+    </array>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>H323ASKW uses Bluetooth to connect to wireless headsets with mute buttons.</string>
     <key>LSArchitecturePriority</key>

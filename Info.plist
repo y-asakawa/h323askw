@@ -26,6 +26,16 @@
     <!-- マイクアクセス許可 -->
     <key>NSMicrophoneUsageDescription</key>
     <string>H323 audio calls require microphone access for voice communication.</string>
+
+    <!-- ローカルネットワークアクセス許可 -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>H323ASKW needs access to the local network to connect to H.323 endpoints on your LAN.</string>
+
+    <!-- Bonjourサービスを短時間広告してローカルネットワーク許可を前倒し -->
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_perm._tcp</string>
+    </array>
     
     <!-- ネットワークアクセス -->
     <key>NSAppTransportSecurity</key>

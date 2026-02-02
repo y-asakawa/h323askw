@@ -1212,6 +1212,12 @@ bool MyH323Connection::OpenVideoTransmitChannel() {
 // Qt6を使う場合、カスタムのmain関数が必要
 // QApplicationをまず作成し、その後PTLibのプロセスを開始する
 #include <QApplication>
+#ifdef __APPLE__
+#include <QSettings>
+#include <QEventLoop>
+#include <QMessageBox>
+#include "Permissions.h"
+#endif
 #include <QStringList>
 #include <csignal>
 #include <execinfo.h>
@@ -1527,6 +1533,41 @@ int main(int argc, char* argv[])
     
     // QApplicationを作成（GUIを表示するために必要）
     g_qApp = new QApplication(argc, argv);
+
+#ifdef __APPLE__
+    {
+        // 初回だけ“まとめて”権限を取りに行く
+        QSettings s("H323Plus", "H323ASKW");
+        if (!s.value("didBootstrapPerms", false).toBool()) {
+
+            QMessageBox::information(nullptr,
+              "初回設定",
+              "初回起動のため、カメラ・マイク・ローカルネットワーク・受信接続の許可確認が表示されます。\n"
+              "テレビ会議機能のために必要です。");
+
+            // 1) カメラ＆マイク（TCC）
+            QEventLoop loop1;
+            askw_request_camera_and_mic(
+              [](void* ctx){ static_cast<QEventLoop*>(ctx)->quit(); },
+              &loop1
+            );
+            loop1.exec();
+
+            // 2) ローカルネットワーク（前倒しで出したい場合）
+            QEventLoop loop2;
+            askw_trigger_local_network_prompt(
+              [](void* ctx){ static_cast<QEventLoop*>(ctx)->quit(); },
+              &loop2
+            );
+            loop2.exec();
+
+            // 3) Firewall受信許可（前倒し）
+            askw_trigger_firewall_prompt_once();
+
+            s.setValue("didBootstrapPerms", true);
+        }
+    }
+#endif
     
     // PTLibプロセスのインスタンスを作成
     H323ASKW instance;
