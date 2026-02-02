@@ -70,6 +70,8 @@ X264_LIB=""
 X264_NAME=""
 PORTAUDIO_LIB=""
 PORTAUDIO_NAME=""
+SPEEXDSP_LIB=""
+SPEEXDSP_NAME=""
 
 # ===== 色付き出力 =====
 RED='\033[0;31m'
@@ -180,6 +182,7 @@ check_prerequisites() {
         "ffmpeg/lib/libswscale.*.dylib"
         "x264/lib/libx264.*.dylib"
         "portaudio/lib/libportaudio.*.dylib"
+        "speexdsp/lib/libspeexdsp.*.dylib"
     )
     
     for pattern in "${homebrew_libs[@]}"; do
@@ -391,6 +394,15 @@ copy_libraries() {
         cp "$SWSCALE_LIB" "${FRAMEWORKS}/${SWSCALE_NAME}"
     fi
     
+    # SpeexDSP (AEC/NS用)
+    SPEEXDSP_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/speexdsp/lib" "libspeexdsp")
+    if [ -n "$SPEEXDSP_LIB" ]; then
+        SPEEXDSP_NAME=$(major_dylib_basename "$SPEEXDSP_LIB")
+        cp "$SPEEXDSP_LIB" "${FRAMEWORKS}/${SPEEXDSP_NAME}"
+    else
+        log_warn "SpeexDSP (libspeexdsp) が見つかりませんでした。AEC/NS を使う場合は Homebrew でインストールしてください。"
+    fi
+    
     # x264
     X264_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/x264/lib" "libx264")
     if [ -n "$X264_LIB" ]; then
@@ -534,6 +546,15 @@ copy_plugins() {
     
     # Sound device (PortAudio)
     cp "${PTLIB_DIR}/lib_Darwin_aarch64/device/sound/portaudio_pwplugin.dylib" "${PLUGINS}/sound/"
+    # --- sound_portaudio プラグインの修正 ---
+    log_info "  sound_portaudio プラグインの依存関係を修正..."
+    install_name_tool -id "@executable_path/../Resources/plugins/sound/portaudio_pwplugin.dylib" \
+        "${PLUGINS}/sound/portaudio_pwplugin.dylib"
+    change_dep_if_present "${PLUGINS}/sound/portaudio_pwplugin.dylib" "libportaudio.*\\.dylib" "@executable_path/../Frameworks/${PORTAUDIO_NAME}"
+    change_dep_if_present "${PLUGINS}/sound/portaudio_pwplugin.dylib" "libpt.*\\.dylib" "@executable_path/../Frameworks/libpt.dylib"
+    if [ -n "$SPEEXDSP_NAME" ]; then
+        change_dep_if_present "${PLUGINS}/sound/portaudio_pwplugin.dylib" "libspeexdsp.*\\.dylib" "@executable_path/../Frameworks/${SPEEXDSP_NAME}"
+    fi
     
     log_success "プラグインをコピーしました"
 }
@@ -562,6 +583,10 @@ fix_library_paths() {
     if [ -n "$OPENSSL_CRYPTO_NAME" ]; then
         change_dep_if_present "${MACOS}/h323askw" "libcrypto.*\\.dylib" "@executable_path/../Frameworks/${OPENSSL_CRYPTO_NAME}"
     fi
+    # SpeexDSP
+    if [ -n "$SPEEXDSP_NAME" ]; then
+        change_dep_if_present "${MACOS}/h323askw" "libspeexdsp.*\\.dylib" "@executable_path/../Frameworks/${SPEEXDSP_NAME}"
+    fi
     
     # Qt6 (qtbaseからコピー)
     install_name_tool -change \
@@ -587,6 +612,7 @@ fix_library_paths() {
     [ -n "$OPENSSL_SSL_NAME" ] && install_name_tool -id "@executable_path/../Frameworks/${OPENSSL_SSL_NAME}" "${FRAMEWORKS}/${OPENSSL_SSL_NAME}"
     [ -n "$OPENSSL_CRYPTO_NAME" ] && install_name_tool -id "@executable_path/../Frameworks/${OPENSSL_CRYPTO_NAME}" "${FRAMEWORKS}/${OPENSSL_CRYPTO_NAME}"
     [ -n "$AVCODEC_NAME" ] && install_name_tool -id "@executable_path/../Frameworks/${AVCODEC_NAME}" "${FRAMEWORKS}/${AVCODEC_NAME}"
+    [ -n "$SPEEXDSP_NAME" ] && install_name_tool -id "@executable_path/../Frameworks/${SPEEXDSP_NAME}" "${FRAMEWORKS}/${SPEEXDSP_NAME}"
     
     # Qt6 フレームワークのIDを修正
     log_info "  Qt6 フレームワークのIDを修正..."

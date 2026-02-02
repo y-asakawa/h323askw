@@ -40,6 +40,10 @@
 #include <ptclib/random.h>
 #include <ptlib/video.h>
 #include <ptlib/sound.h>  // For PSoundChannel (audio devices)
+#if defined(USE_SPEEXDSP)
+#include <speex/speex_echo.h>
+#include <speex/speex_preprocess.h>
+#endif
 #include <h323neg.h>
 #include <string>
 #include <set>
@@ -49,6 +53,7 @@
 #include <thread>
 #include <vector>  // For Polycom TCS fix
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <dlfcn.h>  // 🎬 For dlsym (preview callback workaround)
 
@@ -56,6 +61,347 @@
 std::atomic<double> g_inputGainLinear{1.0};
 // ソフトウェアスピーカーゲイン（Qt スライダーから更新）: 1.0 = 0 dB
 std::atomic<double> g_outputGainLinear{1.0};
+
+#if defined(USE_SPEEXDSP)
+namespace {
+constexpr unsigned kSpeexFrameDivisor = 100;          // 10ms frames (rate / 100)
+constexpr unsigned kDefaultAecTailMs = 200;           // Tail length recommendation
+constexpr unsigned kDefaultPlaybackDelayMs = 100;     // Extra delay to match output->mic path
+constexpr int kDefaultEchoSuppress = -50;             // Residual echo suppression (near-end silent)
+constexpr int kDefaultEchoSuppressActive = -15;       // Residual echo during double-talk
+constexpr int kDefaultNoiseSuppress = -20;            // Noise suppression in dB
+constexpr int kDefaultAgcTarget = 12000;              // AGC target level (int16)
+
+unsigned ReadEnvMs(const char* name, unsigned fallback)
+{
+  const char* v = ::getenv(name);
+  if (v == NULL || *v == '\0')
+    return fallback;
+  char* end = NULL;
+  long parsed = strtol(v, &end, 10);
+  if (end == v || parsed <= 0)
+    return fallback;
+  return static_cast<unsigned>(parsed);
+}
+
+inline bool SpeexRuntimeDisabled()
+{
+  const char* v = ::getenv("H323ASKW_DISABLE_SPEEXDSP");
+  return (v && (*v == '1' || *v == 'y' || *v == 'Y' || *v == 't' || *v == 'T'));
+}
+}  // namespace
+
+// =====================================================================
+// SpeexAudioProcessor - shared AEC/NS/AGC processor for one connection
+// =====================================================================
+class SpeexAudioProcessor
+{
+public:
+  SpeexAudioProcessor(unsigned sampleRate,
+                      unsigned frameSamples,
+                      unsigned tailMs,
+                      unsigned playbackDelayMs,
+                      bool enableAgc = false)
+  {
+    init(sampleRate, frameSamples, tailMs, playbackDelayMs, enableAgc);
+  }
+
+  ~SpeexAudioProcessor()
+  {
+    destroy();
+  }
+
+  void Reconfigure(unsigned sampleRate,
+                   unsigned frameSamples,
+                   unsigned tailMs,
+                   unsigned playbackDelayMs,
+                   bool enableAgc)
+  {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    init(sampleRate, frameSamples, tailMs, playbackDelayMs, enableAgc);
+  }
+
+  unsigned SampleRate() const { return m_rate; }
+  unsigned FrameSamples() const { return m_frameSize; }
+  bool     IsForceBypass() const { return m_forceBypass; }
+  bool     HasPlaybackFrame() const {
+    return (!m_playbackFifo.empty()) || (m_lastPlaybackFrame.size() == m_frameSize);
+  }
+
+  // Post-gain speaker samples feed the echo reference
+  void PushPlayback(const int16_t* data, size_t samples)
+  {
+    if (data == NULL || samples == 0)
+      return;
+
+    std::lock_guard<std::mutex> lk(m_mutex);
+    if (!m_preprocess)
+      return;
+
+    m_playbackFifo.insert(m_playbackFifo.end(), data, data + samples);
+
+    // Keep a copy of the most recent playback frame for priming
+    if (samples >= m_frameSize) {
+      m_lastPlaybackFrame.assign(data + samples - m_frameSize, data + samples);
+    } else if (m_playbackFifo.size() >= m_frameSize) {
+      // If smaller chunk appended, take the last full frame from fifo
+      m_lastPlaybackFrame.assign(m_playbackFifo.end() - m_frameSize, m_playbackFifo.end());
+    }
+
+    // Trim playback FIFO to avoid unbounded growth (cap to ~tail length)
+    const size_t maxPlayback = std::max<size_t>(m_frameSize * 4,
+                           (m_tailMs > 0) ? (size_t)((m_rate * m_tailMs) / 1000) : m_frameSize * 20);
+    if (m_playbackFifo.size() > maxPlayback) {
+      m_playbackFifo.erase(m_playbackFifo.begin(),
+                           m_playbackFifo.begin() + (m_playbackFifo.size() - maxPlayback));
+    }
+  }
+
+  // Mic path - in-place processing (AEC + NS + AGC)
+  void ProcessCapture(int16_t* io, size_t samples)
+  {
+    if (io == NULL || samples == 0)
+      return;
+
+    // 保険: 元の読み出しデータを保持しておき、出力が生成できない場合はこれを返す
+    std::vector<int16_t> original(io, io + samples);
+
+    std::lock_guard<std::mutex> lk(m_mutex);
+    if (!m_preprocess)
+      return;
+
+    m_captureFifo.insert(m_captureFifo.end(), io, io + samples);
+
+    if (m_tmpNear.size() < m_frameSize) m_tmpNear.resize(m_frameSize);
+    if (m_tmpOut.size()  < m_frameSize) m_tmpOut.resize(m_frameSize);
+
+    auto processFrame = [&](const spx_int16_t* inFrame) {
+      if (m_forceBypass) {
+        m_outputFifo.insert(m_outputFifo.end(), inFrame, inFrame + m_frameSize);
+        return;
+      }
+#if defined(USE_SPEEXDSP_AEC)
+      if (m_echo != NULL) {
+        if (m_tmpFar.size() < m_frameSize) m_tmpFar.resize(m_frameSize);
+
+        // Use queued playback if available, otherwise last known frame, else zeros.
+        const bool hasPlayback = (m_playbackFifo.size() >= m_frameSize) ||
+                                 (m_lastPlaybackFrame.size() == m_frameSize);
+
+        if (m_playbackFifo.size() >= m_frameSize) {
+          for (unsigned i = 0; i < m_frameSize; ++i) {
+            m_tmpFar[i] = m_playbackFifo.front();
+            m_playbackFifo.pop_front();
+          }
+          m_lastPlaybackFrame.assign(m_tmpFar.begin(), m_tmpFar.end());
+        } else if (m_lastPlaybackFrame.size() == m_frameSize) {
+          std::copy(m_lastPlaybackFrame.begin(), m_lastPlaybackFrame.end(), m_tmpFar.begin());
+        } else {
+          std::fill(m_tmpFar.begin(), m_tmpFar.end(), 0);
+        }
+
+        // Playback未到着時は完全素通し（AEC/NSを掛けない）で無音化を防ぐ
+        if (!hasPlayback) {
+          std::copy(inFrame, inFrame + m_frameSize, m_tmpOut.begin());
+          m_outputFifo.insert(m_outputFifo.end(), m_tmpOut.begin(), m_tmpOut.end());
+          return;
+        }
+
+        speex_echo_cancellation(m_echo, inFrame, m_tmpFar.data(), m_tmpOut.data());
+      } else {
+        std::copy(inFrame, inFrame + m_frameSize, m_tmpOut.begin());
+      }
+#else
+      std::copy(inFrame, inFrame + m_frameSize, m_tmpOut.begin());
+#endif
+      // Save original energy before preprocess to detect over-suppression
+      int64_t inEnergy = 0;
+      for (unsigned i = 0; i < m_frameSize; ++i) inEnergy += std::abs((int)m_tmpOut[i]);
+
+      speex_preprocess_run(m_preprocess, m_tmpOut.data());
+
+      int64_t outEnergy = 0;
+      for (unsigned i = 0; i < m_frameSize; ++i) outEnergy += std::abs((int)m_tmpOut[i]);
+
+      // If preprocess muted everything while input had energy, fall back to raw frame
+      if (inEnergy > 0 && outEnergy < (inEnergy / 4)) { // more lenient (25%)
+        ++m_zeroOutStreak;
+        if (m_zeroOutStreak >= 5) {
+          m_forceBypass = true;
+          PTRACE(1, "SpeexDSP\t⚠️ safety-bypass engaged after repeated heavy suppression");
+          m_outputFifo.insert(m_outputFifo.end(), inFrame, inFrame + m_frameSize);
+          return;
+        }
+        std::copy(inFrame, inFrame + m_frameSize, m_tmpOut.begin());
+      } else {
+        m_zeroOutStreak = 0;
+      }
+
+      m_outputFifo.insert(m_outputFifo.end(), m_tmpOut.begin(), m_tmpOut.end());
+    };
+
+    // Process all full frames
+    while (m_captureFifo.size() >= m_frameSize) {
+      for (unsigned i = 0; i < m_frameSize; ++i) {
+        m_tmpNear[i] = m_captureFifo.front();
+        m_captureFifo.pop_front();
+      }
+      processFrame(m_tmpNear.data());
+    }
+
+    // Process leftover with zero-padding so it doesn't linger across calls
+    if (!m_captureFifo.empty()) {
+      size_t remain = m_captureFifo.size();
+      std::fill(m_tmpNear.begin(), m_tmpNear.end(), 0);
+      for (size_t i = 0; i < remain; ++i) {
+        m_tmpNear[i] = m_captureFifo.front();
+        m_captureFifo.pop_front();
+      }
+      processFrame(m_tmpNear.data());
+    }
+
+    // Emit processed samples (keep any surplus for the next invocation)
+    const size_t available = m_outputFifo.size();
+    const size_t toCopy = std::min(samples, available);
+
+    if (available == 0) {
+      // 何も生成できなかった場合は読み出した生データをそのまま返す
+      std::copy(original.begin(), original.end(), io);
+      return;
+    }
+
+    for (size_t i = 0; i < toCopy; ++i) {
+      io[i] = m_outputFifo.front();
+      m_outputFifo.pop_front();
+    }
+    if (toCopy < samples) {
+      // 足りない分は元の入力をそのまま返す（無音化防止）
+      std::copy(original.begin() + toCopy, original.end(), io + toCopy);
+    }
+  }
+
+private:
+  void destroy()
+  {
+#if defined(USE_SPEEXDSP_AEC)
+    if (m_echo) {
+      speex_echo_state_destroy(m_echo);
+      m_echo = NULL;
+    }
+#endif
+    if (m_preprocess) {
+      speex_preprocess_state_destroy(m_preprocess);
+      m_preprocess = NULL;
+    }
+    m_playbackFifo.clear();
+    m_captureFifo.clear();
+    m_outputFifo.clear();
+  }
+
+  void init(unsigned sampleRate,
+            unsigned frameSamples,
+            unsigned tailMs,
+            unsigned playbackDelayMs,
+            bool enableAgc)
+  {
+    destroy();
+
+    m_rate = sampleRate;
+    m_frameSize = frameSamples;
+    m_tailMs = tailMs;
+    m_playbackDelayMs = playbackDelayMs;
+    m_playbackDelaySamples = (int)((sampleRate * playbackDelayMs) / 1000);
+
+#if defined(USE_SPEEXDSP_AEC)
+    const int tailSamples = (int)((sampleRate * tailMs) / 1000);
+    m_echo = speex_echo_state_init(m_frameSize, tailSamples);
+    if (m_echo != NULL) {
+      int rate = static_cast<int>(sampleRate);
+      speex_echo_ctl(m_echo, SPEEX_ECHO_SET_SAMPLING_RATE, &rate);
+#ifdef SPEEX_ECHO_SET_DELAY
+      if (m_playbackDelaySamples > 0) {
+        speex_echo_ctl(m_echo, SPEEX_ECHO_SET_DELAY, &m_playbackDelaySamples);
+      }
+#endif
+    }
+#endif
+
+    m_preprocess = speex_preprocess_state_init(m_frameSize, sampleRate);
+#if defined(USE_SPEEXDSP_AEC)
+    if (m_preprocess && m_echo) {
+      speex_preprocess_ctl(m_preprocess, SPEEX_PREPROCESS_SET_ECHO_STATE, m_echo);
+    }
+#endif
+    if (m_preprocess) {
+      int denoise = 1;
+      int ns = kDefaultNoiseSuppress;
+      int vad = 0;  // conservative: keep VAD/DTX off initially
+      speex_preprocess_ctl(m_preprocess, SPEEX_PREPROCESS_SET_DENOISE, &denoise);
+      speex_preprocess_ctl(m_preprocess, SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &ns);
+      speex_preprocess_ctl(m_preprocess, SPEEX_PREPROCESS_SET_VAD, &vad);
+
+#if defined(USE_SPEEXDSP_AEC)
+      int echoSuppress = kDefaultEchoSuppress;
+      int echoSuppressActive = kDefaultEchoSuppressActive;
+      speex_preprocess_ctl(m_preprocess, SPEEX_PREPROCESS_SET_ECHO_SUPPRESS, &echoSuppress);
+      speex_preprocess_ctl(m_preprocess, SPEEX_PREPROCESS_SET_ECHO_SUPPRESS_ACTIVE, &echoSuppressActive);
+#endif
+
+      int agc = enableAgc ? 1 : 0;
+      speex_preprocess_ctl(m_preprocess, SPEEX_PREPROCESS_SET_AGC, &agc);
+      if (enableAgc) {
+        int agcLevel = kDefaultAgcTarget;
+        speex_preprocess_ctl(m_preprocess, SPEEX_PREPROCESS_SET_AGC_LEVEL, &agcLevel);
+      }
+    }
+
+    m_tmpNear.resize(m_frameSize);
+    m_tmpOut.resize(m_frameSize);
+    m_tmpFar.resize(m_frameSize);
+
+    PTRACE(1, "SpeexDSP\tInitialized: rate=" << sampleRate
+           << " frame=" << frameSamples
+           << " tailMs=" << tailMs
+           << " delayMs=" << playbackDelayMs
+           << " AGC=" << (enableAgc ? "on" : "off"));
+  }
+
+  unsigned m_rate = 0;
+  unsigned m_frameSize = 0;
+  unsigned m_tailMs = 0;
+  unsigned m_playbackDelayMs = 0;
+  int      m_playbackDelaySamples = 0;
+  unsigned m_zeroOutStreak = 0;
+  bool     m_forceBypass = false;
+
+#if defined(USE_SPEEXDSP_AEC)
+  SpeexEchoState* m_echo = NULL;
+#endif
+  SpeexPreprocessState* m_preprocess = NULL;
+
+  std::deque<spx_int16_t> m_playbackFifo;
+  std::deque<spx_int16_t> m_captureFifo;
+  std::deque<spx_int16_t> m_outputFifo;
+  std::vector<spx_int16_t> m_tmpNear;
+  std::vector<spx_int16_t> m_tmpFar;
+  std::vector<spx_int16_t> m_tmpOut;
+  std::vector<spx_int16_t> m_lastPlaybackFrame;
+
+  std::mutex m_mutex;
+};
+#else
+// Stub implementation when SpeexDSP is not linked; keeps interfaces intact.
+class SpeexAudioProcessor
+{
+public:
+  SpeexAudioProcessor(unsigned, unsigned, unsigned, unsigned, bool = false) {}
+  void Reconfigure(unsigned, unsigned, unsigned, unsigned, bool) {}
+  unsigned SampleRate() const { return 0; }
+  unsigned FrameSamples() const { return 0; }
+  void PushPlayback(const int16_t*, size_t) {}
+  void ProcessCapture(int16_t*, size_t) {}
+};
+#endif // defined(USE_SPEEXDSP)
 
 // ============================================================================
 // 🎯 CRITICAL FIX: FastStart ↔ H.245 Synchronization (Truth Table)
@@ -4417,6 +4763,11 @@ MyH323Connection::MyH323Connection(MyH323EndPoint & ep, unsigned callRef)
   , m_videoSessionSecured(false)
 {
     detectInBandDTMF = FALSE; // turn off in-band DTMF detection (uses a huge amount of CPU)
+    
+#if defined(USE_SPEEXDSP)
+    m_aecDelayMs = ReadEnvMs("H323ASKW_AEC_DELAY_MS", kDefaultPlaybackDelayMs);
+    PTRACE(2, "H323ASKW\tSpeexDSP AEC delay = " << m_aecDelayMs << " ms (set H323ASKW_AEC_DELAY_MS to override)");
+#endif
   // Initialize members that must follow declaration order (assigned in body to avoid -Wreorder-ctor)
   // Declaration order (in main.h) places these before 'endpoint', so initialize here.
   m_videoSessionID = 0;         // Initialize video session tracking
@@ -7898,7 +8249,8 @@ PBoolean MyH323Connection::OpenAudioChannel(PBoolean isEncoding, unsigned buffer
   // Audio parameters for VoIP
   unsigned channels = 1;    // Mono
   unsigned bits = 16;       // 16-bit PCM
-  
+  const unsigned frameSamples = std::max(1u, rate / 100); // 10ms frames
+
   PTRACE(2, "H323ASKW\t🎵 Audio config: codec=" << codecName << " rate=" << rate << "Hz");
   
   // For PortAudio devices, use "PortAudio" as the driver
@@ -7942,15 +8294,40 @@ PBoolean MyH323Connection::OpenAudioChannel(PBoolean isEncoding, unsigned buffer
   
   // Configure sound channel buffers
   snd->SetBuffers(bufferSize, 2);
+
+#if defined(USE_SPEEXDSP)
+  std::shared_ptr<SpeexAudioProcessor> speexProc;
+  if (!SpeexRuntimeDisabled()) {
+    // Initialize or reconfigure shared Speex processor (AEC/NS)
+    const unsigned tailMs = kDefaultAecTailMs;
+    const unsigned delayMs = (m_aecDelayMs > 0) ? m_aecDelayMs : kDefaultPlaybackDelayMs;
+    const bool enableAgc = false; // start conservatively; software gain remains available
+
+    if (!m_speexProcessor ||
+        m_speexProcessor->SampleRate() != rate ||
+        m_speexProcessor->FrameSamples() != frameSamples) {
+      m_speexProcessor = std::make_shared<SpeexAudioProcessor>(rate, frameSamples, tailMs, delayMs, enableAgc);
+    } else {
+      m_speexProcessor->Reconfigure(rate, frameSamples, tailMs, delayMs, enableAgc);
+    }
+    speexProc = m_speexProcessor;
+  } else {
+    PTRACE(1, "H323ASKW\tSpeexDSP runtime disabled via H323ASKW_DISABLE_SPEEXDSP");
+  }
+#endif
+
+#if !defined(USE_SPEEXDSP)
+  std::shared_ptr<SpeexAudioProcessor> speexProc;
+#endif
   
   // For microphone (encoding), wrap with MutableMicChannel for mute support + spectrum
   if (isEncoding) {
-    MutableMicChannel* muteMic = new MutableMicChannel(snd, this);
+    MutableMicChannel* muteMic = new MutableMicChannel(snd, this, rate, frameSamples, speexProc);
     codec.AttachChannel(muteMic);
     PTRACE(1, "H323ASKW\t🎤 Microphone wrapped with MutableMicChannel for mute support + spectrum");
   } else {
     // Speaker - wrap with SpectrumSpeakerChannel for spectrum display
-    SpectrumSpeakerChannel* spectrumSpk = new SpectrumSpeakerChannel(snd, rate);
+    SpectrumSpeakerChannel* spectrumSpk = new SpectrumSpeakerChannel(snd, rate, speexProc);
     codec.AttachChannel(spectrumSpk);
     PTRACE(1, "H323ASKW\t🔊 Speaker wrapped with SpectrumSpeakerChannel for spectrum display");
   }
@@ -16757,11 +17134,20 @@ void MyH323Connection::ToggleCameraMute()
 
 ///////////////////////////////////////////////////////////////////////////////
 // MutableMicChannel implementation - Mutes microphone audio when m_localMicMuted is true
-MutableMicChannel::MutableMicChannel(PSoundChannel* soundChannel, MyH323Connection* connection)
+MutableMicChannel::MutableMicChannel(PSoundChannel* soundChannel,
+                                     MyH323Connection* connection,
+                                     unsigned sampleRate,
+                                     unsigned frameSamples,
+                                     const std::shared_ptr<SpeexAudioProcessor>& speexProcessor)
   : m_connection(connection)
+  , m_sampleRate(sampleRate)
+  , m_frameSamples(frameSamples)
+  , m_speexProcessor(speexProcessor)
 {
   Open(soundChannel);
-  PTRACE(1, "MutableMic\t🎤 MutableMicChannel created - mute support enabled");
+  PTRACE(1, "MutableMic\t🎤 MutableMicChannel created - mute support enabled, "
+         "rate=" << sampleRate << " frame=" << frameSamples
+         << (m_speexProcessor ? " with SpeexDSP" : " (SpeexDSP disabled)"));
 }
 
 PBoolean MutableMicChannel::Read(void* buf, PINDEX len)
@@ -16770,9 +17156,55 @@ PBoolean MutableMicChannel::Read(void* buf, PINDEX len)
   if (!PIndirectChannel::Read(buf, len))
     return FALSE;
 
-  // Software gain: amplify 16-bit PCM to compensate for low hardware input level
   int16_t* pcm = reinterpret_cast<int16_t*>(buf);
-  PINDEX samples = len / 2;  // 2 bytes per 16-bit sample
+  const PINDEX samples = len / 2;  // 2 bytes per 16-bit sample
+  std::vector<int16_t> rawCopy(pcm, pcm + samples); // pre-processing snapshot
+
+#if defined(USE_SPEEXDSP)
+  if (m_speexProcessor) {
+    m_speexProcessor->ProcessCapture(pcm, static_cast<size_t>(samples));
+  }
+#endif
+
+  // Fallback: if processing produced all zeros, restore raw mic data
+  bool allZeroAfter = true;
+  for (PINDEX i = 0; i < samples; ++i) {
+    if (pcm[i] != 0) { allZeroAfter = false; break; }
+  }
+  if (allZeroAfter) {
+    std::copy(rawCopy.begin(), rawCopy.end(), pcm);
+    PTRACE(2, "MutableMic\t⚠️ Post-process zero detected, restored raw input (" << samples << " samples)");
+  }
+
+  // Debug: detect if output is all zeros after processing
+  static unsigned zeroLogCounter = 0;
+  bool allZero = true;
+  int64_t energy = 0;
+  for (PINDEX i = 0; i < samples; ++i) {
+    energy += std::abs((int)pcm[i]);
+    if (pcm[i] != 0) { allZero = false; }
+  }
+  if (allZero) {
+    ++zeroLogCounter;
+    if (zeroLogCounter % 50 == 1) { // log sparsely
+      bool forceBypass = false;
+      bool hasPlayback = false;
+#if defined(USE_SPEEXDSP)
+      if (m_speexProcessor) {
+        forceBypass = m_speexProcessor->IsForceBypass();
+        hasPlayback = m_speexProcessor->HasPlaybackFrame();
+      }
+#endif
+      PTRACE(2, "MutableMic\t⚠️ Zero output after processing. energy=" << energy
+             << " bypass=" << (forceBypass ? "yes" : "no")
+             << " playbackAvail=" << (hasPlayback ? "yes" : "no")
+             << " samples=" << samples);
+    }
+  } else {
+    zeroLogCounter = 0;
+  }
+
+  // Software gain: amplify 16-bit PCM to compensate for low hardware input level
   const double gain = g_inputGainLinear.load(std::memory_order_relaxed);
 
   for (PINDEX i = 0; i < samples; ++i) {
@@ -16791,18 +17223,21 @@ PBoolean MutableMicChannel::Read(void* buf, PINDEX len)
     PTRACE(5, "MutableMic\t🔇 Muted - sending silence (" << len << " bytes)");
   }
   
-  // Send audio data to spectrum analyzer (16-bit PCM, mono, 16kHz assumed)
+  // Send audio data to spectrum analyzer (16-bit PCM, mono)
   // len is in bytes, each sample is 2 bytes (16-bit)
   size_t sampleCount = len / 2;
-  UpdateLocalAudioSpectrum(reinterpret_cast<const int16_t*>(buf), sampleCount, 1, 16000);
+  UpdateLocalAudioSpectrum(reinterpret_cast<const int16_t*>(buf), sampleCount, 1, m_sampleRate);
   
   return TRUE;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // SpectrumSpeakerChannel implementation - Captures speaker audio for spectrum display
-SpectrumSpeakerChannel::SpectrumSpeakerChannel(PSoundChannel* soundChannel, int sampleRate)
+SpectrumSpeakerChannel::SpectrumSpeakerChannel(PSoundChannel* soundChannel,
+                                               int sampleRate,
+                                               const std::shared_ptr<SpeexAudioProcessor>& speexProcessor)
   : m_sampleRate(sampleRate)
+  , m_speexProcessor(speexProcessor)
 {
   Open(soundChannel);
   PTRACE(1, "SpectrumSpk\t🔊 SpectrumSpeakerChannel created - spectrum capture enabled @ " << sampleRate << "Hz");
@@ -16825,6 +17260,13 @@ PBoolean SpectrumSpeakerChannel::Write(const void* buf, PINDEX len)
     else
       out[i] = static_cast<int16_t>(val);
   }
+
+#if defined(USE_SPEEXDSP)
+  // Feed post-gain speaker samples as AEC playback reference
+  if (m_speexProcessor) {
+    m_speexProcessor->PushPlayback(out.data(), sampleCount);
+  }
+#endif
 
   // Send audio data to spectrum analyzer using post-gain samples
   UpdateRemoteAudioSpectrum(out.data(), sampleCount, 1, m_sampleRate);

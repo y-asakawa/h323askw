@@ -74,6 +74,26 @@ CLEAN_FILES += PWL*
 
 STDCCFLAGS += -Wno-unused-variable
 
+PKG_CONFIG ?= $(shell which pkg-config 2>/dev/null)
+
+# ===== SpeexDSP (AEC/NS/AGC) =====
+SPEEXDSP_FOUND := 0
+ifneq ($(PKG_CONFIG),)
+  SPEEXDSP_CFLAGS := $(shell pkg-config --cflags speexdsp 2>/dev/null)
+  SPEEXDSP_LIBS   := $(shell pkg-config --libs speexdsp 2>/dev/null)
+  ifneq ($(SPEEXDSP_CFLAGS),)
+    SPEEXDSP_FOUND := 1
+    STDCCFLAGS += -DUSE_SPEEXDSP -DUSE_SPEEXDSP_AEC $(SPEEXDSP_CFLAGS)
+    ENDLDLIBS += $(SPEEXDSP_LIBS)
+    ifeq ($(QUIET),0)
+      $(info SpeexDSP found via pkg-config - enabling AEC/NS/AGC)
+    endif
+  endif
+endif
+ifeq ($(SPEEXDSP_FOUND),0)
+  $(warning SpeexDSP not found - echo cancellation / noise suppression disabled)
+endif
+
 # ===== Qt6 Support =====
 # Qt6 is enabled by default for video display
 QT6_FOUND := 0

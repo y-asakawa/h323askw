@@ -120,6 +120,8 @@ class Qt6VideoOutputDevice : public PVideoOutputDevice
 };
 #endif // USE_QT6
 
+class SpeexAudioProcessor;  // SpeexDSP-based audio processor (AEC/NS/AGC)
+
 ///////////////////////////////////////////////////////////////////////////////
 
 // Custom RTP session to handle video packets in audio session
@@ -154,12 +156,19 @@ class MutableMicChannel : public PIndirectChannel
     PCLASSINFO(MutableMicChannel, PIndirectChannel);
     
   public:
-    MutableMicChannel(PSoundChannel* soundChannel, MyH323Connection* connection);
+    MutableMicChannel(PSoundChannel* soundChannel,
+                      MyH323Connection* connection,
+                      unsigned sampleRate,
+                      unsigned frameSamples,
+                      const std::shared_ptr<SpeexAudioProcessor>& speexProcessor);
     
     virtual PBoolean Read(void* buf, PINDEX len) override;
     
   private:
     MyH323Connection* m_connection;
+    unsigned          m_sampleRate;
+    unsigned          m_frameSamples;
+    std::shared_ptr<SpeexAudioProcessor> m_speexProcessor;
 };
 
 // Wraps speaker PSoundChannel to capture audio data for spectrum analyzer
@@ -168,12 +177,15 @@ class SpectrumSpeakerChannel : public PIndirectChannel
     PCLASSINFO(SpectrumSpeakerChannel, PIndirectChannel);
     
   public:
-    SpectrumSpeakerChannel(PSoundChannel* soundChannel, int sampleRate);
+    SpectrumSpeakerChannel(PSoundChannel* soundChannel,
+                           int sampleRate,
+                           const std::shared_ptr<SpeexAudioProcessor>& speexProcessor);
     
     virtual PBoolean Write(const void* buf, PINDEX len) override;
     
   private:
     int m_sampleRate;
+    std::shared_ptr<SpeexAudioProcessor> m_speexProcessor;
 };
 
 // グローバル関数：スペクトラム更新（Qt6 UIへの橋渡し）
@@ -1225,6 +1237,13 @@ public:
      * false = カメラ有効 (通常映像を送信)
      */
     std::atomic<bool> m_localCameraMuted{false};
+
+#if defined(USE_SPEEXDSP)
+    // Shared SpeexDSP processor used by mic/speaker for AEC/NS/AGC
+    std::shared_ptr<SpeexAudioProcessor> m_speexProcessor;
+    // Playback->mic delay (ms) fed to Speex echo canceller (tunable via env/UI)
+    unsigned m_aecDelayMs = 0;
+#endif
     
 public:
     /**
