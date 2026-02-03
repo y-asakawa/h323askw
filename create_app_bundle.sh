@@ -549,6 +549,9 @@ copy_plugins() {
     if [ -f "${H323PLUS_DIR}/plugins/audio/G.722.1/g7221_audio_pwplugin.dylib" ]; then
         cp "${H323PLUS_DIR}/plugins/audio/G.722.1/g7221_audio_pwplugin.dylib" "${PLUGINS}/audio/"
     fi
+    if [ -f "${H323PLUS_DIR}/plugins/audio/G.722.2/g7222_audio_pwplugin.dylib" ]; then
+        cp "${H323PLUS_DIR}/plugins/audio/G.722.2/g7222_audio_pwplugin.dylib" "${PLUGINS}/audio/"
+    fi
     
     # Sound device (PortAudio)
     cp "${PTLIB_DIR}/lib_Darwin_aarch64/device/sound/portaudio_pwplugin.dylib" "${PLUGINS}/sound/"
