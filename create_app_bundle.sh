@@ -193,10 +193,12 @@ check_prerequisites() {
         fi
     done
     
-    # Qt6 フレームワーク (qtbaseに配置される)
-    for fw in "QtCore" "QtGui" "QtWidgets"; do
-        if [ ! -d "${HOMEBREW_DIR}/opt/qtbase/lib/${fw}.framework" ]; then
+    # Qt6 フレームワーク (Homebrew lib ディレクトリに配置される)
+    for fw in "QtCore" "QtGui" "QtWidgets" "QtDBus"; do
+        if [ ! -d "${HOMEBREW_DIR}/lib/${fw}.framework" ] && [ ! -d "${HOMEBREW_DIR}/opt/qt6/lib/${fw}.framework" ]; then
             log_error "Qt6フレームワークが見つかりません: ${fw}"
+            log_error "  確認パス1: ${HOMEBREW_DIR}/lib/${fw}.framework"
+            log_error "  確認パス2: ${HOMEBREW_DIR}/opt/qt6/lib/${fw}.framework"
             missing=1
         fi
     done
@@ -361,18 +363,32 @@ copy_libraries() {
         cp "$OPENSSL_CRYPTO_LIB" "${FRAMEWORKS}/${OPENSSL_CRYPTO_NAME}"
     fi
     
-    # Qt6 フレームワーク (qtbaseに配置される)
+    # Qt6 フレームワーク (Homebrew lib ディレクトリに配置される)
     log_info "  Qt6 フレームワークをコピー中..."
     for fw in QtCore QtGui QtWidgets QtDBus; do
-        if [ -d "${HOMEBREW_DIR}/opt/qtbase/lib/${fw}.framework" ]; then
+        local fw_found=false
+        # 優先順位1: /opt/homebrew/lib/
+        if [ -d "${HOMEBREW_DIR}/lib/${fw}.framework" ]; then
+            log_info "    ${fw}.framework をコピー (from ${HOMEBREW_DIR}/lib/)..."
+            cp -R "${HOMEBREW_DIR}/lib/${fw}.framework" "${FRAMEWORKS}/"
+            fw_found=true
+        # 優先順位2: /opt/homebrew/opt/qt6/lib/
+        elif [ -d "${HOMEBREW_DIR}/opt/qt6/lib/${fw}.framework" ]; then
+            log_info "    ${fw}.framework をコピー (from ${HOMEBREW_DIR}/opt/qt6/lib/)..."
+            cp -R "${HOMEBREW_DIR}/opt/qt6/lib/${fw}.framework" "${FRAMEWORKS}/"
+            fw_found=true
+        # 優先順位3: /opt/homebrew/opt/qtbase/lib/ (古い配置)
+        elif [ -d "${HOMEBREW_DIR}/opt/qtbase/lib/${fw}.framework" ]; then
+            log_info "    ${fw}.framework をコピー (from ${HOMEBREW_DIR}/opt/qtbase/lib/)..."
             cp -R "${HOMEBREW_DIR}/opt/qtbase/lib/${fw}.framework" "${FRAMEWORKS}/"
+            fw_found=true
+        fi
+        
+        if [ "$fw_found" = true ]; then
             # 不要なファイルを削除してサイズ削減
             rm -rf "${FRAMEWORKS}/${fw}.framework/Headers"
             rm -rf "${FRAMEWORKS}/${fw}.framework/Versions/A/Headers"
-        elif [ -d "${HOMEBREW_DIR}/lib/${fw}.framework" ]; then
-            cp -R "${HOMEBREW_DIR}/lib/${fw}.framework" "${FRAMEWORKS}/"
-            rm -rf "${FRAMEWORKS}/${fw}.framework/Headers"
-            rm -rf "${FRAMEWORKS}/${fw}.framework/Versions/A/Headers"
+            rm -rf "${FRAMEWORKS}/${fw}.framework/Versions/Current/Headers"
         else
             log_warn "  ${fw}.framework not found - skipping"
         fi
@@ -497,16 +513,45 @@ copy_plugins() {
     log_info "  Qt6 プラットフォームプラグインをコピー中..."
     local QT_PLUGINS="${APP_BUNDLE}/Contents/PlugIns"
     mkdir -p "${QT_PLUGINS}/platforms"
-    cp "${HOMEBREW_DIR}/opt/qtbase/share/qt/plugins/platforms/libqcocoa.dylib" "${QT_PLUGINS}/platforms/"
+    
+    # 複数のパスを優先順位付けて確認
+    local QCOCOA_FOUND=false
+    for qt_plugin_path in \
+        "${HOMEBREW_DIR}/share/qt/plugins/platforms/libqcocoa.dylib" \
+        "${HOMEBREW_DIR}/opt/qt6/share/qt/plugins/platforms/libqcocoa.dylib" \
+        "${HOMEBREW_DIR}/opt/qt/share/qt/plugins/platforms/libqcocoa.dylib" \
+        "${HOMEBREW_DIR}/opt/qtbase/share/qt/plugins/platforms/libqcocoa.dylib" \
+        "${HOMEBREW_DIR}/lib/qt6/plugins/platforms/libqcocoa.dylib"
+    do
+        if [ -f "$qt_plugin_path" ]; then
+            log_info "    libqcocoa.dylib をコピー (from $(dirname $qt_plugin_path))..."
+            cp "$qt_plugin_path" "${QT_PLUGINS}/platforms/"
+            QCOCOA_FOUND=true
+            break
+        fi
+    done
+    
+    if [ "$QCOCOA_FOUND" = false ]; then
+        log_error "  Qt6 プラットフォームプラグイン libqcocoa.dylib が見つかりません"
+        log_error "  確認パス: ${HOMEBREW_DIR}/share/qt/plugins/platforms/"
+        exit 1
+    fi
     
     # Qt6 スタイルプラグイン（macOS ネイティブの丸みを帯びたウィンドウスタイルに必要）
     log_info "  Qt6 スタイルプラグインをコピー中..."
     mkdir -p "${QT_PLUGINS}/styles"
-    if [ -f "${HOMEBREW_DIR}/opt/qtbase/share/qt/plugins/styles/libqmacstyle.dylib" ]; then
-        cp "${HOMEBREW_DIR}/opt/qtbase/share/qt/plugins/styles/libqmacstyle.dylib" "${QT_PLUGINS}/styles/"
-    elif [ -d "${HOMEBREW_DIR}/opt/qt/share/qt/plugins/styles" ]; then
-        cp -R "${HOMEBREW_DIR}/opt/qt/share/qt/plugins/styles/"* "${QT_PLUGINS}/styles/" 2>/dev/null || true
-    fi
+    for qt_plugin_path in \
+        "${HOMEBREW_DIR}/share/qt/plugins/styles/libqmacstyle.dylib" \
+        "${HOMEBREW_DIR}/opt/qt6/share/qt/plugins/styles/libqmacstyle.dylib" \
+        "${HOMEBREW_DIR}/opt/qt/share/qt/plugins/styles/libqmacstyle.dylib" \
+        "${HOMEBREW_DIR}/opt/qtbase/share/qt/plugins/styles/libqmacstyle.dylib"
+    do
+        if [ -f "$qt_plugin_path" ]; then
+            log_info "    libqmacstyle.dylib をコピー (from $(dirname $qt_plugin_path))..."
+            cp "$qt_plugin_path" "${QT_PLUGINS}/styles/"
+            break
+        fi
+    done
     
     # Video codecs (h323plus-pluginsディレクトリ構造に合わせる)
     mkdir -p "${PLUGINS}/video/H.264"
