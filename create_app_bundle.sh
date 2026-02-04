@@ -949,24 +949,24 @@ verify_bundle() {
     
     local has_error=0
     
-    # 実行ファイルの依存関係をチェック
+    # 実行ファイルの依存関係をチェック (最初の行はファイル名なのでスキップ)
     log_info "  実行ファイルの依存関係を確認..."
-    if otool -L "${APP_BUNDLE}/Contents/MacOS/h323askw_bin" | grep -q "/Users/example"; then
+    if otool -L "${APP_BUNDLE}/Contents/MacOS/h323askw_bin" | tail -n +2 | grep -q "/Users/example"; then
         log_error "  絶対パスがまだ残っています！"
-        otool -L "${APP_BUNDLE}/Contents/MacOS/h323askw_bin" | grep "/Users/example"
+        otool -L "${APP_BUNDLE}/Contents/MacOS/h323askw_bin" | tail -n +2 | grep "/Users/example"
         has_error=1
     fi
     
-    if otool -L "${APP_BUNDLE}/Contents/MacOS/h323askw_bin" | grep -q "/opt/homebrew"; then
+    if otool -L "${APP_BUNDLE}/Contents/MacOS/h323askw_bin" | tail -n +2 | grep -q "/opt/homebrew"; then
         log_error "  Homebrewパスがまだ残っています！"
-        otool -L "${APP_BUNDLE}/Contents/MacOS/h323askw_bin" | grep "/opt/homebrew"
+        otool -L "${APP_BUNDLE}/Contents/MacOS/h323askw_bin" | tail -n +2 | grep "/opt/homebrew"
         has_error=1
     fi
     
-    # ライブラリの依存関係をチェック
+    # ライブラリの依存関係をチェック (最初の行はファイル名なのでスキップ)
     log_info "  ライブラリの依存関係を確認..."
     for lib in "${APP_BUNDLE}/Contents/Frameworks/"*.dylib; do
-        if otool -L "$lib" | grep -q "/Users/example\|/opt/homebrew"; then
+        if otool -L "$lib" | tail -n +2 | grep -q "/Users/example\|/opt/homebrew"; then
             log_warn "  $(basename $lib) に問題があるかもしれません"
             has_error=1
         fi
