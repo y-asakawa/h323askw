@@ -43,6 +43,7 @@
 #include <QMessageBox>
 #include <QScreen>
 #include <QPixmap>
+#include <QProgressBar>  // Phase 1: Audio Visualizer
 #include <atomic>
 #include <QSlider>
 
@@ -59,6 +60,39 @@ typedef unsigned int CGWindowID;
 class MyH323Connection;
 class MyH323EndPoint;
 
+// ============================================================================
+// Phase 1: Multi-Device Audio Support - Data Structures
+// ============================================================================
+
+/**
+ * @struct AudioDeviceEntry
+ * @brief 単一音声デバイスのエントリ（UI側）
+ */
+struct AudioDeviceEntry {
+    QString name;        // デバイス名
+    double gain;         // ゲイン倍率（リニア、1.0 = 0dB）
+    bool muted;          // デバイス個別のミュート状態
+    
+    AudioDeviceEntry() : gain(1.0), muted(false) {}
+    AudioDeviceEntry(const QString& n, double g = 1.0, bool m = false)
+        : name(n), gain(g), muted(m) {}
+};
+
+/**
+ * @struct AudioDeviceSelection
+ * @brief UI全体の音声デバイス選択状態
+ */
+struct AudioDeviceSelection {
+    QVector<AudioDeviceEntry> inputDevices;   // マイク（最大4台）
+    QVector<AudioDeviceEntry> outputDevices;  // スピーカー（最大4台）
+    
+    AudioDeviceSelection() {}
+};
+
+// ============================================================================
+// Callback Function Type Definitions
+// ============================================================================
+
 // コールバック関数型定義（main.hへの依存を避けるため）
 typedef bool (*MakeCallCallback)(const char* address, void* userData);
 typedef void (*HangupCallCallback)(void* userData);
@@ -66,7 +100,12 @@ typedef void (*ToggleMuteCallback)(void* userData);
 typedef void (*ToggleCameraCallback)(void* userData);
 typedef bool (*IsMutedCallback)(void* userData);
 typedef bool (*GetDeviceListCallback)(int deviceType, QStringList& outList, void* userData);
+
+// 既存の単一デバイスコールバック（後方互換性のため維持）
 typedef void (*ApplyDeviceSelectionCallback)(const QString& mic, const QString& speaker, const QString& camera, void* userData);
+
+// Phase 1: マルチデバイス音声コールバック
+typedef void (*ApplyAudioDeviceSelectionCallback)(const AudioDeviceSelection& selection, void* userData);
 
 // デバイスタイプ定数
 #define QT_DEVICE_TYPE_MIC 0
@@ -276,6 +315,100 @@ private:
     QMutex m_dataMutex;
 };
 
+// ==================== Phase 1: Multi-Device Audio UI ====================
+
+/**
+ * @class AudioDeviceRowWidget
+ * @brief 単一のオーディオデバイス行を表すウィジェット
+ * 
+ * デバイス選択コンボボックス、ゲインスライダー（-12dB～+18dB）、
+ * ミュートボタン、削除ボタンを含む1行のUIコンポーネント。
+ */
+class AudioDeviceRowWidget : public QWidget
+{
+    Q_OBJECT
+
+public:
+    /**
+     * @brief コンストラクタ
+     * @param deviceType デバイスタイプ（QT_DEVICE_TYPE_MIC または QT_DEVICE_TYPE_SPEAKER）
+     * @param availableDevices 利用可能なデバイス名のリスト
+     * @param parent 親ウィジェット
+     */
+    explicit AudioDeviceRowWidget(int deviceType, 
+                                   const QStringList& availableDevices,
+                                   QWidget* parent = nullptr);
+    virtual ~AudioDeviceRowWidget();
+
+    /**
+     * @brief デバイス設定を取得
+     * @return AudioDeviceEntry 構造体
+     */
+    AudioDeviceEntry getDeviceEntry() const;
+
+    /**
+     * @brief デバイス設定を適用
+     * @param entry AudioDeviceEntry 構造体
+     */
+    void setDeviceEntry(const AudioDeviceEntry& entry);
+
+    /**
+     * @brief デバイスリストを更新
+     * @param devices 新しいデバイスリスト
+     */
+    void updateDeviceList(const QStringList& devices);
+
+    /**
+     * @brief 削除ボタンの表示/非表示
+     * @param show true=表示, false=非表示
+     */
+    void setRemoveButtonVisible(bool show);
+
+    /**
+     * @brief 音声レベルメーターを更新
+     * @param level 音声レベル（0.0～1.0）
+     */
+    void updateLevelMeter(double level);
+
+signals:
+    /**
+     * @brief デバイス設定が変更された（デバイス追加/削除/変更）
+     * @param row このウィジェットの行番号（外部で管理）
+     */
+    void deviceChanged();
+    
+    /**
+     * @brief ゲイン設定のみが変更された（ゲイン/ミュート）
+     */
+    void gainChanged();
+
+    /**
+     * @brief 削除ボタンがクリックされた
+     * @param widget このウィジェットへのポインタ
+     */
+    void removeRequested(AudioDeviceRowWidget* widget);
+
+private slots:
+    void onDeviceComboChanged(int index);
+    void onGainSliderChanged(int value);
+    void onMuteToggled(bool checked);
+    void onRemoveClicked();
+
+private:
+    void setupUI(const QStringList& availableDevices);
+    QString formatGainLabel(double gainDb) const;
+    
+    int m_deviceType;                    // QT_DEVICE_TYPE_MIC or QT_DEVICE_TYPE_SPEAKER
+    QComboBox* m_deviceCombo;            // デバイス選択
+    QSlider* m_gainSlider;               // ゲイン (-12dB ~ +18dB)
+    QLabel* m_gainLabel;                 // ゲイン表示ラベル
+    QCheckBox* m_muteCheckbox;           // ミュート
+    QPushButton* m_removeButton;         // 削除ボタン
+    QProgressBar* m_levelMeter;          // 音声レベルビジュアライザー
+};
+
+// ==================== End of Phase 1 Audio UI ====================
+
 /**
  * @class QtVideoMainWindow
  * @brief メインウィンドウ（ローカル/リモートビデオ + コントロールパネル）
@@ -394,6 +527,53 @@ public slots:
      */
     void onRemoteFrameReady(const QByteArray& yuvData, unsigned width, unsigned height);
 
+    // ==================== Phase 1: Multi-Device Audio UI Slots ====================
+    
+    /**
+     * @brief マイク行を追加
+     */
+    void onAddMicClicked();
+
+    /**
+     * @brief スピーカー行を追加
+     */
+    void onAddSpeakerClicked();
+
+    /**
+     * @brief デバイス行が削除要求を発行
+     * @param widget 削除するウィジェット
+     */
+    void onDeviceRowRemoveRequested(AudioDeviceRowWidget* widget);
+
+    /**
+     * @brief デバイス設定が変更された（デバイス追加/削除/変更）
+     */
+    void onDeviceRowChanged();
+    
+    /**
+     * @brief ゲイン設定のみが変更された（接続中も適用可能）
+     */
+    void onGainChanged();
+
+    /**
+     * @brief オーディオビジュアライザーを更新（タイマーから呼ばれる）
+     */
+    void updateAudioVisualizers();
+    
+    /**
+     * @brief オーディオビジュアライザータイマーを停止（接続クローズ時に呼ばれる）
+     */
+    void stopAudioVisualizerTimer();
+
+    // ==================== End of Phase 1 Audio UI Slots ====================
+
+private:
+    /**
+     * @brief 通話がアクティブかどうかのフラグ（スレッドセーフ）
+     * タイマーコールバックで dangling pointer アクセスを防ぐために使用
+     */
+    std::atomic<bool> m_isCallActive{false};
+
 protected:
     void closeEvent(QCloseEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
@@ -422,6 +602,41 @@ private:
     void clearAddressHistory();
     void appendClearHistoryItem();
     bool isClearHistoryItem(int index) const;
+
+    // ==================== Phase 1: Multi-Device Audio UI Private Methods ====================
+    
+    /**
+     * @brief マルチデバイスUIをセットアップ（setupUI内で呼ばれる）
+     */
+    void setupMultiDeviceAudioUI(QVBoxLayout* mainLayout);
+
+    /**
+     * @brief 現在のオーディオデバイス設定を取得
+     * @return AudioDeviceSelection 構造体
+     */
+    AudioDeviceSelection getAudioDeviceSelection() const;
+
+    /**
+     * @brief オーディオデバイス設定を適用
+     * @param selection AudioDeviceSelection 構造体
+     */
+    void setAudioDeviceSelection(const AudioDeviceSelection& selection);
+
+    /**
+     * @brief 利用可能なデバイスリストを取得（PortAudio経由）
+     * @param deviceType QT_DEVICE_TYPE_MIC または QT_DEVICE_TYPE_SPEAKER
+     * @return デバイス名のリスト
+     */
+    QStringList getAvailableDevices(int deviceType);
+
+    /**
+     * @brief デバイス行を削除
+     * @param widget 削除するウィジェット
+     * @param rows ウィジェット配列（m_micRows または m_speakerRows）
+     */
+    void removeDeviceRow(AudioDeviceRowWidget* widget, QVector<AudioDeviceRowWidget*>& rows);
+
+    // ==================== End of Phase 1 Audio UI Private Methods ====================
 
     // ビデオ表示
     QtVideoWidget* m_localVideo;
@@ -463,6 +678,19 @@ private:
     // 状態
     MyH323Connection* m_h323Connection;
     bool m_running;
+
+    // ==================== Phase 1: Multi-Device Audio UI Members ====================
+    
+    // マルチデバイスオーディオ用UI
+    QVector<AudioDeviceRowWidget*> m_micRows;      // マイク行ウィジェット配列
+    QVector<AudioDeviceRowWidget*> m_speakerRows;  // スピーカー行ウィジェット配列
+    QVBoxLayout* m_micRowsLayout;                  // マイク行レイアウト
+    QVBoxLayout* m_speakerRowsLayout;              // スピーカー行レイアウト
+    QPushButton* m_addMicButton;                   // マイク追加ボタン
+    QPushButton* m_addSpeakerButton;               // スピーカー追加ボタン
+    QTimer* m_audioVisualizerTimer;                // ビジュアライザー更新タイマー (75ms間隔)
+
+    // ==================== End of Phase 1 Audio UI Members ====================
 
 public:
     /**
@@ -580,6 +808,25 @@ public:
     void setApplyDeviceSelectionCallback(ApplyDeviceSelectionCallback cb, void* userData);
     bool getDeviceList(int deviceType, QStringList& outList);
     void applyDeviceSelection(const QString& mic, const QString& speaker, const QString& camera);
+    
+    // ==================== Phase 1: Multi-Device Audio API ====================
+    
+    /**
+     * @brief マルチデバイスオーディオ設定コールバックを設定
+     */
+    void setApplyAudioDeviceSelectionCallback(ApplyAudioDeviceSelectionCallback cb, void* userData);
+    
+    /**
+     * @brief マルチデバイスオーディオ設定を適用（デバイス変更）
+     */
+    void applyAudioDeviceSelection(const AudioDeviceSelection& selection);
+    
+    /**
+     * @brief オーディオゲイン設定のみを適用（接続中も可能）
+     */
+    void applyAudioGainSettings(const AudioDeviceSelection& selection);
+    
+    // ==================== End of Phase 1 Audio API ====================
     
     /**
      * @brief UIから接続を開始
@@ -721,6 +968,11 @@ private:
     
     ApplyDeviceSelectionCallback m_applyDeviceSelectionCb;
     void* m_applyDeviceSelectionUserData;
+    
+    // ==================== Phase 1: Multi-Device Audio Callback ====================
+    ApplyAudioDeviceSelectionCallback m_applyAudioDeviceSelectionCb;
+    void* m_applyAudioDeviceSelectionUserData;
+    // ==================== End of Phase 1 Audio Callback ====================
 };
 
 #endif // USE_QT6

@@ -50,6 +50,35 @@
 #include <h323rtp.h>
 #include <codec/opalplugin.h>  // 🎬 For PluginCodec_Video_FrameHeader (H323Plus include)
 
+// ============================================================================
+// Phase 1: Multi-Device Audio Support - Core Data Structures
+// ============================================================================
+
+/**
+ * @struct CoreAudioDeviceEntry
+ * @brief 単一音声デバイスのエントリ（Core側）
+ */
+struct CoreAudioDeviceEntry {
+    PString name;        // PTLib形式のデバイス名
+    double gain;         // ゲイン倍率（1.0 = 0dB）
+    bool muted;          // デバイス個別のミュート
+    
+    CoreAudioDeviceEntry() : gain(1.0), muted(false) {}
+    CoreAudioDeviceEntry(const PString& n, double g = 1.0, bool m = false)
+        : name(n), gain(g), muted(m) {}
+};
+
+/**
+ * @struct CoreAudioDeviceConfig
+ * @brief Core側の音声デバイス設定
+ */
+struct CoreAudioDeviceConfig {
+    std::vector<CoreAudioDeviceEntry> inputs;   // マイク設定
+    std::vector<CoreAudioDeviceEntry> outputs;  // スピーカー設定
+    
+    CoreAudioDeviceConfig() {}
+};
+
 #if defined(H323_VIDEO) && defined(USE_QT6)
 // 🎬 Preview callback (kept in sync with plugin ABI: two pointer-sized fields)
 typedef struct PreviewCallback {
@@ -186,6 +215,177 @@ class SpectrumSpeakerChannel : public PIndirectChannel
   private:
     int m_sampleRate;
     std::shared_ptr<SpeexAudioProcessor> m_speexProcessor;
+};
+
+// ============================================================================
+// Phase 1: Multi-Device Audio Channels
+// ============================================================================
+
+// Forward declaration
+class MyH323Connection;
+
+/**
+ * @class MicMixerChannel
+ * @brief 複数マイク入力を1本のPCMへミックス
+ * 
+ * 複数のマイクデバイスから音声を読み出し、各デバイスのゲイン・ミュートを適用して
+ * 1本のPCMストリームへミックスします。atomic shared_ptrによるホットスワップで
+ * 通話中のデバイス追加・削除に対応します。
+ */
+class MicMixerChannel : public PChannel
+{
+    PCLASSINFO(MicMixerChannel, PChannel);
+    
+  public:
+    MicMixerChannel(MyH323Connection* connection,
+                    const CoreAudioDeviceConfig& initialConfig,
+                    unsigned sampleRate,
+                    unsigned frameSamples,
+                    const std::shared_ptr<SpeexAudioProcessor>& speexProcessor);
+    
+    virtual ~MicMixerChannel();
+    
+    // PChannel overrides
+    virtual PBoolean Read(void* buf, PINDEX len) override;
+    virtual PBoolean Close() override;
+    virtual PBoolean IsOpen() const override { return m_isOpen; }
+    
+    /**
+     * @brief デバイス構成の更新（通話中に呼び出し可能）
+     * @param cfg 新しい音声デバイス設定
+     */
+    void UpdateDevices(const CoreAudioDeviceConfig& cfg);
+    
+    /**
+     * @brief ゲイン設定のみを更新（デバイス再オープンなし）
+     * @param cfg ゲイン設定を含む音声デバイス設定
+     */
+    void UpdateGainSettings(const CoreAudioDeviceConfig& cfg);
+    
+    /**
+     * @brief 指定されたインデックスのデバイスの音声レベルを取得
+     * @param index デバイスのインデックス
+     * @return 音声レベル（0.0～1.0）、範囲外の場合70.0
+     */
+    double GetDeviceLevel(size_t index) const;
+    
+    /**
+     * @brief 現在のデバイス数を取得
+     * @return デバイス数
+     */
+    size_t GetDeviceCount() const;
+    
+  private:
+    struct DeviceHandle {
+        PString name;
+        PSoundChannel* channel;
+        double gain;
+        bool muted;
+        std::vector<int16_t> buffer;  // デバイス用の一時バッファ
+        double lastLevel;             // 最新の音声レベル (0.0～1.0)
+        
+        DeviceHandle() : channel(nullptr), gain(1.0), muted(false), lastLevel(0.0) {}
+        ~DeviceHandle() { if (channel) delete channel; }
+    };
+    
+    using DeviceSet = std::vector<std::shared_ptr<DeviceHandle>>;
+    
+    // デバイスセット（mutexで保護）
+    std::shared_ptr<DeviceSet> m_activeDevices;
+    PMutex m_devicesMutex;
+    
+    MyH323Connection* m_connection;
+    unsigned m_sampleRate;
+    unsigned m_frameSamples;
+    std::shared_ptr<SpeexAudioProcessor> m_speexProcessor;
+    bool m_isOpen;
+    PMutex m_updateMutex;
+    
+    // ヘルパー関数
+    std::shared_ptr<DeviceSet> OpenDevices(
+        const std::vector<CoreAudioDeviceEntry>& entries);
+    bool ReadFromDevice(DeviceHandle& dev, int16_t* buffer, PINDEX samples);
+    void MixSamples(const std::vector<int16_t*>& inputs,
+                   const std::vector<double>& gains,
+                   int16_t* output,
+                   PINDEX samples);
+};
+
+/**
+ * @class SpeakerFanoutChannel
+ * @brief 1本のPCMを複数スピーカーへ配布
+ * 
+ * 1本のPCMストリームを複数のスピーカーデバイスへ配信します。
+ * 各デバイスのゲイン・ミュートを適用し、atomic shared_ptrによる
+ * ホットスワップで通話中のデバイス変更に対応します。
+ */
+class SpeakerFanoutChannel : public PChannel
+{
+    PCLASSINFO(SpeakerFanoutChannel, PChannel);
+    
+  public:
+    SpeakerFanoutChannel(const CoreAudioDeviceConfig& initialConfig,
+                         unsigned sampleRate,
+                         const std::shared_ptr<SpeexAudioProcessor>& speexProcessor);
+    
+    virtual ~SpeakerFanoutChannel();
+    
+    // PChannel overrides
+    virtual PBoolean Write(const void* buf, PINDEX len) override;
+    virtual PBoolean Close() override;
+    virtual PBoolean IsOpen() const override { return m_isOpen; }
+    
+    /**
+     * @brief デバイス構成の更新
+     * @param cfg 新しい音声デバイス設定
+     */
+    void UpdateDevices(const CoreAudioDeviceConfig& cfg);
+    
+    /**
+     * @brief ゲイン設定のみを更新（デバイス再オープンなし）
+     * @param cfg ゲイン設定を含む音声デバイス設定
+     */
+    void UpdateGainSettings(const CoreAudioDeviceConfig& cfg);
+    
+    /**
+     * @brief 指定されたインデックスのデバイスの音声レベルを取得
+     * @param index デバイスのインデックス
+     * @return 音声レベル（0.0～1.0）、範囲外の場合70.0
+     */
+    double GetDeviceLevel(size_t index) const;
+    
+    /**
+     * @brief 現在のデバイス数を取得
+     * @return デバイス数
+     */
+    size_t GetDeviceCount() const;
+    
+  private:
+    struct SpeakerHandle {
+        PString name;
+        PSoundChannel* channel;
+        double gain;
+        bool muted;
+        double lastLevel;             // 最新の音声レベル (0.0～1.0)
+        
+        SpeakerHandle() : channel(nullptr), gain(1.0), muted(false), lastLevel(0.0) {}
+        ~SpeakerHandle() { if (channel) delete channel; }
+    };
+    
+    using SpeakerSet = std::vector<std::shared_ptr<SpeakerHandle>>;
+    
+    // スピーカーセット（mutexで保護）
+    std::shared_ptr<SpeakerSet> m_activeSpeakers;
+    PMutex m_speakersMutex;
+    
+    unsigned m_sampleRate;
+    std::shared_ptr<SpeexAudioProcessor> m_speexProcessor;
+    bool m_isOpen;
+    PMutex m_updateMutex;
+    std::vector<int16_t> m_tempBuffer;  // ゲイン適用用の一時バッファ
+    
+    std::shared_ptr<SpeakerSet> OpenSpeakers(
+        const std::vector<CoreAudioDeviceEntry>& entries);
 };
 
 // グローバル関数：スペクトラム更新（Qt6 UIへの橋渡し）
@@ -637,6 +837,16 @@ class MyH323Connection : public H323Connection
     
     // 🚀 ENHANCEMENT: H.264 RTP processing for display
     void ProcessH264RTPForDisplay(const RTP_DataFrame & frame, unsigned sessionID);
+    
+    // ============================================================
+    // Phase 1: Multi-Device Audio Support
+    // ============================================================
+    
+    /**
+     * @brief 通話中に音声デバイス構成を更新（チャネル再オープンなし）
+     * @param cfg 新しい音声デバイス設定
+     */
+    void UpdateAudioDevices(const CoreAudioDeviceConfig& cfg);
 
     CallDetail details;
     
@@ -1245,6 +1455,10 @@ public:
     unsigned m_aecDelayMs = 0;
 #endif
     
+    // Phase 1: Multi-Device Audio Channels
+    MicMixerChannel* m_micMixer;           // 複数マイク → 1本のPCM
+    SpeakerFanoutChannel* m_speakerFanout; // 1本のPCM → 複数スピーカー
+    
 public:
     /**
      * SendLogicalChannelActivity - H.245 MiscellaneousIndication送信
@@ -1282,6 +1496,18 @@ public:
     bool IsLocalMicMuted() const { return m_localMicMuted.load(); }
     bool IsRemoteMicMuted() const { return m_remoteMicMuted.load(); }
     bool IsLocalCameraMuted() const { return m_localCameraMuted.load(); }
+    
+    /**
+     * Phase 1: Multi-Device Audio アクセサ
+     */
+    MicMixerChannel* GetMicMixer() const { return m_micMixer; }
+    SpeakerFanoutChannel* GetSpeakerFanout() const { return m_speakerFanout; }
+    
+    /**
+     * @brief 音声デバイスのゲイン設定を更新（接続中も可能）
+     * @param cfg ゲイン設定を含む音声デバイス設定
+     */
+    void UpdateAudioGainSettings(const CoreAudioDeviceConfig& cfg);
     
 private:
 };
@@ -1378,7 +1604,7 @@ class MyH323EndPoint : public H323EndPoint
 #endif
 
     // ============================================================
-    // Audio Device Configuration
+    // Audio Device Configuration (Legacy - Single Device)
     // ============================================================
     void SetAudioDevices(const PString& inDev, const PString& outDev, bool disable) {
         m_audioInputDevice = inDev;
@@ -1388,6 +1614,41 @@ class MyH323EndPoint : public H323EndPoint
     const PString& GetAudioInputDevice() const { return m_audioInputDevice; }
     const PString& GetAudioOutputDevice() const { return m_audioOutputDevice; }
     bool IsAudioDisabled() const { return m_disableAudio; }
+    
+    // ============================================================
+    // Phase 1: Multi-Device Audio Configuration
+    // ============================================================
+    
+    /**
+     * @brief 現在の音声デバイス設定を取得
+     * @return CoreAudioDeviceConfig 音声デバイス設定
+     */
+    CoreAudioDeviceConfig GetAudioDeviceConfig() const {
+        PWaitAndSignal lock(m_audioConfigMutex);
+        return m_audioDeviceConfig;
+    }
+    
+    /**
+     * @brief 音声デバイス設定を更新（UIからのコールバック経由）
+     * @param cfg 新しい音声デバイス設定
+     */
+    void UpdateAudioDeviceConfig(const CoreAudioDeviceConfig& cfg) {
+        PWaitAndSignal lock(m_audioConfigMutex);
+        m_audioDeviceConfig = cfg;
+        PTRACE(1, "H323ASKW\tAudio device config updated: "
+               << cfg.inputs.size() << " inputs, "
+               << cfg.outputs.size() << " outputs");
+        for (size_t i = 0; i < cfg.inputs.size(); i++) {
+            PTRACE(2, "H323ASKW\t  Input[" << i << "]: " << cfg.inputs[i].name 
+                   << " (gain=" << cfg.inputs[i].gain << ", muted=" << (cfg.inputs[i].muted ? "yes" : "no") << ")");
+        }
+    }
+    
+    /**
+     * @brief 現在アクティブな接続を取得（マルチデバイス設定の動的適用用）
+     * @return 接続がある場合はMyH323Connection*、ない場合はnullptr
+     */
+    MyH323Connection* GetCurrentConnection();
 
     // *** SIGNALING ENHANCEMENT: H.241 H.264 Capability Declaration ***
     void BuildH241H264Capabilities();
@@ -1420,6 +1681,10 @@ class MyH323EndPoint : public H323EndPoint
     bool m_useMetalDisplay;
     PString m_preferredVideoDisplaySystem;
 #endif
+    
+    // Phase 1: Multi-Device Audio Configuration
+    mutable PMutex m_audioConfigMutex;
+    CoreAudioDeviceConfig m_audioDeviceConfig;
     
     // *** Audio Device Configuration ***
     PString m_audioInputDevice;     // Microphone device name
@@ -1606,6 +1871,16 @@ namespace P4Strategy {
         std::string defaultAudioStrategy_ = "Audio";
     };
 }
+
+///////////////////////////////////////////////////////////////////////////////
+// Global accessor functions
+///////////////////////////////////////////////////////////////////////////////
+
+/**
+ * @brief グローバルH323EndPointへのアクセサ
+ * @return グローバルエンドポイントのポインタ（Phase 1 Audio Visualizer用）
+ */
+MyH323EndPoint* GetGlobalH323Endpoint();
 
 ///////////////////////////////////////////////////////////////////////////////
 

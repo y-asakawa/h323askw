@@ -17,6 +17,10 @@
 #include <QPointer>
 #include <QList>
 #include <QResizeEvent>
+#include <QTimer>       // Phase 1: Audio Visualizer Timer
+#include <QMessageBox>  // Phase 1: Multi-Device Audio UI
+#include <QGroupBox>    // Phase 1: Multi-Device Audio UI
+#include <QScrollArea>  // Phase 1: Multi-Device Audio UI - スクロール対応
 #ifdef Q_OS_MAC
 #include <CoreGraphics/CoreGraphics.h>
 #include <dlfcn.h>
@@ -34,6 +38,19 @@ namespace {
 constexpr int kGainSteps = 10;
 const int kDbTable[kGainSteps]   = {-12, -6, -3, 0, 3, 6, 9, 12, 15, 18};
 const double kLinTable[kGainSteps] = {0.25, 0.50, 0.71, 1.00, 1.41, 2.00, 2.82, 4.00, 5.62, 7.94};
+
+double DbToLinear(double db)
+{
+    return std::pow(10.0, db / 20.0);
+}
+
+double LinearToDb(double linear)
+{
+    if (linear <= 0.0) {
+        return -120.0;
+    }
+    return 20.0 * std::log10(linear);
+}
 }
 
 #ifndef kCGNullWindowID
@@ -851,6 +868,201 @@ void QtAudioSpectrumWidget::paintEvent(QPaintEvent* event)
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// AudioDeviceRowWidget Implementation (Phase 1)
+///////////////////////////////////////////////////////////////////////////////
+
+AudioDeviceRowWidget::AudioDeviceRowWidget(int deviceType, 
+                                           const QStringList& availableDevices,
+                                           QWidget* parent)
+    : QWidget(parent)
+    , m_deviceType(deviceType)
+    , m_deviceCombo(nullptr)
+    , m_gainSlider(nullptr)
+    , m_gainLabel(nullptr)
+    , m_muteCheckbox(nullptr)
+    , m_removeButton(nullptr)
+    , m_levelMeter(nullptr)
+{
+    setupUI(availableDevices);
+}
+
+AudioDeviceRowWidget::~AudioDeviceRowWidget()
+{
+    // Qt親子関係で自動削除されるため、明示的なdeleteは不要
+}
+
+void AudioDeviceRowWidget::setupUI(const QStringList& availableDevices)
+{
+    // メインレイアウト（縦方向）
+    QVBoxLayout* mainLayout = new QVBoxLayout(this);
+    mainLayout->setContentsMargins(4, 4, 4, 4);
+    mainLayout->setSpacing(4);
+
+    // 音声レベルビジュアライザー（上段）
+    m_levelMeter = new QProgressBar(this);
+    m_levelMeter->setRange(0, 100);
+    m_levelMeter->setValue(0);
+    m_levelMeter->setTextVisible(false);
+    m_levelMeter->setMaximumHeight(8);
+    m_levelMeter->setStyleSheet(
+        "QProgressBar {"
+        "    border: 1px solid #555;"
+        "    border-radius: 3px;"
+        "    background-color: #2b2b2b;"
+        "}"
+        "QProgressBar::chunk {"
+        "    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
+        "        stop:0 #4CAF50, stop:0.7 #8BC34A, stop:0.9 #FFC107, stop:1.0 #FF5722);"
+        "    border-radius: 2px;"
+        "}"
+    );
+    mainLayout->addWidget(m_levelMeter);
+
+    // コントロール行（下段）
+    QHBoxLayout* layout = new QHBoxLayout();
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(8);
+
+    // デバイス選択コンボボックス
+    m_deviceCombo = new QComboBox(this);
+    m_deviceCombo->addItems(availableDevices);
+    m_deviceCombo->setMinimumWidth(200);
+    layout->addWidget(m_deviceCombo);
+
+    // ゲインスライダー (-12dB ~ +18dB, デフォルト 0dB)
+    QLabel* gainLabel = new QLabel(m_deviceType == QT_DEVICE_TYPE_MIC ? "Gain:" : "Volume:", this);
+    layout->addWidget(gainLabel);
+
+    m_gainSlider = new QSlider(Qt::Horizontal, this);
+    m_gainSlider->setRange(-120, 180);  // -12.0dB ~ +18.0dB (x10)
+    m_gainSlider->setValue(0);          // デフォルト 0dB
+    m_gainSlider->setMinimumWidth(150);
+    m_gainSlider->setMaximumWidth(200);
+    layout->addWidget(m_gainSlider);
+
+    m_gainLabel = new QLabel(formatGainLabel(0.0), this);
+    m_gainLabel->setMinimumWidth(60);
+    layout->addWidget(m_gainLabel);
+
+    // ミュートチェックボックス
+    m_muteCheckbox = new QCheckBox("Mute", this);
+    layout->addWidget(m_muteCheckbox);
+
+    // 削除ボタン
+    m_removeButton = new QPushButton("×", this);
+    m_removeButton->setMaximumWidth(30);
+    m_removeButton->setToolTip("Remove this device");
+    layout->addWidget(m_removeButton);
+
+    layout->addStretch();
+    mainLayout->addLayout(layout);
+
+    // シグナル接続
+    connect(m_deviceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &AudioDeviceRowWidget::onDeviceComboChanged);
+    connect(m_gainSlider, &QSlider::valueChanged,
+            this, &AudioDeviceRowWidget::onGainSliderChanged);
+    connect(m_muteCheckbox, &QCheckBox::toggled,
+            this, &AudioDeviceRowWidget::onMuteToggled);
+    connect(m_removeButton, &QPushButton::clicked,
+            this, &AudioDeviceRowWidget::onRemoveClicked);
+}
+
+QString AudioDeviceRowWidget::formatGainLabel(double gainDb) const
+{
+    if (gainDb >= 0.0) {
+        return QString("+%1 dB").arg(gainDb, 0, 'f', 1);
+    } else {
+        return QString("%1 dB").arg(gainDb, 0, 'f', 1);
+    }
+}
+
+AudioDeviceEntry AudioDeviceRowWidget::getDeviceEntry() const
+{
+    AudioDeviceEntry entry;
+    entry.name = m_deviceCombo->currentText();
+    const double gainDb = (double)m_gainSlider->value() / 10.0;  // x10したので戻す
+    entry.gain = DbToLinear(gainDb);
+    entry.muted = m_muteCheckbox->isChecked();
+    return entry;
+}
+
+void AudioDeviceRowWidget::setDeviceEntry(const AudioDeviceEntry& entry)
+{
+    // デバイス名で検索してコンボボックスをセット
+    int index = m_deviceCombo->findText(entry.name);
+    if (index >= 0) {
+        m_deviceCombo->setCurrentIndex(index);
+    }
+
+    // ゲイン設定 (-12.0dB ~ +18.0dB)
+    const double gainDb = LinearToDb(entry.gain);
+    int gainValue = qBound(-120, (int)std::lround(gainDb * 10.0), 180);
+    m_gainSlider->setValue(gainValue);
+
+    // ミュート設定
+    m_muteCheckbox->setChecked(entry.muted);
+}
+
+void AudioDeviceRowWidget::updateDeviceList(const QStringList& devices)
+{
+    QString currentDevice = m_deviceCombo->currentText();
+    m_deviceCombo->clear();
+    m_deviceCombo->addItems(devices);
+
+    // 以前選択していたデバイスを復元
+    int index = m_deviceCombo->findText(currentDevice);
+    if (index >= 0) {
+        m_deviceCombo->setCurrentIndex(index);
+    }
+}
+
+void AudioDeviceRowWidget::setRemoveButtonVisible(bool show)
+{
+    m_removeButton->setVisible(show);
+}
+
+void AudioDeviceRowWidget::onDeviceComboChanged(int index)
+{
+    PTRACE(0, "QtVideo\t🟣 AudioDeviceRowWidget::onDeviceComboChanged() index=" << index);
+    PTRACE(0, "QtVideo\t🟣 Selected device: " << m_deviceCombo->currentText().toStdString());
+    Q_UNUSED(index);
+    PTRACE(0, "QtVideo\t🟣 Emitting deviceChanged signal...");
+    emit deviceChanged();
+    PTRACE(0, "QtVideo\t🟣 deviceChanged signal emitted");
+}
+
+void AudioDeviceRowWidget::onGainSliderChanged(int value)
+{
+    double gainDb = (double)value / 10.0;
+    m_gainLabel->setText(formatGainLabel(gainDb));
+    emit gainChanged();  // ゲイン専用シグナル
+}
+
+void AudioDeviceRowWidget::onMuteToggled(bool checked)
+{
+    Q_UNUSED(checked);
+    emit gainChanged();  // ミュートもゲイン設定の一部
+}
+
+void AudioDeviceRowWidget::onRemoveClicked()
+{
+    emit removeRequested(this);
+}
+
+void AudioDeviceRowWidget::updateLevelMeter(double level)
+{
+    // NULLチェック（安全性のため）
+    if (!m_levelMeter) {
+        return;
+    }
+    
+    // level: 0.0～1.0 の範囲を 0～100 にマップ
+    int percentage = qBound(0, (int)(level * 100.0), 100);
+    m_levelMeter->setValue(percentage);
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // QtVideoMainWindow Implementation
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -880,15 +1092,29 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_remoteSpectrum(nullptr)
     , m_h323Connection(nullptr)
     , m_running(true)
+    , m_micRowsLayout(nullptr)           // Phase 1
+    , m_speakerRowsLayout(nullptr)       // Phase 1
+    , m_addMicButton(nullptr)            // Phase 1
+    , m_addSpeakerButton(nullptr)        // Phase 1
+    , m_audioVisualizerTimer(nullptr)    // Phase 1
 {
+    PTRACE(0, "QtVideo\t🟨 QtVideoMainWindow constructor ENTER");
+    
     setWindowTitle("H323ASKW - Video Client");
-    setMinimumSize(800, 600);
+    setMinimumSize(1000, 850);  // Phase 1: マルチデバイスUI対応で縦長に
 
     setupUI();
     setupConnections();
     populateDeviceLists();
+    
+    // オーディオビジュアライザータイマーを初期化（75ms間隔）
+    m_audioVisualizerTimer = new QTimer(this);
+    m_audioVisualizerTimer->setInterval(75);
+    connect(m_audioVisualizerTimer, &QTimer::timeout, this, &QtVideoMainWindow::updateAudioVisualizers);
+    // タイマーはonConnectClicked()で開始、onDisconnectClicked()で停止
 
     QT_TRACE(1, "QtVideoMainWindow created");
+    PTRACE(0, "QtVideo\t🟨 QtVideoMainWindow constructor EXIT");
 }
 
 QtVideoMainWindow::~QtVideoMainWindow()
@@ -901,6 +1127,8 @@ QtVideoMainWindow::~QtVideoMainWindow()
 
 void QtVideoMainWindow::setupUI()
 {
+    PTRACE(0, "QtVideo\t🟨 setupUI() ENTER");
+    
     QWidget* centralWidget = new QWidget(this);
     setCentralWidget(centralWidget);
 
@@ -1002,7 +1230,14 @@ void QtVideoMainWindow::setupUI()
     };
 
     gainRow->addLayout(buildGainBox("Mic Gain", &m_gainSlider, &m_gainValueLabel));
-    gainRow->addSpacing(12);
+    
+    // Mic GainとSpeaker Gainの間に区切り線
+    QFrame* gainSeparator = new QFrame(this);
+    gainSeparator->setFrameShape(QFrame::VLine);
+    gainSeparator->setFrameShadow(QFrame::Sunken);
+    gainSeparator->setLineWidth(2);
+    gainRow->addWidget(gainSeparator);
+    
     gainRow->addLayout(buildGainBox("Speaker Gain", &m_spkGainSlider, &m_spkGainValueLabel));
 
     mainLayout->addLayout(gainRow);
@@ -1084,6 +1319,10 @@ void QtVideoMainWindow::setupUI()
 
     mainLayout->addLayout(deviceLayout);
 
+    // ==================== Phase 1: Multi-Device Audio UI Setup ====================
+    setupMultiDeviceAudioUI(mainLayout);
+    // ==================== End of Phase 1 Audio UI Setup ====================
+
     // ステータスバー
     m_statusLabel = new QLabel("Ready", this);
     statusBar()->addPermanentWidget(m_statusLabel);
@@ -1144,6 +1383,14 @@ void QtVideoMainWindow::setupConnections()
     connect(m_spkGainSlider, &QSlider::valueChanged, this, applySpeakerGainIndex);
     applyGainIndex(m_gainSlider->value());  // 初期値反映
     applySpeakerGainIndex(m_spkGainSlider->value());
+
+    // ==================== Phase 1: Multi-Device Audio UI Connections ====================
+    PTRACE(0, "QtVideo\t🟦 Connecting m_addMicButton signal...");
+    connect(m_addMicButton, &QPushButton::clicked, this, &QtVideoMainWindow::onAddMicClicked);
+    PTRACE(0, "QtVideo\t🟦 Connecting m_addSpeakerButton signal...");
+    connect(m_addSpeakerButton, &QPushButton::clicked, this, &QtVideoMainWindow::onAddSpeakerClicked);
+    PTRACE(0, "QtVideo\t🟦 Phase 1 signals connected successfully");
+    // ==================== End of Phase 1 Audio UI Connections ====================
 }
 
 void QtVideoMainWindow::populateDeviceLists()
@@ -1413,15 +1660,43 @@ void QtVideoMainWindow::onConnectClicked()
         addToAddressHistory(address);
         
         setConnectionStatus("Connecting to " + address + "...");
+        
+        // 通話アクティブフラグを設定（接続確立前に設定）
+        m_isCallActive.store(true, std::memory_order_release);
+        
         emit connectRequested(address);
+        
+        // オーディオビジュアライザータイマーを開始
+        if (m_audioVisualizerTimer && !m_audioVisualizerTimer->isActive()) {
+            m_audioVisualizerTimer->start();
+            QT_TRACE(2, "Audio visualizer timer started");
+        }
     }
 }
 
 void QtVideoMainWindow::onDisconnectClicked()
 {
     QT_TRACE(1, "Disconnect requested");
+    
+    // 通話アクティブフラグを最初にクリア（タイマーコールバック停止）
+    m_isCallActive.store(false, std::memory_order_release);
+    
     setConnectionStatus("Disconnecting...");
     emit disconnectRequested();
+    
+    // オーディオビジュアライザータイマーを停止
+    if (m_audioVisualizerTimer && m_audioVisualizerTimer->isActive()) {
+        m_audioVisualizerTimer->stop();
+        QT_TRACE(2, "Audio visualizer timer stopped");
+        
+        // ビジュアライザーをリセット
+        for (auto* row : m_micRows) {
+            row->updateLevelMeter(0.0);
+        }
+        for (auto* row : m_speakerRows) {
+            row->updateLevelMeter(0.0);
+        }
+    }
 }
 
 void QtVideoMainWindow::onMuteToggled(bool checked)
@@ -1549,6 +1824,8 @@ QtVideoManager::QtVideoManager()
     , m_getDeviceListUserData(nullptr)
     , m_applyDeviceSelectionCb(nullptr)
     , m_applyDeviceSelectionUserData(nullptr)
+    , m_applyAudioDeviceSelectionCb(nullptr)  // Phase 1
+    , m_applyAudioDeviceSelectionUserData(nullptr)  // Phase 1
 {
 }
 
@@ -1611,6 +1888,8 @@ bool QtVideoManager::createWindow(int width, int height)
 
 bool QtVideoManager::createLocalWindow(int width, int height)
 {
+    PTRACE(0, "QtVideo\t🟨 createLocalWindow() ENTER - width=" << width << " height=" << height);
+    
     if (!m_initialized) {
         QT_TRACE(1, "Cannot create window - not initialized");
         return false;
@@ -1623,6 +1902,7 @@ bool QtVideoManager::createLocalWindow(int width, int height)
         // 同期的に実行（ウィンドウが作成されてから続行する必要があるため）
         QMetaObject::invokeMethod(QCoreApplication::instance(), [this, width, height, &result]() {
             if (!m_mainWindow) {
+                PTRACE(0, "QtVideo\t🟨 Creating QtVideoMainWindow via invokeMethod...");
                 m_mainWindow = new QtVideoMainWindow();
                 m_mainWindow->resize(width * 2 + 50, height + 150);
                 m_mainWindow->show();
@@ -1634,6 +1914,7 @@ bool QtVideoManager::createLocalWindow(int width, int height)
     }
 
     if (!m_mainWindow) {
+        PTRACE(0, "QtVideo\t🟨 Creating QtVideoMainWindow directly...");
         m_mainWindow = new QtVideoMainWindow();
         m_mainWindow->resize(width * 2 + 50, height + 150);  // 2つのビデオ + コントロール
         m_mainWindow->show();
@@ -2357,6 +2638,71 @@ void QtVideoManager::applyDeviceSelection(const QString& mic, const QString& spe
     }
 }
 
+// ==================== Phase 1: Multi-Device Audio Implementation ====================
+
+void QtVideoManager::setApplyAudioDeviceSelectionCallback(ApplyAudioDeviceSelectionCallback cb, void* userData)
+{
+    m_applyAudioDeviceSelectionCb = cb;
+    m_applyAudioDeviceSelectionUserData = userData;
+    QT_TRACE(2, "ApplyAudioDeviceSelectionCallback set: cb=" << (void*)cb << " userData=" << userData);
+}
+
+void QtVideoManager::applyAudioDeviceSelection(const AudioDeviceSelection& selection)
+{
+    PTRACE(0, "QtVideo\t🟣 QtVideoManager::applyAudioDeviceSelection() ENTER");
+    PTRACE(0, "QtVideo\t🟣   inputDevices: " << selection.inputDevices.size());
+    PTRACE(0, "QtVideo\t🟣   outputDevices: " << selection.outputDevices.size());
+    
+    if (m_applyAudioDeviceSelectionCb) {
+        PTRACE(0, "QtVideo\t🟣 Callback exists - calling it...");
+        QT_TRACE(1, "Calling ApplyAudioDeviceSelectionCallback: "
+                 << selection.inputDevices.size() << " mics, "
+                 << selection.outputDevices.size() << " speakers");
+        m_applyAudioDeviceSelectionCb(selection, m_applyAudioDeviceSelectionUserData);
+        PTRACE(0, "QtVideo\t🟣 Callback returned");
+    } else {
+        PTRACE(0, "QtVideo\t🟣 WARNING: Callback is NULL!");
+        QT_TRACE(1, "WARNING: ApplyAudioDeviceSelectionCallback not set");
+    }
+}
+
+void QtVideoManager::applyAudioGainSettings(const AudioDeviceSelection& selection)
+{
+    QT_TRACE(2, "Applying gain settings: "
+             << selection.inputDevices.size() << " mics, "
+             << selection.outputDevices.size() << " speakers");
+    
+    // 接続中のゲイン更新
+    MyH323Connection* conn = getH323Connection();
+    if (conn) {
+        // CoreAudioDeviceConfigに変換
+        CoreAudioDeviceConfig config;
+        
+        for (const AudioDeviceEntry& entry : selection.inputDevices) {
+            CoreAudioDeviceEntry coreEntry;
+            coreEntry.name = PString((const char*)entry.name.toUtf8());
+            coreEntry.gain = entry.gain;
+            coreEntry.muted = entry.muted;
+            config.inputs.push_back(coreEntry);
+        }
+        
+        for (const AudioDeviceEntry& entry : selection.outputDevices) {
+            CoreAudioDeviceEntry coreEntry;
+            coreEntry.name = PString((const char*)entry.name.toUtf8());
+            coreEntry.gain = entry.gain;
+            coreEntry.muted = entry.muted;
+            config.outputs.push_back(coreEntry);
+        }
+        
+        conn->UpdateAudioGainSettings(config);
+        QT_TRACE(2, "Gain settings applied to active connection");
+    } else {
+        QT_TRACE(3, "No active connection - gain will be applied on next call");
+    }
+}
+
+// ==================== End of Phase 1 Audio Implementation ====================
+
 void QtVideoManager::makeCall(const QString& address)
 {
     QT_TRACE(1, "makeCall ENTRY - address: " << address.toStdString());
@@ -2854,5 +3200,413 @@ void QtVideoManager::closeLocalContentPreview()
         m_localContentWindow = nullptr;
     }
 }
+
+///////////////////////////////////////////////////////////////////////////////
+// Phase 1: Multi-Device Audio UI Implementation
+///////////////////////////////////////////////////////////////////////////////
+
+void QtVideoMainWindow::setupMultiDeviceAudioUI(QVBoxLayout* mainLayout)
+{
+    PTRACE(0, "QtVideo\t🔵 setupMultiDeviceAudioUI() ENTER");
+    
+    // マルチデバイスオーディオ設定パネル
+    QGroupBox* multiDeviceBox = new QGroupBox("Multi-Device Audio Configuration (Phase 1)", this);
+    QVBoxLayout* multiDeviceLayout = new QVBoxLayout(multiDeviceBox);
+
+    // 横並びレイアウト: 左=マイク、右=スピーカー
+    QHBoxLayout* deviceColumnsLayout = new QHBoxLayout();
+    
+    // ========== 左列: マイク設定 ==========
+    QVBoxLayout* micColumn = new QVBoxLayout();
+    
+    QLabel* micTitle = new QLabel("<b>Microphones (Up to 4)</b>", this);
+    micColumn->addWidget(micTitle);
+
+    m_micRowsLayout = new QVBoxLayout();
+    m_micRowsLayout->setSpacing(4);
+    micColumn->addLayout(m_micRowsLayout);
+
+    m_addMicButton = new QPushButton("+ Add Microphone", this);
+    m_addMicButton->setMaximumWidth(150);
+    micColumn->addWidget(m_addMicButton, 0, Qt::AlignLeft);
+    PTRACE(0, "QtVideo\t🟦 m_addMicButton created and added to layout");
+    
+    micColumn->addStretch();  // 下に余白
+    
+    deviceColumnsLayout->addLayout(micColumn);
+    
+    // ========== 縦の区切り線 ==========
+    QFrame* verticalLine = new QFrame(this);
+    verticalLine->setFrameShape(QFrame::VLine);
+    verticalLine->setFrameShadow(QFrame::Sunken);
+    verticalLine->setLineWidth(2);
+    deviceColumnsLayout->addWidget(verticalLine);
+    
+    // ========== 右列: スピーカー設定 ==========
+    QVBoxLayout* speakerColumn = new QVBoxLayout();
+    
+    QLabel* speakerTitle = new QLabel("<b>Speakers (Up to 4)</b>", this);
+    speakerColumn->addWidget(speakerTitle);
+
+    m_speakerRowsLayout = new QVBoxLayout();
+    m_speakerRowsLayout->setSpacing(4);
+    speakerColumn->addLayout(m_speakerRowsLayout);
+
+    m_addSpeakerButton = new QPushButton("+ Add Speaker", this);
+    m_addSpeakerButton->setMaximumWidth(150);
+    speakerColumn->addWidget(m_addSpeakerButton, 0, Qt::AlignLeft);
+    
+    speakerColumn->addStretch();  // 下に余白
+    
+    deviceColumnsLayout->addLayout(speakerColumn);
+    
+    multiDeviceLayout->addLayout(deviceColumnsLayout);
+
+    // スクロールエリアでラップ（デバイス追加時に画面が広がっても対応）
+    QScrollArea* scrollArea = new QScrollArea(this);
+    scrollArea->setWidget(multiDeviceBox);
+    scrollArea->setWidgetResizable(true);  // コンテンツに合わせてリサイズ
+    scrollArea->setMinimumHeight(250);     // 最小高さ（初期表示を広く）
+    scrollArea->setMaximumHeight(500);     // 最大高さ（これ以上は自動スクロール）
+    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    
+    mainLayout->addWidget(scrollArea);
+    
+    PTRACE(0, "QtVideo\t🔵 setupMultiDeviceAudioUI() EXIT - UI created successfully");
+}
+
+void QtVideoMainWindow::onAddMicClicked()
+{
+    PTRACE(0, "QtVideo\t🔴🔴🔴 onAddMicClicked() ENTER - m_micRows.size()=" << m_micRows.size());
+    
+    // 最大4デバイスまで
+    if (m_micRows.size() >= 4) {
+        PTRACE(0, "QtVideo\t⚠️ Maximum 4 microphones reached");
+        QMessageBox::warning(this, "Limit Reached", "Maximum 4 microphones allowed.");
+        return;
+    }
+
+    QStringList devices = getAvailableDevices(QT_DEVICE_TYPE_MIC);
+    PTRACE(0, "QtVideo\tAvailable mic devices: " << devices.size());
+    
+    AudioDeviceRowWidget* row = new AudioDeviceRowWidget(QT_DEVICE_TYPE_MIC, devices, this);
+    PTRACE(0, "QtVideo\tCreated AudioDeviceRowWidget: " << (void*)row);
+
+    // シグナル接続
+    connect(row, &AudioDeviceRowWidget::removeRequested,
+            this, &QtVideoMainWindow::onDeviceRowRemoveRequested);
+    connect(row, &AudioDeviceRowWidget::deviceChanged,
+            this, &QtVideoMainWindow::onDeviceRowChanged);
+    connect(row, &AudioDeviceRowWidget::gainChanged,
+            this, &QtVideoMainWindow::onGainChanged);
+    PTRACE(0, "QtVideo\tSignals connected");
+
+    // 削除ボタンの表示（1行目は削除不可、2行目以降は削除可能）
+    row->setRemoveButtonVisible(m_micRows.size() > 0);
+
+    m_micRowsLayout->addWidget(row);
+    m_micRows.append(row);
+
+    PTRACE(0, "QtVideo\t✅✅✅ Mic row added - total now: " << m_micRows.size());
+    onDeviceRowChanged();  // 追加直後に設定を反映
+}
+
+void QtVideoMainWindow::onAddSpeakerClicked()
+{
+    // 最大4デバイスまで
+    if (m_speakerRows.size() >= 4) {
+        QMessageBox::warning(this, "Limit Reached", "Maximum 4 speakers allowed.");
+        return;
+    }
+
+    QStringList devices = getAvailableDevices(QT_DEVICE_TYPE_SPEAKER);
+    AudioDeviceRowWidget* row = new AudioDeviceRowWidget(QT_DEVICE_TYPE_SPEAKER, devices, this);
+
+    // シグナル接続
+    connect(row, &AudioDeviceRowWidget::removeRequested,
+            this, &QtVideoMainWindow::onDeviceRowRemoveRequested);
+    connect(row, &AudioDeviceRowWidget::deviceChanged,
+            this, &QtVideoMainWindow::onDeviceRowChanged);
+    connect(row, &AudioDeviceRowWidget::gainChanged,
+            this, &QtVideoMainWindow::onGainChanged);
+
+    // 削除ボタンの表示（1行目は削除不可、2行目以降は削除可能）
+    row->setRemoveButtonVisible(m_speakerRows.size() > 0);
+
+    m_speakerRowsLayout->addWidget(row);
+    m_speakerRows.append(row);
+
+    QT_TRACE(2, "Speaker row added (total=" << m_speakerRows.size() << ")");
+    onDeviceRowChanged();  // 追加直後に設定を反映
+}
+void QtVideoMainWindow::onDeviceRowRemoveRequested(AudioDeviceRowWidget* widget)
+{
+    // マイクかスピーカーか判定
+    int micIndex = m_micRows.indexOf(widget);
+    int speakerIndex = m_speakerRows.indexOf(widget);
+
+    if (micIndex >= 0) {
+        removeDeviceRow(widget, m_micRows);
+        QT_TRACE(2, "Mic row removed (remaining=" << m_micRows.size() << ")");
+    } else if (speakerIndex >= 0) {
+        removeDeviceRow(widget, m_speakerRows);
+        QT_TRACE(2, "Speaker row removed (remaining=" << m_speakerRows.size() << ")");
+    }
+    
+    // デバイス削除後も自動適用
+    onDeviceRowChanged();
+}
+
+void QtVideoMainWindow::onDeviceRowChanged()
+{
+    // デバイス設定変更時に自動適用（接続前のみ）
+    PTRACE(0, "QtVideo\t🟢🟢🟢 onDeviceRowChanged() ENTER");
+    
+    AudioDeviceSelection selection = getAudioDeviceSelection();
+    PTRACE(0, "QtVideo\tDevice change: " << selection.inputDevices.size() << " mics, "
+             << selection.outputDevices.size() << " speakers");
+    
+    // デバイス内容をログ出力
+    for (size_t i = 0; i < selection.inputDevices.size(); i++) {
+        PTRACE(0, "QtVideo\t  Input[" << i << "]: " << selection.inputDevices[i].name.toStdString());
+    }
+    
+    // QtVideoManager経由でバックエンドに適用
+    PTRACE(0, "QtVideo\tCalling applyAudioDeviceSelection...");
+    QtVideoManager::instance().applyAudioDeviceSelection(selection);
+    PTRACE(0, "QtVideo\t🟢🟢🟢 onDeviceRowChanged() EXIT");
+}
+
+void QtVideoMainWindow::onGainChanged()
+{
+    // ゲイン設定変更時に自動適用（接続中も可能）
+    QT_TRACE(2, "Audio gain changed - applying gain settings");
+    
+    AudioDeviceSelection selection = getAudioDeviceSelection();
+    QT_TRACE(3, "Gain update: " << selection.inputDevices.size() << " mics, "
+             << selection.outputDevices.size() << " speakers");
+    
+    // QtVideoManager経由でゲイン設定のみを適用
+    QtVideoManager::instance().applyAudioGainSettings(selection);
+}
+
+/**
+ * @brief オーディオビジュアライザーを更新（タイマーから呼ばれる）
+ */
+void QtVideoMainWindow::updateAudioVisualizers()
+{
+    // 通話がアクティブでない場合は即座に終了（dangling pointer 防止）
+    if (!m_isCallActive.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    // グローバルH323EndPointへアクセス
+    MyH323EndPoint* endpoint = GetGlobalH323Endpoint();
+    if (!endpoint) {
+        return;
+    }
+
+    MyH323Connection* conn = endpoint->GetCurrentConnection();
+    
+    // 接続がない、または確立されていない場合はビジュアライザーをリセット
+    if (!conn || !conn->IsEstablished()) {
+        // 接続なし or 未確立 → ビジュアライザーをリセット
+        for (int i = 0; i < m_micRows.size(); i++) {
+            if (m_micRows[i]) {
+                m_micRows[i]->updateLevelMeter(0.0);
+            }
+        }
+        for (int i = 0; i < m_speakerRows.size(); i++) {
+            if (m_speakerRows[i]) {
+                m_speakerRows[i]->updateLevelMeter(0.0);
+            }
+        }
+        return;
+    }
+
+    // マイクのレベルを更新（安全性チェック強化）
+    MicMixerChannel* micMixer = conn->GetMicMixer();
+    QT_TRACE(4, "updateAudioVisualizers: micMixer=" << (void*)micMixer 
+        << " m_micRows.size()=" << m_micRows.size());
+    
+    if (micMixer) {
+        size_t micCount = micMixer->GetDeviceCount();
+        QT_TRACE(4, "updateAudioVisualizers: micCount=" << micCount);
+        
+        // UI行数を実際のデバイス数でクリップ
+        size_t maxMicIndex = (micCount < (size_t)m_micRows.size()) ? micCount : (size_t)m_micRows.size();
+        QT_TRACE(4, "updateAudioVisualizers: maxMicIndex=" << maxMicIndex);
+        
+        for (size_t i = 0; i < maxMicIndex; i++) {
+            QT_TRACE(4, "updateAudioVisualizers: Processing mic " << i << " m_micRows[i]=" << (void*)m_micRows[i]);
+            if (m_micRows[i] && i < micCount) {  // 二重チェック
+                QT_TRACE(4, "updateAudioVisualizers: Getting mic level for device " << i);
+                double level = micMixer->GetDeviceLevel(i);
+                QT_TRACE(4, "updateAudioVisualizers: Got level=" << level << ", updating meter");
+                m_micRows[i]->updateLevelMeter(level);
+                QT_TRACE(4, "updateAudioVisualizers: Updated meter for device " << i);
+            }
+        }
+        QT_TRACE(4, "updateAudioVisualizers: Resetting excess mic rows from " << maxMicIndex);
+        // 実際のデバイス数より多い行はリセット
+        for (size_t i = maxMicIndex; i < (size_t)m_micRows.size(); i++) {
+            QT_TRACE(4, "updateAudioVisualizers: Resetting mic row " << i << " m_micRows[i]=" << (void*)m_micRows[i]);
+            if (m_micRows[i]) {
+                m_micRows[i]->updateLevelMeter(0.0);
+                QT_TRACE(4, "updateAudioVisualizers: Reset mic row " << i);
+            }
+        }
+        QT_TRACE(4, "updateAudioVisualizers: Mic processing completed");
+    } else {
+        // MicMixerがない場合は全てリセット
+        QT_TRACE(4, "updateAudioVisualizers: No micMixer, resetting all mic rows");
+        for (int i = 0; i < m_micRows.size(); i++) {
+            if (m_micRows[i]) {
+                m_micRows[i]->updateLevelMeter(0.0);
+            }
+        }
+    }
+
+    // スピーカーのレベルを更新（安全性チェック強化）
+    SpeakerFanoutChannel* speakerFanout = conn->GetSpeakerFanout();
+    QT_TRACE(4, "updateAudioVisualizers: speakerFanout=" << (void*)speakerFanout 
+        << " m_speakerRows.size()=" << m_speakerRows.size());
+    
+    if (speakerFanout) {
+        size_t speakerCount = speakerFanout->GetDeviceCount();
+        QT_TRACE(4, "updateAudioVisualizers: speakerCount=" << speakerCount);
+        
+        // UI行数を実際のデバイス数でクリップ
+        size_t maxSpeakerIndex = (speakerCount < (size_t)m_speakerRows.size()) ? speakerCount : (size_t)m_speakerRows.size();
+        for (size_t i = 0; i < maxSpeakerIndex; i++) {
+            if (m_speakerRows[i] && i < speakerCount) {  // 二重チェック
+                QT_TRACE(4, "updateAudioVisualizers: Getting speaker level for device " << i);
+                double level = speakerFanout->GetDeviceLevel(i);
+                m_speakerRows[i]->updateLevelMeter(level);
+            }
+        }
+        // 実際のデバイス数より多い行はリセット
+        for (size_t i = maxSpeakerIndex; i < (size_t)m_speakerRows.size(); i++) {
+            if (m_speakerRows[i]) {
+                m_speakerRows[i]->updateLevelMeter(0.0);
+            }
+        }
+    } else {
+        // SpeakerFanoutがない場合は全てリセット
+        for (int i = 0; i < m_speakerRows.size(); i++) {
+            if (m_speakerRows[i]) {
+                m_speakerRows[i]->updateLevelMeter(0.0);
+            }
+        }
+    }
+    
+    QT_TRACE(4, "updateAudioVisualizers: completed successfully");
+}
+
+/**
+ * @brief オーディオビジュアライザータイマーを停止（接続クローズ時に呼ばれる）
+ */
+void QtVideoMainWindow::stopAudioVisualizerTimer()
+{
+    QT_TRACE(2, "stopAudioVisualizerTimer called - clearing call flag and stopping timer");
+    
+    // 通話アクティブフラグを最初にクリア（dangling pointer 防止）
+    m_isCallActive.store(false, std::memory_order_release);
+    
+    // タイマーを停止
+    if (m_audioVisualizerTimer && m_audioVisualizerTimer->isActive()) {
+        m_audioVisualizerTimer->stop();
+        QT_TRACE(2, "Audio visualizer timer stopped");
+    }
+    
+    // ビジュアライザーをリセット
+    for (auto* row : m_micRows) {
+        if (row) {
+            row->updateLevelMeter(0.0);
+        }
+    }
+    for (auto* row : m_speakerRows) {
+        if (row) {
+            row->updateLevelMeter(0.0);
+        }
+    }
+}
+
+AudioDeviceSelection QtVideoMainWindow::getAudioDeviceSelection() const
+{
+    AudioDeviceSelection selection;
+
+    for (const AudioDeviceRowWidget* row : m_micRows) {
+        selection.inputDevices.append(row->getDeviceEntry());
+    }
+
+    for (const AudioDeviceRowWidget* row : m_speakerRows) {
+        selection.outputDevices.append(row->getDeviceEntry());
+    }
+
+    return selection;
+}
+
+void QtVideoMainWindow::setAudioDeviceSelection(const AudioDeviceSelection& selection)
+{
+    // 既存の行をクリア
+    while (m_micRows.size() > 0) {
+        AudioDeviceRowWidget* row = m_micRows.takeLast();
+        m_micRowsLayout->removeWidget(row);
+        row->deleteLater();
+    }
+
+    while (m_speakerRows.size() > 0) {
+        AudioDeviceRowWidget* row = m_speakerRows.takeLast();
+        m_speakerRowsLayout->removeWidget(row);
+        row->deleteLater();
+    }
+
+    // 新しい設定で行を追加
+    for (const AudioDeviceEntry& entry : selection.inputDevices) {
+        onAddMicClicked();
+        if (!m_micRows.isEmpty()) {
+            m_micRows.last()->setDeviceEntry(entry);
+        }
+    }
+
+    for (const AudioDeviceEntry& entry : selection.outputDevices) {
+        onAddSpeakerClicked();
+        if (!m_speakerRows.isEmpty()) {
+            m_speakerRows.last()->setDeviceEntry(entry);
+        }
+    }
+
+    QT_TRACE(2, "Audio device selection applied: "
+             << selection.inputDevices.size() << " mics, "
+             << selection.outputDevices.size() << " speakers");
+}
+
+QStringList QtVideoMainWindow::getAvailableDevices(int deviceType)
+{
+    QStringList devices;
+    QtVideoManager::instance().getDeviceList(deviceType, devices);
+    return devices;
+}
+
+void QtVideoMainWindow::removeDeviceRow(AudioDeviceRowWidget* widget,
+                                        QVector<AudioDeviceRowWidget*>& rows)
+{
+    int index = rows.indexOf(widget);
+    if (index < 0) return;
+
+    rows.removeAt(index);
+    widget->deleteLater();
+
+    // 残りが1行だけなら削除ボタンを非表示
+    if (rows.size() == 1) {
+        rows[0]->setRemoveButtonVisible(false);
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// End of Phase 1 Implementation
+///////////////////////////////////////////////////////////////////////////////
 
 #endif // USE_QT6

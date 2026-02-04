@@ -1235,6 +1235,12 @@ static QApplication* g_qApp = nullptr;
 static MyH323EndPoint* g_h323Endpoint = nullptr;
 static MyH323Connection* g_currentConnection = nullptr;
 
+// Phase 1: グローバルエンドポイントへのアクセサ（Qt UIから使用）
+MyH323EndPoint* GetGlobalH323Endpoint()
+{
+    return g_h323Endpoint;
+}
+
 // USB HID Controller for physical mute button (Jabra, Plantronics, etc.)
 static USBHIDController* g_hidController = nullptr;
 
@@ -1504,6 +1510,55 @@ static void Qt6ApplyDeviceSelectionCallback(const QString& mic, const QString& s
 #endif
 }
 
+// ==================== Phase 1: Multi-Device Audio Callback ====================
+
+#ifdef USE_QT6
+static void Qt6ApplyAudioDeviceSelectionCallback(const AudioDeviceSelection& selection, void* userData)
+{
+    MyH323EndPoint* ep = static_cast<MyH323EndPoint*>(userData);
+    if (!ep) {
+        PTRACE(1, "Qt6AudioCallback\tERROR: Endpoint is null");
+        return;
+    }
+    
+    // Qt6 AudioDeviceSelection → CoreAudioDeviceConfig に変換
+    CoreAudioDeviceConfig config;
+    
+    for (const AudioDeviceEntry& entry : selection.inputDevices) {
+        CoreAudioDeviceEntry coreEntry;
+        coreEntry.name = PString((const char*)entry.name.toUtf8());
+        coreEntry.gain = entry.gain;
+        coreEntry.muted = entry.muted;
+        config.inputs.push_back(coreEntry);
+    }
+    
+    for (const AudioDeviceEntry& entry : selection.outputDevices) {
+        CoreAudioDeviceEntry coreEntry;
+        coreEntry.name = PString((const char*)entry.name.toUtf8());
+        coreEntry.gain = entry.gain;
+        coreEntry.muted = entry.muted;
+        config.outputs.push_back(coreEntry);
+    }
+    
+    PTRACE(1, "Qt6AudioCallback\tReceived multi-device config: "
+           << config.inputs.size() << " inputs, "
+           << config.outputs.size() << " outputs");
+    
+    // エンドポイントに設定を保存（次回の接続時に使用）
+    ep->UpdateAudioDeviceConfig(config);
+    
+    // 接続状態をチェック
+    MyH323Connection* conn = ep->GetCurrentConnection();
+    if (conn) {
+        PTRACE(2, "Qt6AudioCallback\t⚠️ Cannot change devices during active call - config will be applied on next connection");
+    } else {
+        PTRACE(2, "Qt6AudioCallback\t✅ Config saved - will be applied when connecting");
+    }
+}
+#endif // USE_QT6
+
+// ==================== End of Phase 1 Audio Callback ====================
+
 // クラッシュハンドラ - バックトレースを出力
 static void crashHandler(int sig)
 {
@@ -1522,6 +1577,14 @@ static void crashHandler(int sig)
 
 int main(int argc, char* argv[])
 {
+    PTRACE(0, "H323ASKW\t🔴 main() ENTER");
+    
+#ifdef USE_QT6
+    PTRACE(0, "H323ASKW\t🔴 USE_QT6 is DEFINED - Qt6 support enabled");
+#else
+    PTRACE(0, "H323ASKW\t🔴 USE_QT6 is NOT DEFINED - Qt6 support disabled");
+#endif
+    
     // クラッシュハンドラを設定
     signal(SIGSEGV, crashHandler);
     signal(SIGBUS, crashHandler);
@@ -1531,8 +1594,14 @@ int main(int argc, char* argv[])
     g_argc = argc;
     g_argv = argv;
     
+#ifdef USE_QT6
+    PTRACE(0, "H323ASKW\t🔴 Creating QApplication...");
     // QApplicationを作成（GUIを表示するために必要）
     g_qApp = new QApplication(argc, argv);
+    PTRACE(0, "H323ASKW\t🔴 QApplication created: " << (void*)g_qApp);
+#else
+    PTRACE(0, "H323ASKW\t⚠️ Skipping QApplication - Qt6 not enabled");
+#endif
 
 #ifdef __APPLE__
     {
@@ -2582,6 +2651,11 @@ void H323ASKW::Main()
         qt6Manager.setToggleCameraCallback(Qt6ToggleCameraCallback, nullptr);
         qt6Manager.setGetDeviceListCallback(Qt6GetDeviceListCallback, h323);
         qt6Manager.setApplyDeviceSelectionCallback(Qt6ApplyDeviceSelectionCallback, h323);
+        
+        // Phase 1: Multi-Device Audio Callback
+        qt6Manager.setApplyAudioDeviceSelectionCallback(Qt6ApplyAudioDeviceSelectionCallback, h323);
+        PTRACE(1, "H323ASKW\t🎵 Multi-device audio callback registered");
+        
         qt6Manager.refreshDeviceLists();
         
         PTRACE(1, "H323ASKW\t✅ H323Endpoint and callbacks set in QtVideoManager for UI control");
@@ -4142,6 +4216,35 @@ void MyH323EndPoint::OnConnectionEstablished(H323Connection & connection, const 
   }
 }
 
+// ==================== Phase 1: Multi-Device Audio - Get Current Connection ====================
+
+MyH323Connection* MyH323EndPoint::GetCurrentConnection()
+{
+    // H323EndPoint::GetConnections() returns a dictionary of active connections
+    H323ConnectionDict& connections = GetConnections();
+    
+    // Return the first active connection (typically only one for point-to-point calls)
+    if (connections.GetSize() > 0) {
+        for (PINDEX i = 0; i < connections.GetSize(); i++) {
+            H323Connection* conn = &connections.GetDataAt(i);
+            if (conn && conn->IsEstablished()) {
+                MyH323Connection* myConn = dynamic_cast<MyH323Connection*>(conn);
+                if (myConn) {
+                    return myConn;
+                }
+            }
+        }
+        
+        // If no established connection, return the first one (may be in setup phase)
+        H323Connection* firstConn = &connections.GetDataAt(0);
+        return dynamic_cast<MyH323Connection*>(firstConn);
+    }
+    
+    return nullptr;
+}
+
+// ==================== End of Phase 1 ====================
+
 void MyH323EndPoint::OnConnectionCleared(H323Connection & connection, const PString & token)
 {
   // IMMEDIATE STDERR OUTPUT for debugging
@@ -4307,6 +4410,14 @@ void MyH323EndPoint::OnConnectionCleared(H323Connection & connection, const PStr
   // Enhanced cleanup to prevent RTP report duplication
   // Force proper connection cleanup by calling parent cleanup
   H323EndPoint::OnConnectionCleared(connection, token);
+  
+#ifdef USE_QT6
+  // Qt6ビジュアライザータイマーを停止
+  QtVideoManager& qtMgr = QtVideoManager::instance();
+  if (qtMgr.getMainWindow()) {
+    QMetaObject::invokeMethod(qtMgr.getMainWindow(), "stopAudioVisualizerTimer", Qt::QueuedConnection);
+  }
+#endif
   
   // Original output for backward compatibility
   OUTPUT("", token, "Cleared \"" << TidyRemotePartyName(connection) << "\""
@@ -4802,6 +4913,9 @@ MyH323Connection::MyH323Connection(MyH323EndPoint & ep, unsigned callRef)
   , m_fastStartVideoSessionGuarded(false)
   , m_protectedVideoSession(nullptr)
   , m_videoSessionSecured(false)
+  // Phase 1: Multi-Device Audio Channels
+  , m_micMixer(nullptr)
+  , m_speakerFanout(nullptr)
 {
     detectInBandDTMF = FALSE; // turn off in-band DTMF detection (uses a huge amount of CPU)
     
@@ -4931,7 +5045,93 @@ MyH323Connection::~MyH323Connection()
     }
 #endif
     
+    // Phase 1: Clean up multi-device audio channels
+    if (m_micMixer != NULL) {
+        PTRACE(3, "H323ASKW\tCleaning up MicMixerChannel");
+        delete m_micMixer;
+        m_micMixer = NULL;
+    }
+    if (m_speakerFanout != NULL) {
+        PTRACE(3, "H323ASKW\tCleaning up SpeakerFanoutChannel");
+        delete m_speakerFanout;
+        m_speakerFanout = NULL;
+    }
+    
     PTRACE(3, "H323ASKW\t✅ MyH323Connection destructor completed successfully");
+}
+
+// ============================================================================
+// Phase 1: Multi-Device Audio Support - Connection Methods
+// ============================================================================
+
+/**
+ * @brief 通話中に音声デバイス構成を更新（必要に応じてチャネル再オープン）
+ * @param cfg 新しい音声デバイス設定
+ */
+void MyH323Connection::UpdateAudioDevices(const CoreAudioDeviceConfig& cfg)
+{
+  PTRACE(1, "H323ASKW\t🔄 Connection: Updating audio devices during call");
+  PTRACE(2, "H323ASKW\t   Inputs: " << cfg.inputs.size() 
+         << ", Outputs: " << cfg.outputs.size());
+  
+  // 安全性チェック: 接続が確立されているか
+  if (!IsEstablished()) {
+    PTRACE(2, "H323ASKW\t   Connection not established yet - config will be applied on next call");
+    return;
+  }
+  
+  // チャネルが存在するかチェック
+  bool hasMicMixer = (m_micMixer != NULL);
+  bool hasSpeakerFanout = (m_speakerFanout != NULL);
+  bool needsMicMixer = (cfg.inputs.size() >= 1);
+  bool needsSpeakerFanout = (cfg.outputs.size() >= 1);
+  
+  // マイクミキサーが存在する場合は更新
+  if (hasMicMixer && needsMicMixer) {
+    PTRACE(2, "H323ASKW\t   Updating existing MicMixerChannel...");
+    // スレッドセーフティのため、ポインタを再確認
+    if (m_micMixer) {
+      m_micMixer->UpdateDevices(cfg);
+    }
+  } else if (!hasMicMixer && needsMicMixer) {
+    PTRACE(2, "H323ASKW\t   MicMixerChannel not yet initialized (will be created on next call)");
+  }
+  
+  // スピーカーファンアウトが存在する場合は更新
+  if (hasSpeakerFanout && needsSpeakerFanout) {
+    PTRACE(2, "H323ASKW\t   Updating existing SpeakerFanoutChannel...");
+    // スレッドセーフティのため、ポインタを再確認
+    if (m_speakerFanout) {
+      m_speakerFanout->UpdateDevices(cfg);
+    }
+  } else if (!hasSpeakerFanout && needsSpeakerFanout) {
+    PTRACE(2, "H323ASKW\t   SpeakerFanoutChannel not yet initialized (will be created on next call)");
+  }
+  
+  PTRACE(1, "H323ASKW\t✅ Connection: Audio device update complete");
+}
+
+/**
+ * @brief 音声デバイスのゲイン設定を更新（接続中も可能）
+ * @param cfg ゲイン設定を含む音声デバイス設定
+ */
+void MyH323Connection::UpdateAudioGainSettings(const CoreAudioDeviceConfig& cfg)
+{
+  PTRACE(2, "H323ASKW\t🎚️ Connection: Updating audio gain settings");
+  PTRACE(3, "H323ASKW\t   Inputs: " << cfg.inputs.size() 
+         << ", Outputs: " << cfg.outputs.size());
+  
+  // マイクミキサーのゲイン更新
+  if (m_micMixer && cfg.inputs.size() > 0) {
+    m_micMixer->UpdateGainSettings(cfg);
+  }
+  
+  // スピーカーファンアウトのゲイン更新
+  if (m_speakerFanout && cfg.outputs.size() > 0) {
+    m_speakerFanout->UpdateGainSettings(cfg);
+  }
+  
+  PTRACE(2, "H323ASKW\t✅ Connection: Gain settings updated");
 }
 
 // ==== H.245受信PDU: A) const参照版 ====
@@ -8064,6 +8264,14 @@ void MyH323Connection::OnClosedLogicalChannel(const H323Channel & channel)
         PTRACE(1, "H323ASKW\t🔴 Video TX state reset via state machine");
     }
     
+    // Phase 1.5: Reset audio channel pointers when Session 1 (audio) is closed
+    if (sessionID == 1) {  // Session 1 = audio
+        PTRACE(2, "H323ASKW\t🎵 Audio channel closed - clearing multi-device pointers");
+        // タイマーからのアクセスを防ぐため、ポインタを即座に NULL にリセット
+        m_micMixer = NULL;
+        m_speakerFanout = NULL;
+    }
+    
     // 🔍 CRITICAL SESSION2_CLOSE_TRACKING: Session 2クローズの詳細追跡
     if (sessionID == 2) {
         PTRACE(1, "H323ASKW\t🔍 SESSION2_CLOSE_TRACKING: *** CRITICAL: VIDEO SESSION 2 CHANNEL BEING CLOSED ***");
@@ -8256,6 +8464,9 @@ void MyH323Connection::ProcessH264RTPForDisplay(const RTP_DataFrame & frame, uns
 
 PBoolean MyH323Connection::OpenAudioChannel(PBoolean isEncoding, unsigned bufferSize, H323AudioCodec & codec)
 {
+  PTRACE(1, "H323ASKW\t🚨🚨🚨 OpenAudioChannel CALLED: isEncoding=" << isEncoding 
+         << " bufferSize=" << bufferSize);
+  
   // Get audio configuration from endpoint
   MyH323EndPoint& ep = dynamic_cast<MyH323EndPoint&>(GetEndPoint());
   
@@ -8265,8 +8476,123 @@ PBoolean MyH323Connection::OpenAudioChannel(PBoolean isEncoding, unsigned buffer
     return FALSE;
   }
   
+  // Determine sample rate from codec
+  PString codecName = codec.GetMediaFormat();
+  PTRACE(1, "H323ASKW\t🎵 OpenAudioChannel codec: " << codecName);
+  unsigned rate = 8000;  // Default for G.711
+  if (codecName.Find("G.722") != P_MAX_INDEX) {
+    rate = 16000;  // G.722 uses 16kHz sample rate
+    PTRACE(2, "H323ASKW\t🎵 G.722 detected - using 16kHz sample rate");
+  } else if (codecName.Find("G.722.1") != P_MAX_INDEX) {
+    rate = 16000;  // G.722.1 also uses 16kHz
+    PTRACE(2, "H323ASKW\t🎵 G.722.1 detected - using 16kHz sample rate");
+  }
+  
+  unsigned channels = 1;    // Mono
+  unsigned bits = 16;       // 16-bit PCM
+  const unsigned frameSamples = std::max(1u, rate / 100); // 10ms frames
+
+  PTRACE(2, "H323ASKW\t🎵 Audio config: codec=" << codecName << " rate=" << rate << "Hz");
+  
+  // ==================== Phase 1: Multi-Device Audio Integration ====================
+  
+  // Initialize SpeexDSP processor if not already done
+#if defined(USE_SPEEXDSP)
+  if (!SpeexRuntimeDisabled()) {
+    const unsigned tailMs = kDefaultAecTailMs;
+    const unsigned delayMs = (m_aecDelayMs > 0) ? m_aecDelayMs : kDefaultPlaybackDelayMs;
+    const bool enableAgc = false;
+
+    if (!m_speexProcessor ||
+        m_speexProcessor->SampleRate() != rate ||
+        m_speexProcessor->FrameSamples() != frameSamples) {
+      m_speexProcessor = std::make_shared<SpeexAudioProcessor>(rate, frameSamples, tailMs, delayMs, enableAgc);
+      PTRACE(2, "H323ASKW\tSpeexDSP initialized: rate=" << rate << "Hz, frameSamples=" << frameSamples);
+    } else {
+      m_speexProcessor->Reconfigure(rate, frameSamples, tailMs, delayMs, enableAgc);
+      PTRACE(2, "H323ASKW\tSpeexDSP reconfigured");
+    }
+  } else {
+    PTRACE(1, "H323ASKW\tSpeexDSP runtime disabled via H323ASKW_DISABLE_SPEEXDSP");
+  }
+#endif
+  
+  // Check if multi-device configuration is available
+  CoreAudioDeviceConfig multiDeviceConfig = ep.GetAudioDeviceConfig();
+  PTRACE(2, "H323ASKW\t🔍 Retrieved audio config from endpoint: "
+         << multiDeviceConfig.inputs.size() << " inputs, "
+         << multiDeviceConfig.outputs.size() << " outputs");
+  
+  bool useMultiDevice = false;
+  
+  if (isEncoding) {
+    // Microphone: check if we have input devices configured (1 or more)
+    useMultiDevice = (multiDeviceConfig.inputs.size() >= 1);
+    if (useMultiDevice) {
+      PTRACE(1, "H323ASKW\t🎤 Multi-device INPUT mode: " 
+             << multiDeviceConfig.inputs.size() << " microphone(s) configured");
+    }
+  } else {
+    // Speaker: check if we have output devices configured (1 or more)
+    useMultiDevice = (multiDeviceConfig.outputs.size() >= 1);
+    if (useMultiDevice) {
+      PTRACE(1, "H323ASKW\t🔊 Multi-device OUTPUT mode: "
+             << multiDeviceConfig.outputs.size() << " speaker(s) configured");
+    }
+  }
+  
+  // If multi-device mode, use MicMixerChannel or SpeakerFanoutChannel
+  if (useMultiDevice) {
+    if (isEncoding) {
+      // ========== MicMixerChannel ==========
+      PTRACE(1, "H323ASKW\t🎤 Creating MicMixerChannel for " 
+             << multiDeviceConfig.inputs.size() << " microphones");
+      
+      // Create MicMixerChannel (PChannel-derived)
+      // Pass connection, full config, sample rate, frame samples, speex processor
+      m_micMixer = new MicMixerChannel(this, multiDeviceConfig, rate, frameSamples, m_speexProcessor);
+      if (!m_micMixer) {
+        PTRACE(1, "H323ASKW\t❌ Failed to create MicMixerChannel");
+        return FALSE;
+      }
+      
+      // Attach directly to codec (MicMixerChannel is PChannel, no wrapper needed)
+      codec.AttachChannel(m_micMixer);
+      
+      PTRACE(1, "H323ASKW\t✅ MicMixerChannel created with "
+             << multiDeviceConfig.inputs.size() << " devices");
+      
+      RegisterPortMapping(1);
+      return TRUE;
+      
+    } else {
+      // ========== SpeakerFanoutChannel ==========
+      PTRACE(1, "H323ASKW\t🔊 Creating SpeakerFanoutChannel for "
+             << multiDeviceConfig.outputs.size() << " speakers");
+      
+      // Create SpeakerFanoutChannel (PChannel-derived)
+      // Pass full config, sample rate, speex processor
+      m_speakerFanout = new SpeakerFanoutChannel(multiDeviceConfig, rate, m_speexProcessor);
+      if (!m_speakerFanout) {
+        PTRACE(1, "H323ASKW\t❌ Failed to create SpeakerFanoutChannel");
+        return FALSE;
+      }
+      
+      // Attach directly to codec (SpeakerFanoutChannel is PChannel, no wrapper needed)
+      codec.AttachChannel(m_speakerFanout);
+      
+      PTRACE(1, "H323ASKW\t✅ SpeakerFanoutChannel created with "
+             << multiDeviceConfig.outputs.size() << " devices");
+      
+      RegisterPortMapping(1);
+      return TRUE;
+    }
+  }
+  
+  // ==================== End of Phase 1 Integration ====================
+  
   // ============================================================
-  // Use real audio devices (microphone/speaker)
+  // Single-device mode (original implementation)
   // ============================================================
   PString inDev = ep.GetAudioInputDevice();
   PString outDev = ep.GetAudioOutputDevice();
@@ -8275,28 +8601,8 @@ PBoolean MyH323Connection::OpenAudioChannel(PBoolean isEncoding, unsigned buffer
   if (inDev.IsEmpty())  inDev  = PSoundChannel::GetDefaultDevice(PSoundChannel::Recorder);
   if (outDev.IsEmpty()) outDev = PSoundChannel::GetDefaultDevice(PSoundChannel::Player);
   
-  // Determine sample rate from codec
-  // G.722 requires 16kHz, G.711 uses 8kHz
-  PString codecName = codec.GetMediaFormat();
-  unsigned rate = 8000;  // Default for G.711
-  if (codecName.Find("G.722") != P_MAX_INDEX) {
-    rate = 16000;  // G.722 uses 16kHz sample rate
-    PTRACE(2, "H323ASKW\t🎵 G.722 detected - using 16kHz sample rate");
-  } else if (codecName.Find("G.722.1") != P_MAX_INDEX) {
-    rate = 16000;  // G.722.1 also uses 16kHz (or 32kHz for wideband)
-    PTRACE(2, "H323ASKW\t🎵 G.722.1 detected - using 16kHz sample rate");
-  }
-  
-  // Audio parameters for VoIP
-  unsigned channels = 1;    // Mono
-  unsigned bits = 16;       // 16-bit PCM
-  const unsigned frameSamples = std::max(1u, rate / 100); // 10ms frames
-
-  PTRACE(2, "H323ASKW\t🎵 Audio config: codec=" << codecName << " rate=" << rate << "Hz");
-  
   // For PortAudio devices, use "PortAudio" as the driver
-  // The device name is passed as-is to PortAudio
-  PString driver = "PortAudio";  // Always use PortAudio driver
+  PString driver = "PortAudio";
   PString device;
   if (isEncoding) {
     device = inDev;
@@ -8342,7 +8648,7 @@ PBoolean MyH323Connection::OpenAudioChannel(PBoolean isEncoding, unsigned buffer
     // Initialize or reconfigure shared Speex processor (AEC/NS)
     const unsigned tailMs = kDefaultAecTailMs;
     const unsigned delayMs = (m_aecDelayMs > 0) ? m_aecDelayMs : kDefaultPlaybackDelayMs;
-    const bool enableAgc = false; // start conservatively; software gain remains available
+    const bool enableAgc = false;
 
     if (!m_speexProcessor ||
         m_speexProcessor->SampleRate() != rate ||
@@ -9595,6 +9901,8 @@ void MyH323Connection::OnSelectLogicalChannels()
   }
   
   // Continue with standard H323Plus logical channel selection
+  // Note: Audio channels will be opened automatically by H.323 negotiation
+  // when OpenAudioChannel() is called by the codec attachment process
   PTRACE(3, "H323ASKW\tProceeding with H323Plus standard logical channel selection");
   PTRACE(3, "H323ASKW\tLocal capabilities: " << GetLocalCapabilities().GetSize() << ", Remote: " << GetRemoteCapabilities().GetSize());
   
@@ -17316,6 +17624,352 @@ PBoolean SpectrumSpeakerChannel::Write(const void* buf, PINDEX len)
   return PIndirectChannel::Write(out.data(), len);
 }
 
+// ============================================================================
+// Phase 1: MicMixerChannel Implementation
+// ============================================================================
+
+/**
+ * @brief コンストラクタ: 複数マイクミキサーを初期化
+ */
+MicMixerChannel::MicMixerChannel(MyH323Connection* connection,
+                                 const CoreAudioDeviceConfig& initialConfig,
+                                 unsigned sampleRate,
+                                 unsigned frameSamples,
+                                 const std::shared_ptr<SpeexAudioProcessor>& speexProcessor)
+  : m_connection(connection)
+  , m_sampleRate(sampleRate)
+  , m_frameSamples(frameSamples)
+  , m_speexProcessor(speexProcessor)
+  , m_isOpen(true)
+{
+  PTRACE(1, "MicMixer\t🎤 MicMixerChannel created @ " << sampleRate << "Hz, " 
+         << frameSamples << " samples/frame");
+  
+  // 初期デバイスセットを開く
+  PWaitAndSignal lock(m_devicesMutex);
+  m_activeDevices = OpenDevices(initialConfig.inputs);
+  
+  PTRACE(1, "MicMixer\t✅ Initialized with " << m_activeDevices->size() << " microphone(s)");
+}
+
+/**
+ * @brief デストラクタ: リソースをクリーンアップ
+ */
+MicMixerChannel::~MicMixerChannel()
+{
+  PTRACE(1, "MicMixer\t🔚 MicMixerChannel destroyed");
+  Close();
+}
+
+/**
+ * @brief チャネルを閉じる
+ */
+PBoolean MicMixerChannel::Close()
+{
+  if (!m_isOpen) {
+    return TRUE;
+  }
+  
+  m_isOpen = false;
+  
+  // 空のデバイスセットに置き換えてクリーンアップ
+  PWaitAndSignal lock(m_devicesMutex);
+  m_activeDevices = std::make_shared<DeviceSet>();
+  
+  PTRACE(1, "MicMixer\t🔒 MicMixerChannel closed");
+  return TRUE;
+}
+
+/**
+ * @brief デバイスセットを開く
+ * @param entries デバイスエントリのリスト
+ * @return 開いたデバイスのセット
+ */
+std::shared_ptr<MicMixerChannel::DeviceSet>
+MicMixerChannel::OpenDevices(const std::vector<CoreAudioDeviceEntry>& entries)
+{
+  auto devices = std::make_shared<DeviceSet>();
+  
+  for (const auto& entry : entries) {
+    auto handle = std::make_shared<DeviceHandle>();
+    handle->name = entry.name;
+    handle->gain = entry.gain;
+    handle->muted = entry.muted;
+    
+    // デバイスをオープン
+    handle->channel = PSoundChannel::CreateOpenedChannel(
+      "PortAudio",
+      entry.name,
+      PSoundChannel::Recorder,
+      1,  // channels (mono)
+      m_sampleRate,
+      16  // bits
+    );
+    
+    if (handle->channel) {
+      handle->channel->SetBuffers(m_frameSamples * 2, 2);
+      devices->push_back(handle);
+      PTRACE(2, "MicMixer\t✅ Opened microphone: " << entry.name 
+             << " (gain=" << entry.gain << ", muted=" << (entry.muted ? "yes" : "no") << ")");
+    } else {
+      PTRACE(1, "MicMixer\t⚠️ Failed to open microphone: " << entry.name 
+             << " - continuing with other devices");
+    }
+  }
+  
+  if (devices->empty()) {
+    PTRACE(1, "MicMixer\t⚠️ No microphones available - will output silence");
+  } else {
+    PTRACE(1, "MicMixer\t✅ Successfully opened " << devices->size() 
+           << "/" << entries.size() << " microphone(s)");
+  }
+  
+  return devices;
+}
+
+/**
+ * @brief デバイス構成を更新（ホットスワップ）
+ * @param cfg 新しい音声デバイス設定
+ */
+void MicMixerChannel::UpdateDevices(const CoreAudioDeviceConfig& cfg)
+{
+  PWaitAndSignal lock(m_updateMutex);
+  
+  PTRACE(1, "MicMixer\t🔄 Updating devices - " << cfg.inputs.size() << " input(s)");
+  
+  // 新しいデバイスセットを生成
+  auto newDevices = OpenDevices(cfg.inputs);
+  
+  // mutex保護下で入れ替え
+  {
+    PWaitAndSignal devLock(m_devicesMutex);
+    m_activeDevices = newDevices;
+  }
+  
+  PTRACE(1, "MicMixer\t✅ Device update complete");
+}
+
+/**
+ * @brief ゲイン設定のみを更新（デバイス再オープンなし）
+ * @param cfg ゲイン設定を含む音声デバイス設定
+ */
+void MicMixerChannel::UpdateGainSettings(const CoreAudioDeviceConfig& cfg)
+{
+  PWaitAndSignal lock(m_devicesMutex);
+  
+  if (!m_activeDevices) {
+    PTRACE(2, "MicMixer\t⚠️ No active devices to update gain");
+    return;
+  }
+  
+  PTRACE(2, "MicMixer\t🎚️ Updating gain settings for " << m_activeDevices->size() << " device(s)");
+  
+  // デバイス名でマッチングしてゲインとミュートを更新
+  for (size_t i = 0; i < m_activeDevices->size() && i < cfg.inputs.size(); ++i) {
+    auto& dev = (*m_activeDevices)[i];
+    const auto& newConfig = cfg.inputs[i];
+    
+    // デバイス名が一致する場合のみ更新
+    if (dev->name == newConfig.name) {
+      dev->gain = newConfig.gain;
+      dev->muted = newConfig.muted;
+      PTRACE(3, "MicMixer\t   Device " << i << " (" << dev->name 
+             << "): gain=" << dev->gain << ", muted=" << (dev->muted ? "yes" : "no"));
+    }
+  }
+  
+  PTRACE(2, "MicMixer\t✅ Gain settings updated");
+}
+
+/**
+ * @brief 指定されたインデックスのデバイスの音声レベルを取得
+ * @param index デバイスのインデックス
+ * @return 音声レベル（0.0～1.0）、範囲外の場合は0.0
+ */
+double MicMixerChannel::GetDeviceLevel(size_t index) const
+{
+  PWaitAndSignal lock(m_devicesMutex);
+  if (!m_activeDevices || index >= m_activeDevices->size()) {
+    return 0.0;
+  }
+  return (*m_activeDevices)[index]->lastLevel;
+}
+
+/**
+ * @brief 現在のデバイス数を取得
+ * @return デバイス数
+ */
+size_t MicMixerChannel::GetDeviceCount() const
+{
+  PWaitAndSignal lock(m_devicesMutex);
+  return m_activeDevices ? m_activeDevices->size() : 0;
+}
+
+/**
+ * @brief デバイスから音声データを読み出し
+ * @param dev デバイスハンドル
+ * @param buffer 出力バッファ
+ * @param samples サンプル数
+ * @return 読み出し成功時 true
+ */
+bool MicMixerChannel::ReadFromDevice(DeviceHandle& dev, int16_t* buffer, PINDEX samples)
+{
+  if (!dev.channel) {
+    return false;
+  }
+  
+  PINDEX bytesToRead = samples * sizeof(int16_t);
+  PINDEX bytesRead = 0;
+  
+  if (!dev.channel->Read(buffer, bytesToRead)) {
+    PString errText = dev.channel->GetErrorText();
+    PTRACE(3, "MicMixer\t⚠️ Failed to read from device " << dev.name 
+           << ": " << errText);
+    return false;
+  }
+  
+  return true;
+}
+
+/**
+ * @brief 複数入力をミックス
+ * @param inputs 入力バッファのリスト
+ * @param gains ゲインのリスト
+ * @param output 出力バッファ
+ * @param samples サンプル数
+ */
+void MicMixerChannel::MixSamples(const std::vector<int16_t*>& inputs,
+                                 const std::vector<double>& gains,
+                                 int16_t* output,
+                                 PINDEX samples)
+{
+  for (PINDEX i = 0; i < samples; i++) {
+    int32_t mixed = 0;
+    
+    for (size_t j = 0; j < inputs.size(); j++) {
+      int32_t sample = static_cast<int32_t>(std::lround(
+        static_cast<double>(inputs[j][i]) * gains[j]));
+      mixed += sample;
+    }
+    
+    // クリッピング
+    if (mixed > 32767) {
+      output[i] = 32767;
+    } else if (mixed < -32768) {
+      output[i] = -32768;
+    } else {
+      output[i] = static_cast<int16_t>(mixed);
+    }
+  }
+}
+
+/**
+ * @brief 音声データを読み出し（複数マイクをミックス）
+ * @param buf 出力バッファ
+ * @param len バッファサイズ（バイト）
+ * @return 読み出し成功時 TRUE
+ */
+PBoolean MicMixerChannel::Read(void* buf, PINDEX len)
+{
+  if (!m_isOpen) {
+    PTRACE(4, "MicMixer\t⚠️ Read() called but channel is closed");
+    lastReadCount = 0;
+    return FALSE;
+  }
+  
+  // 1. 現在のデバイスセットを取得（mutex保護）
+  std::shared_ptr<DeviceSet> devices;
+  {
+    PWaitAndSignal lock(m_devicesMutex);
+    devices = m_activeDevices;
+  }
+  
+  if (!devices || devices->empty()) {
+    // デバイスなし → 無音
+    PTRACE(4, "MicMixer\t⚠️ Read() called but no devices available");
+    memset(buf, 0, len);
+    lastReadCount = len;
+    return TRUE;
+  }
+  
+  PTRACE(4, "MicMixer\t🎤 Read() called: len=" << len << " devices=" << devices->size());
+  
+  const PINDEX samples = len / sizeof(int16_t);
+  int16_t* outBuf = static_cast<int16_t*>(buf);
+  
+  // 2. 各マイクからフレームを読み出し
+  std::vector<int16_t*> inputBuffers;
+  std::vector<double> inputGains;
+  
+  for (auto& devHandle : *devices) {
+    if (!devHandle->channel || devHandle->muted) {
+      devHandle->lastLevel = 0.0;  // ミュート時はレベル0
+      continue;  // ミュート中はスキップ
+    }
+    
+    devHandle->buffer.resize(samples);
+    if (ReadFromDevice(*devHandle, devHandle->buffer.data(), samples)) {
+      inputBuffers.push_back(devHandle->buffer.data());
+      inputGains.push_back(devHandle->gain);
+      
+      // 音声レベルを計算 (RMS)
+      int64_t sum = 0;
+      for (PINDEX i = 0; i < samples; i++) {
+        int32_t val = devHandle->buffer[i];
+        sum += val * val;
+      }
+      double rms = std::sqrt((double)sum / (double)samples);
+      devHandle->lastLevel = rms / 32768.0;  // 0.0～1.0に正規化
+      PTRACE(4, "MicMixer\t📊 Device read successful: rms=" << rms << " lastLevel=" << devHandle->lastLevel);
+    } else {
+      devHandle->lastLevel = 0.0;  // 読み出し失敗時はレベル0
+      PTRACE(4, "MicMixer\t⚠️ Device read failed - setting level to 0");
+    }
+  }
+  
+  // 3. ミックス（加算 + クリッピング）
+  if (inputBuffers.empty()) {
+    // 全デバイスがミュートまたは失敗 → 無音
+    memset(outBuf, 0, len);
+  } else {
+    MixSamples(inputBuffers, inputGains, outBuf, samples);
+  }
+  
+  // 4. マスタゲインを適用（既存の g_inputGainLinear）
+  double masterGain = g_inputGainLinear.load(std::memory_order_relaxed);
+  if (std::abs(masterGain - 1.0) > 0.001) {
+    for (PINDEX i = 0; i < samples; i++) {
+      int32_t val = static_cast<int32_t>(std::lround(
+        static_cast<double>(outBuf[i]) * masterGain));
+      if (val > 32767) {
+        outBuf[i] = 32767;
+      } else if (val < -32768) {
+        outBuf[i] = -32768;
+      } else {
+        outBuf[i] = static_cast<int16_t>(val);
+      }
+    }
+  }
+  
+  // 5. 全体ミュート確認（既存の IsLocalMicMuted）
+  if (m_connection && m_connection->IsLocalMicMuted()) {
+    memset(outBuf, 0, len);
+  }
+  
+  // 6. SpeexDSP 処理（AEC/NS/AGC）
+#if defined(USE_SPEEXDSP)
+  if (m_speexProcessor && !m_speexProcessor->IsForceBypass()) {
+    m_speexProcessor->ProcessCapture(outBuf, samples);
+  }
+#endif
+  
+  // 7. スペクトラム表示用に送信（既存関数）
+  UpdateLocalAudioSpectrum(outBuf, samples, 1, m_sampleRate);
+
+  lastReadCount = len;
+  return TRUE;
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // Global functions to update spectrum - bridge to Qt6 UI
 void UpdateLocalAudioSpectrum(const int16_t* pcmData, size_t sampleCount, int channels, int sampleRate)
@@ -17342,4 +17996,287 @@ void UpdateRemoteAudioSpectrum(const int16_t* pcmData, size_t sampleCount, int c
 #else
   (void)pcmData; (void)sampleCount; (void)channels; (void)sampleRate;
 #endif
+}
+
+// ============================================================================
+// Phase 1: SpeakerFanoutChannel Implementation
+// ============================================================================
+
+/**
+ * @brief コンストラクタ: 複数スピーカーファンアウトを初期化
+ */
+SpeakerFanoutChannel::SpeakerFanoutChannel(const CoreAudioDeviceConfig& initialConfig,
+                                           unsigned sampleRate,
+                                           const std::shared_ptr<SpeexAudioProcessor>& speexProcessor)
+  : m_sampleRate(sampleRate)
+  , m_speexProcessor(speexProcessor)
+  , m_isOpen(true)
+{
+  PTRACE(1, "SpeakerFanout\t🔊 SpeakerFanoutChannel created @ " << sampleRate << "Hz");
+  
+  // 初期スピーカーセットを開く
+  PWaitAndSignal lock(m_speakersMutex);
+  m_activeSpeakers = OpenSpeakers(initialConfig.outputs);
+  
+  PTRACE(1, "SpeakerFanout\t✅ Initialized with " << m_activeSpeakers->size() << " speaker(s)");
+}
+
+/**
+ * @brief デストラクタ: リソースをクリーンアップ
+ */
+SpeakerFanoutChannel::~SpeakerFanoutChannel()
+{
+  PTRACE(1, "SpeakerFanout\t🔚 SpeakerFanoutChannel destroyed");
+  Close();
+}
+
+/**
+ * @brief チャネルを閉じる
+ */
+PBoolean SpeakerFanoutChannel::Close()
+{
+  if (!m_isOpen) {
+    return TRUE;
+  }
+  
+  m_isOpen = false;
+  
+  // 空のスピーカーセットに置き換えてクリーンアップ
+  PWaitAndSignal lock(m_speakersMutex);
+  m_activeSpeakers = std::make_shared<SpeakerSet>();
+  
+  PTRACE(1, "SpeakerFanout\t🔒 SpeakerFanoutChannel closed");
+  return TRUE;
+}
+
+/**
+ * @brief スピーカーセットを開く
+ * @param entries デバイスエントリのリスト
+ * @return 開いたスピーカーのセット
+ */
+std::shared_ptr<SpeakerFanoutChannel::SpeakerSet>
+SpeakerFanoutChannel::OpenSpeakers(const std::vector<CoreAudioDeviceEntry>& entries)
+{
+  auto speakers = std::make_shared<SpeakerSet>();
+  
+  for (const auto& entry : entries) {
+    auto handle = std::make_shared<SpeakerHandle>();
+    handle->name = entry.name;
+    handle->gain = entry.gain;
+    handle->muted = entry.muted;
+    
+    // デバイスをオープン
+    handle->channel = PSoundChannel::CreateOpenedChannel(
+      "PortAudio",
+      entry.name,
+      PSoundChannel::Player,
+      1,  // channels (mono)
+      m_sampleRate,
+      16  // bits
+    );
+    
+    if (handle->channel) {
+      // バッファサイズは短め（10ms程度）でドリフトを低減
+      unsigned bufferSamples = m_sampleRate / 100;  // 10ms
+      handle->channel->SetBuffers(bufferSamples * 2, 2);
+      speakers->push_back(handle);
+      PTRACE(2, "SpeakerFanout\t✅ Opened speaker: " << entry.name 
+             << " (gain=" << entry.gain << ", muted=" << (entry.muted ? "yes" : "no") << ")");
+    } else {
+      PTRACE(1, "SpeakerFanout\t⚠️ Failed to open speaker: " << entry.name 
+             << " - continuing with other devices");
+    }
+  }
+  
+  if (speakers->empty()) {
+    PTRACE(4, "SpeakerFanout\t⚠️ No speakers available");
+  } else {
+    PTRACE(1, "SpeakerFanout\t✅ Successfully opened " << speakers->size() 
+           << "/" << entries.size() << " speaker(s)");
+  }
+  
+  return speakers;
+}
+
+/**
+ * @brief デバイス構成を更新（ホットスワップ）
+ * @param cfg 新しい音声デバイス設定
+ */
+void SpeakerFanoutChannel::UpdateDevices(const CoreAudioDeviceConfig& cfg)
+{
+  PWaitAndSignal lock(m_updateMutex);
+  
+  PTRACE(1, "SpeakerFanout\t🔄 Updating devices - " << cfg.outputs.size() << " output(s)");
+  
+  // 新しいスピーカーセットを生成
+  auto newSpeakers = OpenSpeakers(cfg.outputs);
+  
+  // mutex保護下で入れ替え
+  {
+    PWaitAndSignal spkLock(m_speakersMutex);
+    m_activeSpeakers = newSpeakers;
+  }
+  
+  PTRACE(1, "SpeakerFanout\t✅ Device update complete");
+}
+
+/**
+ * @brief ゲイン設定のみを更新（デバイス再オープンなし）
+ * @param cfg ゲイン設定を含む音声デバイス設定
+ */
+void SpeakerFanoutChannel::UpdateGainSettings(const CoreAudioDeviceConfig& cfg)
+{
+  PWaitAndSignal lock(m_speakersMutex);
+  
+  if (!m_activeSpeakers) {
+    PTRACE(2, "SpeakerFanout\t⚠️ No active speakers to update gain");
+    return;
+  }
+  
+  PTRACE(2, "SpeakerFanout\t🎚️ Updating gain settings for " << m_activeSpeakers->size() << " speaker(s)");
+  
+  // デバイス名でマッチングしてゲインとミュートを更新
+  for (size_t i = 0; i < m_activeSpeakers->size() && i < cfg.outputs.size(); ++i) {
+    auto& spk = (*m_activeSpeakers)[i];
+    const auto& newConfig = cfg.outputs[i];
+    
+    // デバイス名が一致する場合のみ更新
+    if (spk->name == newConfig.name) {
+      spk->gain = newConfig.gain;
+      spk->muted = newConfig.muted;
+      PTRACE(3, "SpeakerFanout\t   Speaker " << i << " (" << spk->name 
+             << "): gain=" << spk->gain << ", muted=" << (spk->muted ? "yes" : "no"));
+    }
+  }
+  
+  PTRACE(2, "SpeakerFanout\t✅ Gain settings updated");
+}
+
+/**
+ * @brief 指定されたインデックスのデバイスの音声レベルを取得
+ * @param index デバイスのインデックス
+ * @return 音声レベル（0.0～1.0）、範囲外の場合70.0
+ */
+double SpeakerFanoutChannel::GetDeviceLevel(size_t index) const
+{
+  PWaitAndSignal lock(m_speakersMutex);
+  if (!m_activeSpeakers || index >= m_activeSpeakers->size()) {
+    return 0.0;
+  }
+  return (*m_activeSpeakers)[index]->lastLevel;
+}
+
+/**
+ * @brief 現在のデバイス数を取得
+ * @return デバイス数
+ */
+size_t SpeakerFanoutChannel::GetDeviceCount() const
+{
+  PWaitAndSignal lock(m_speakersMutex);
+  return m_activeSpeakers ? m_activeSpeakers->size() : 0;
+}
+
+/**
+ * @brief 音声データを書き込み（複数スピーカーへファンアウト）
+ * @param buf 入力バッファ
+ * @param len バッファサイズ（バイト）
+ * @return 書き込み成功時 TRUE
+ */
+PBoolean SpeakerFanoutChannel::Write(const void* buf, PINDEX len)
+{
+  if (!m_isOpen) {
+    lastWriteCount = 0;
+    return FALSE;
+  }
+  
+  const int16_t* inBuf = static_cast<const int16_t*>(buf);
+  const PINDEX samples = len / sizeof(int16_t);
+  
+  // 1. マスタゲインを適用（既存の g_outputGainLinear）
+  m_tempBuffer.resize(samples);
+  double masterGain = g_outputGainLinear.load(std::memory_order_relaxed);
+  
+  for (PINDEX i = 0; i < samples; i++) {
+    int32_t val = static_cast<int32_t>(std::lround(
+      static_cast<double>(inBuf[i]) * masterGain));
+    if (val > 32767) {
+      m_tempBuffer[i] = 32767;
+    } else if (val < -32768) {
+      m_tempBuffer[i] = -32768;
+    } else {
+      m_tempBuffer[i] = static_cast<int16_t>(val);
+    }
+  }
+  
+  // 2. スペクトラム表示用（既存関数）
+  UpdateRemoteAudioSpectrum(m_tempBuffer.data(), samples, 1, m_sampleRate);
+  
+  // 3. SpeexDSP の Playback 処理（AEC参照信号）
+  // ※ 1回だけ実行（複数スピーカーでも参照信号は1本）
+#if defined(USE_SPEEXDSP)
+  if (m_speexProcessor && !m_speexProcessor->IsForceBypass()) {
+    m_speexProcessor->PushPlayback(m_tempBuffer.data(), samples);
+  }
+#endif
+  
+  // 4. 各スピーカーへ配信
+  std::shared_ptr<SpeakerSet> speakers;
+  {
+    PWaitAndSignal lock(m_speakersMutex);
+    speakers = m_activeSpeakers;
+  }
+  
+  if (!speakers || speakers->empty()) {
+    PTRACE(4, "SpeakerFanout\t⚠️ No active speakers");
+    lastWriteCount = len;
+    return TRUE;  // スピーカーなしでもエラーにしない
+  }
+  
+  for (auto& spkHandle : *speakers) {
+    if (!spkHandle->channel || spkHandle->muted) {
+      spkHandle->lastLevel = 0.0;  // ミュート時はレベル0
+      continue;  // ミュート中はスキップ
+    }
+    
+    // デバイスごとのゲインを適用
+    if (std::abs(spkHandle->gain - 1.0) > 0.001) {
+      std::vector<int16_t> deviceBuf(samples);
+      for (PINDEX i = 0; i < samples; i++) {
+        int32_t val = static_cast<int32_t>(std::lround(
+          static_cast<double>(m_tempBuffer[i]) * spkHandle->gain));
+        if (val > 32767) {
+          deviceBuf[i] = 32767;
+        } else if (val < -32768) {
+          deviceBuf[i] = -32768;
+        } else {
+          deviceBuf[i] = static_cast<int16_t>(val);
+        }
+      }
+      
+      // 音声レベルを計算 (RMS)
+      int64_t sum = 0;
+      for (PINDEX i = 0; i < samples; i++) {
+        int32_t v = deviceBuf[i];
+        sum += v * v;
+      }
+      double rms = std::sqrt((double)sum / (double)samples);
+      spkHandle->lastLevel = rms / 32768.0;  // 0.0～1.0に正規化
+      
+      if (!spkHandle->channel->Write(deviceBuf.data(), len)) {
+        PString errText = spkHandle->channel->GetErrorText();
+        PTRACE(3, "SpeakerFanout\t⚠️ Failed to write to speaker " 
+               << spkHandle->name << ": " << errText);
+      }
+    } else {
+      // ゲイン = 1.0 ならそのまま書き込み
+      if (!spkHandle->channel->Write(m_tempBuffer.data(), len)) {
+        PString errText = spkHandle->channel->GetErrorText();
+        PTRACE(3, "SpeakerFanout\t⚠️ Failed to write to speaker " 
+               << spkHandle->name << ": " << errText);
+      }
+    }
+  }
+
+  lastWriteCount = len;
+  return TRUE;
 }

@@ -24,6 +24,26 @@ endif
 # Qt6 sources must be added BEFORE include openh323u.mak
 ifdef USE_QT6
 SOURCES += qt_video_window.cpp moc_qt_video_window.cpp
+# Add -DUSE_QT6 to compiler flags BEFORE including openh323u.mak
+STDCCFLAGS += -DUSE_QT6 -std=c++17
+
+# Qt6 detection via pkg-config (must be before include)
+PKG_CONFIG := $(shell which pkg-config 2>/dev/null)
+ifneq ($(PKG_CONFIG),)
+  QT6_CFLAGS := $(shell pkg-config --cflags Qt6Widgets Qt6Core Qt6Gui 2>/dev/null)
+  QT6_LIBS := $(shell pkg-config --libs Qt6Widgets Qt6Core Qt6Gui 2>/dev/null)
+  ifneq ($(QT6_CFLAGS),)
+    STDCCFLAGS += $(QT6_CFLAGS) -fPIC
+    ENDLDLIBS += $(QT6_LIBS)
+  else
+    $(warning Qt6 pkg-config found but QT6_CFLAGS is empty - Qt6 UI may not work)
+  endif
+else
+  $(warning pkg-config not found - Qt6 UI may not work. Install pkg-config.)
+endif
+
+# moc compiler for Q_OBJECT classes
+MOC := /opt/homebrew/share/qt/libexec/moc
 endif
 
 # Control verbosity: set QUIET=0 to enable informational messages, QUIET=1 (default) to suppress them
@@ -49,6 +69,12 @@ $(error PTLib not found at $(PWLIBDIR). Please build PTLib first or set PWLIBDIR
 endif
 
 include $(OPENH323DIR)/openh323u.mak
+
+# Qt6 moc rule (must be after include openh323u.mak)
+ifdef USE_QT6
+moc_qt_video_window.cpp: qt_video_window.h
+	$(MOC) -DUSE_QT6 $< -o $@
+endif
 
 # Objective-C++ compilation rule for .mm files (macOS only)
 # This is needed because the default rules may not handle .mm files
@@ -94,47 +120,6 @@ endif
 ifeq ($(SPEEXDSP_FOUND),0)
   $(warning SpeexDSP not found - echo cancellation / noise suppression disabled)
 endif
-
-# ===== Qt6 Support =====
-# Qt6 is enabled by default for video display
-QT6_FOUND := 0
-
-ifdef USE_QT6
-
-# Qt6 requires C++17 or later
-STDCCFLAGS += -std=c++17
-
-# Qt6 detection via pkg-config
-PKG_CONFIG := $(shell which pkg-config 2>/dev/null)
-ifneq ($(PKG_CONFIG),)
-  QT6_CFLAGS := $(shell pkg-config --cflags Qt6Widgets Qt6Core Qt6Gui 2>/dev/null)
-  QT6_LIBS := $(shell pkg-config --libs Qt6Widgets Qt6Core Qt6Gui 2>/dev/null)
-  ifneq ($(QT6_CFLAGS),)
-    STDCCFLAGS += -DUSE_QT6 $(QT6_CFLAGS) -fPIC
-    ENDLDLIBS += $(QT6_LIBS)
-    QT6_FOUND := 1
-    
-    # moc compiler for Q_OBJECT classes
-    MOC := /opt/homebrew/share/qt/libexec/moc
-    
-    ifeq ($(QUIET),0)
-      $(info Found Qt6 via pkg-config)
-      $(info Qt6 CFLAGS: $(QT6_CFLAGS))
-      $(info Qt6 LIBS: $(QT6_LIBS))
-    endif
-  endif
-endif
-
-ifeq ($(QT6_FOUND),0)
-  $(warning Qt6 not found - Qt6 UI will not be available)
-  $(warning Install Qt6: brew install qt6 (macOS))
-endif
-
-# Rule to generate moc files
-moc_qt_video_window.cpp: qt_video_window.h
-	$(MOC) -DUSE_QT6 $< -o $@
-
-endif  # ifdef USE_QT6
 
 # H.264 plugin support - using unified plugin only
 H264_PLUGIN_DIR := ../h323plus/plugins/video/H.264
