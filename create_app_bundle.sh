@@ -370,17 +370,17 @@ copy_libraries() {
         # 優先順位1: /opt/homebrew/lib/
         if [ -d "${HOMEBREW_DIR}/lib/${fw}.framework" ]; then
             log_info "    ${fw}.framework をコピー (from ${HOMEBREW_DIR}/lib/)..."
-            cp -R "${HOMEBREW_DIR}/lib/${fw}.framework" "${FRAMEWORKS}/"
+            cp -RL "${HOMEBREW_DIR}/lib/${fw}.framework" "${FRAMEWORKS}/"
             fw_found=true
         # 優先順位2: /opt/homebrew/opt/qt6/lib/
         elif [ -d "${HOMEBREW_DIR}/opt/qt6/lib/${fw}.framework" ]; then
             log_info "    ${fw}.framework をコピー (from ${HOMEBREW_DIR}/opt/qt6/lib/)..."
-            cp -R "${HOMEBREW_DIR}/opt/qt6/lib/${fw}.framework" "${FRAMEWORKS}/"
+            cp -RL "${HOMEBREW_DIR}/opt/qt6/lib/${fw}.framework" "${FRAMEWORKS}/"
             fw_found=true
         # 優先順位3: /opt/homebrew/opt/qtbase/lib/ (古い配置)
         elif [ -d "${HOMEBREW_DIR}/opt/qtbase/lib/${fw}.framework" ]; then
             log_info "    ${fw}.framework をコピー (from ${HOMEBREW_DIR}/opt/qtbase/lib/)..."
-            cp -R "${HOMEBREW_DIR}/opt/qtbase/lib/${fw}.framework" "${FRAMEWORKS}/"
+            cp -RL "${HOMEBREW_DIR}/opt/qtbase/lib/${fw}.framework" "${FRAMEWORKS}/"
             fw_found=true
         fi
         
