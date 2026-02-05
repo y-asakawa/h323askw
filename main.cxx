@@ -17788,17 +17788,23 @@ void MicMixerChannel::UpdateGainSettings(const CoreAudioDeviceConfig& cfg)
   
   PTRACE(2, "MicMixer\t🎚️ Updating gain settings for " << m_activeDevices->size() << " device(s)");
   
-  // デバイス名でマッチングしてゲインとミュートを更新
-  for (size_t i = 0; i < m_activeDevices->size() && i < cfg.inputs.size(); ++i) {
+  // デバイス名でマッチングしてゲインとミュートを更新（順序に依存しない）
+  for (size_t i = 0; i < m_activeDevices->size(); ++i) {
     auto& dev = (*m_activeDevices)[i];
-    const auto& newConfig = cfg.inputs[i];
-    
-    // デバイス名が一致する場合のみ更新
-    if (dev->name == newConfig.name) {
-      dev->gain = newConfig.gain;
-      dev->muted = newConfig.muted;
-      PTRACE(3, "MicMixer\t   Device " << i << " (" << dev->name 
-             << "): gain=" << dev->gain << ", muted=" << (dev->muted ? "yes" : "no"));
+    bool updated = false;
+    for (const auto& newConfig : cfg.inputs) {
+      if (dev->name == newConfig.name) {
+        dev->gain = newConfig.gain;
+        dev->muted = newConfig.muted;
+        updated = true;
+        PTRACE(3, "MicMixer\t   Device " << i << " (" << dev->name
+               << "): gain=" << dev->gain << ", muted=" << (dev->muted ? "yes" : "no"));
+        break;
+      }
+    }
+    if (!updated) {
+      PTRACE(4, "MicMixer\t   Device " << i << " (" << dev->name
+             << ") not found in config - keeping existing gain");
     }
   }
   
@@ -17934,13 +17940,22 @@ PBoolean MicMixerChannel::Read(void* buf, PINDEX len)
   // 2. 各マイクからフレームを読み出し
   std::vector<int16_t*> inputBuffers;
   std::vector<double> inputGains;
+  std::vector<int16_t> baseFrameSamples;
+  bool hasBaseFrame = false;
   
-  for (auto& devHandle : *devices) {
+  for (size_t devIndex = 0; devIndex < devices->size(); ++devIndex) {
+    auto& devHandle = (*devices)[devIndex];
+    const bool isBaseDevice = (devIndex == 0);
+    
     if (!devHandle->channel || devHandle->muted) {
       {
         PWaitAndSignal lock(m_devicesMutex);
         devHandle->lastLevel = 0.0;  // ミュート時はレベル0
         UpdateSpectrumHistory(devHandle->lastSamples, nullptr, 0);
+      }
+      if (isBaseDevice) {
+        baseFrameSamples.assign(samples, 0);
+        hasBaseFrame = true;
       }
       continue;  // ミュート中はスキップ
     }
@@ -17970,12 +17985,20 @@ PBoolean MicMixerChannel::Read(void* buf, PINDEX len)
         UpdateSpectrumHistory(devHandle->lastSamples, scaled.data(), scaled.size());
         devHandle->lastLevel = rms / 32768.0;  // 0.0～1.0に正規化
       }
+      if (isBaseDevice) {
+        baseFrameSamples = scaled;
+        hasBaseFrame = true;
+      }
       PTRACE(4, "MicMixer\t📊 Device read successful: rms=" << rms << " lastLevel=" << devHandle->lastLevel);
     } else {
       {
         PWaitAndSignal lock(m_devicesMutex);
         devHandle->lastLevel = 0.0;  // 読み出し失敗時はレベル0
         UpdateSpectrumHistory(devHandle->lastSamples, nullptr, 0);
+      }
+      if (isBaseDevice) {
+        baseFrameSamples.assign(samples, 0);
+        hasBaseFrame = true;
       }
       PTRACE(4, "MicMixer\t⚠️ Device read failed - setting level to 0");
     }
@@ -17999,6 +18022,9 @@ PBoolean MicMixerChannel::Read(void* buf, PINDEX len)
         UpdateSpectrumHistory(devHandle->lastSamples, nullptr, 0);
       }
     }
+    if (hasBaseFrame) {
+      std::fill(baseFrameSamples.begin(), baseFrameSamples.end(), 0);
+    }
   }
   
   // 5. SpeexDSP 処理（AEC/NS/AGC）
@@ -18008,8 +18034,16 @@ PBoolean MicMixerChannel::Read(void* buf, PINDEX len)
   }
 #endif
   
-  // 6. スペクトラム表示用に送信（既存関数）
-  UpdateLocalAudioSpectrum(outBuf, samples, 1, m_sampleRate);
+  // 6. スペクトラム表示用に送信
+  // 旧式（トップ）のビジュアライザーはベースデバイスのみを表示する
+  if (devices && devices->size() <= 1) {
+    // 単一デバイス時は従来通りミックス後（Speex後）を表示
+    UpdateLocalAudioSpectrum(outBuf, samples, 1, m_sampleRate);
+  } else if (hasBaseFrame && !baseFrameSamples.empty()) {
+    UpdateLocalAudioSpectrum(baseFrameSamples.data(), baseFrameSamples.size(), 1, m_sampleRate);
+  } else {
+    UpdateLocalAudioSpectrum(outBuf, samples, 1, m_sampleRate);
+  }
 
   lastReadCount = len;
   return TRUE;
@@ -18180,17 +18214,23 @@ void SpeakerFanoutChannel::UpdateGainSettings(const CoreAudioDeviceConfig& cfg)
   
   PTRACE(2, "SpeakerFanout\t🎚️ Updating gain settings for " << m_activeSpeakers->size() << " speaker(s)");
   
-  // デバイス名でマッチングしてゲインとミュートを更新
-  for (size_t i = 0; i < m_activeSpeakers->size() && i < cfg.outputs.size(); ++i) {
+  // デバイス名でマッチングしてゲインとミュートを更新（順序に依存しない）
+  for (size_t i = 0; i < m_activeSpeakers->size(); ++i) {
     auto& spk = (*m_activeSpeakers)[i];
-    const auto& newConfig = cfg.outputs[i];
-    
-    // デバイス名が一致する場合のみ更新
-    if (spk->name == newConfig.name) {
-      spk->gain = newConfig.gain;
-      spk->muted = newConfig.muted;
-      PTRACE(3, "SpeakerFanout\t   Speaker " << i << " (" << spk->name 
-             << "): gain=" << spk->gain << ", muted=" << (spk->muted ? "yes" : "no"));
+    bool updated = false;
+    for (const auto& newConfig : cfg.outputs) {
+      if (spk->name == newConfig.name) {
+        spk->gain = newConfig.gain;
+        spk->muted = newConfig.muted;
+        updated = true;
+        PTRACE(3, "SpeakerFanout\t   Speaker " << i << " (" << spk->name
+               << "): gain=" << spk->gain << ", muted=" << (spk->muted ? "yes" : "no"));
+        break;
+      }
+    }
+    if (!updated) {
+      PTRACE(4, "SpeakerFanout\t   Speaker " << i << " (" << spk->name
+             << ") not found in config - keeping existing gain");
     }
   }
   
