@@ -768,10 +768,11 @@ fix_library_paths() {
     install_name_tool -id "@executable_path/../Resources/plugins/video/H.264/h264_video_pwplugin.dylib" \
         "${H264_PLUGIN}" 2>/dev/null || log_warn "  H.264プラグインID設定をスキップ"
     
-    [ -n "$AVCODEC_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libavcodec.*\\.dylib" "@executable_path/../Frameworks/${AVCODEC_NAME}"
-    [ -n "$AVUTIL_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libavutil.*\\.dylib" "@executable_path/../Frameworks/${AVUTIL_NAME}"
-    [ -n "$SWRESAMPLE_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libswresample.*\\.dylib" "@executable_path/../Frameworks/${SWRESAMPLE_NAME}"
-    [ -n "$SWSCALE_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libswscale.*\\.dylib" "@executable_path/../Frameworks/${SWSCALE_NAME}"
+    # @loader_path を使って Frameworks へ解決（rpath追加不要でヘッダ不足に強い）
+    [ -n "$AVCODEC_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libavcodec.*\\.dylib" "@loader_path/../../../../Frameworks/${AVCODEC_NAME}"
+    [ -n "$AVUTIL_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libavutil.*\\.dylib" "@loader_path/../../../../Frameworks/${AVUTIL_NAME}"
+    [ -n "$SWRESAMPLE_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libswresample.*\\.dylib" "@loader_path/../../../../Frameworks/${SWRESAMPLE_NAME}"
+    [ -n "$SWSCALE_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libswscale.*\\.dylib" "@loader_path/../../../../Frameworks/${SWSCALE_NAME}"
     [ -n "$X264_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libx264.*\.dylib" "@executable_path/${X264_NAME}"
 
     # libvorbisenc.2.dylibのlibogg依存をlibogg.0.dylibに強制書き換え
@@ -789,8 +790,8 @@ fix_library_paths() {
         install_name_tool -id "@executable_path/../Resources/plugins/video/H.263-ffmpeg/h263-ffmpeg_video_pwplugin.dylib" \
             "${H263_PLUGIN}" 2>/dev/null || log_warn "  H.263プラグインID設定をスキップ"
         
-        [ -n "$AVCODEC_NAME" ] && change_dep_if_present "${H263_PLUGIN}" "libavcodec.*\\.dylib" "@executable_path/../Frameworks/${AVCODEC_NAME}"
-        [ -n "$AVUTIL_NAME" ] && change_dep_if_present "${H263_PLUGIN}" "libavutil.*\\.dylib" "@executable_path/../Frameworks/${AVUTIL_NAME}"
+        [ -n "$AVCODEC_NAME" ] && change_dep_if_present "${H263_PLUGIN}" "libavcodec.*\\.dylib" "@loader_path/../../../../Frameworks/${AVCODEC_NAME}"
+        [ -n "$AVUTIL_NAME" ] && change_dep_if_present "${H263_PLUGIN}" "libavutil.*\\.dylib" "@loader_path/../../../../Frameworks/${AVUTIL_NAME}"
     fi
     
     # --- H.261-vic プラグインの依存関係を修正 ---
