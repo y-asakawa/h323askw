@@ -17,6 +17,7 @@
 #include <QPointer>
 #include <QList>
 #include <QResizeEvent>
+#include <QSet>
 #include <QTimer>       // Phase 1: Audio Visualizer Timer
 #include <QMessageBox>  // Phase 1: Multi-Device Audio UI
 #include <QGroupBox>    // Phase 1: Multi-Device Audio UI
@@ -32,6 +33,7 @@
 #include <cmath>
 #include <cstdlib>  // for _exit()
 #include <algorithm>
+#include <vector>
 #include "main.h"
 
 namespace {
@@ -50,6 +52,20 @@ double LinearToDb(double linear)
         return -120.0;
     }
     return 20.0 * std::log10(linear);
+}
+
+int FindNearestGainIndex(double linearGain)
+{
+    int bestIndex = 0;
+    double bestDiff = std::abs(kLinTable[0] - linearGain);
+    for (int i = 1; i < kGainSteps; i++) {
+        double diff = std::abs(kLinTable[i] - linearGain);
+        if (diff < bestDiff) {
+            bestDiff = diff;
+            bestIndex = i;
+        }
+    }
+    return bestIndex;
 }
 }
 
@@ -881,7 +897,7 @@ AudioDeviceRowWidget::AudioDeviceRowWidget(int deviceType,
     , m_gainLabel(nullptr)
     , m_muteCheckbox(nullptr)
     , m_removeButton(nullptr)
-    , m_levelMeter(nullptr)
+    , m_spectrum(nullptr)
 {
     setupUI(availableDevices);
 }
@@ -898,25 +914,18 @@ void AudioDeviceRowWidget::setupUI(const QStringList& availableDevices)
     mainLayout->setContentsMargins(4, 4, 4, 4);
     mainLayout->setSpacing(4);
 
-    // 音声レベルビジュアライザー（上段）
-    m_levelMeter = new QProgressBar(this);
-    m_levelMeter->setRange(0, 100);
-    m_levelMeter->setValue(0);
-    m_levelMeter->setTextVisible(false);
-    m_levelMeter->setMaximumHeight(8);
-    m_levelMeter->setStyleSheet(
-        "QProgressBar {"
-        "    border: 1px solid #555;"
-        "    border-radius: 3px;"
-        "    background-color: #2b2b2b;"
-        "}"
-        "QProgressBar::chunk {"
-        "    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
-        "        stop:0 #4CAF50, stop:0.7 #8BC34A, stop:0.9 #FFC107, stop:1.0 #FF5722);"
-        "    border-radius: 2px;"
-        "}"
-    );
-    mainLayout->addWidget(m_levelMeter);
+    // 旧式ビジュアライザー（上段）
+    m_spectrum = new QtAudioSpectrumWidget(this);
+    // 旧式と同じ高さ（トップのスペクトラムと同サイズ）
+    m_spectrum->setMinimumHeight(60);
+    m_spectrum->setMaximumHeight(80);
+    m_spectrum->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    if (m_deviceType == QT_DEVICE_TYPE_MIC) {
+        m_spectrum->setBarColor(QColor(0, 180, 255));  // 旧式と同系色
+    } else {
+        m_spectrum->setBarColor(QColor(0, 200, 100));  // スピーカー系
+    }
+    mainLayout->addWidget(m_spectrum);
 
     // コントロール行（下段）
     QHBoxLayout* layout = new QHBoxLayout();
@@ -929,24 +938,35 @@ void AudioDeviceRowWidget::setupUI(const QStringList& availableDevices)
     m_deviceCombo->setMinimumWidth(200);
     layout->addWidget(m_deviceCombo);
 
-    // ゲインスライダー (-12dB ~ +18dB, デフォルト 0dB)
+    // 旧式ゲインUI (MIN - slider - MAX - dB label)
     QLabel* gainLabel = new QLabel(m_deviceType == QT_DEVICE_TYPE_MIC ? "Gain:" : "Volume:", this);
     layout->addWidget(gainLabel);
 
+    QLabel* minL = new QLabel("MIN", this);
+    minL->setStyleSheet("color: #888; font-size: 10px;");
+    QLabel* maxL = new QLabel("MAX", this);
+    maxL->setStyleSheet("color: #888; font-size: 10px;");
+
     m_gainSlider = new QSlider(Qt::Horizontal, this);
-    m_gainSlider->setRange(-120, 180);  // -12.0dB ~ +18.0dB (x10)
-    m_gainSlider->setValue(0);          // デフォルト 0dB
+    m_gainSlider->setRange(0, kGainSteps - 1);   // 0=-12dB, 9=+18dB
+    m_gainSlider->setTickInterval(1);
+    m_gainSlider->setTickPosition(QSlider::TicksBelow);
+    m_gainSlider->setPageStep(1);
+    m_gainSlider->setValue(3); // 0 dB 初期値
     m_gainSlider->setMinimumWidth(150);
     m_gainSlider->setMaximumWidth(200);
-    layout->addWidget(m_gainSlider);
 
-    m_gainLabel = new QLabel(formatGainLabel(0.0), this);
+    m_gainLabel = new QLabel("0 dB", this);
     m_gainLabel->setMinimumWidth(60);
+
+    layout->addWidget(minL);
+    layout->addWidget(m_gainSlider);
+    layout->addWidget(maxL);
     layout->addWidget(m_gainLabel);
 
-    // ミュートチェックボックス
+    // ミュートチェックボックス（全体ミュートのみのため非表示）
     m_muteCheckbox = new QCheckBox("Mute", this);
-    layout->addWidget(m_muteCheckbox);
+    m_muteCheckbox->setVisible(false);
 
     // 削除ボタン
     m_removeButton = new QPushButton("×", this);
@@ -962,8 +982,6 @@ void AudioDeviceRowWidget::setupUI(const QStringList& availableDevices)
             this, &AudioDeviceRowWidget::onDeviceComboChanged);
     connect(m_gainSlider, &QSlider::valueChanged,
             this, &AudioDeviceRowWidget::onGainSliderChanged);
-    connect(m_muteCheckbox, &QCheckBox::toggled,
-            this, &AudioDeviceRowWidget::onMuteToggled);
     connect(m_removeButton, &QPushButton::clicked,
             this, &AudioDeviceRowWidget::onRemoveClicked);
 }
@@ -981,9 +999,9 @@ AudioDeviceEntry AudioDeviceRowWidget::getDeviceEntry() const
 {
     AudioDeviceEntry entry;
     entry.name = m_deviceCombo->currentText();
-    const double gainDb = (double)m_gainSlider->value() / 10.0;  // x10したので戻す
-    entry.gain = DbToLinear(gainDb);
-    entry.muted = m_muteCheckbox->isChecked();
+    const int idx = m_gainSlider->value();
+    entry.gain = kLinTable[idx];
+    entry.muted = false;
     return entry;
 }
 
@@ -995,13 +1013,9 @@ void AudioDeviceRowWidget::setDeviceEntry(const AudioDeviceEntry& entry)
         m_deviceCombo->setCurrentIndex(index);
     }
 
-    // ゲイン設定 (-12.0dB ~ +18.0dB)
-    const double gainDb = LinearToDb(entry.gain);
-    int gainValue = qBound(-120, (int)std::lround(gainDb * 10.0), 180);
-    m_gainSlider->setValue(gainValue);
-
-    // ミュート設定
-    m_muteCheckbox->setChecked(entry.muted);
+    // ゲイン設定 (-12dB ~ +18dB)
+    const int gainIndex = FindNearestGainIndex(entry.gain);
+    m_gainSlider->setValue(gainIndex);
 }
 
 void AudioDeviceRowWidget::updateDeviceList(const QStringList& devices)
@@ -1022,6 +1036,13 @@ void AudioDeviceRowWidget::setRemoveButtonVisible(bool show)
     m_removeButton->setVisible(show);
 }
 
+void AudioDeviceRowWidget::setMuteButtonVisible(bool show)
+{
+    if (m_muteCheckbox) {
+        m_muteCheckbox->setVisible(show);
+    }
+}
+
 void AudioDeviceRowWidget::onDeviceComboChanged(int index)
 {
     PTRACE(0, "QtVideo\t🟣 AudioDeviceRowWidget::onDeviceComboChanged() index=" << index);
@@ -1034,8 +1055,10 @@ void AudioDeviceRowWidget::onDeviceComboChanged(int index)
 
 void AudioDeviceRowWidget::onGainSliderChanged(int value)
 {
-    double gainDb = (double)value / 10.0;
-    m_gainLabel->setText(formatGainLabel(gainDb));
+    int idx = qBound(0, value, kGainSteps - 1);
+    const int db = kDbTable[idx];
+    const QString label = QString("%1%2 dB").arg(db > 0 ? "+" : "").arg(db);
+    m_gainLabel->setText(label);
     emit gainChanged();  // ゲイン専用シグナル
 }
 
@@ -1050,16 +1073,26 @@ void AudioDeviceRowWidget::onRemoveClicked()
     emit removeRequested(this);
 }
 
-void AudioDeviceRowWidget::updateLevelMeter(double level)
+void AudioDeviceRowWidget::updateSpectrum(const int16_t* pcmData, size_t sampleCount, int channels, int sampleRate)
 {
-    // NULLチェック（安全性のため）
-    if (!m_levelMeter) {
+    if (!m_spectrum) {
         return;
     }
-    
-    // level: 0.0～1.0 の範囲を 0～100 にマップ
-    int percentage = qBound(0, (int)(level * 100.0), 100);
-    m_levelMeter->setValue(percentage);
+    if (!pcmData || sampleCount == 0) {
+        resetSpectrum(sampleCount, sampleRate);
+        return;
+    }
+    m_spectrum->updateSpectrum(pcmData, sampleCount, channels, sampleRate);
+}
+
+void AudioDeviceRowWidget::resetSpectrum(size_t sampleCount, int sampleRate)
+{
+    if (!m_spectrum) {
+        return;
+    }
+    const size_t fallbackSamples = (sampleCount > 0) ? sampleCount : 160;
+    std::vector<int16_t> silence(fallbackSamples, 0);
+    m_spectrum->updateSpectrum(silence.data(), silence.size(), 1, sampleRate);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1080,6 +1113,7 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_cameraCheckbox(nullptr)
     , m_contentButton(nullptr)
     , m_contentSendButton(nullptr)
+    , m_gainRowWidget(nullptr)
     , m_micCombo(nullptr)
     , m_speakerCombo(nullptr)
     , m_cameraCombo(nullptr)
@@ -1087,6 +1121,8 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_gainValueLabel(nullptr)
     , m_spkGainSlider(nullptr)
     , m_spkGainValueLabel(nullptr)
+    , m_baseMicGainIndex(3)
+    , m_baseSpeakerGainIndex(3)
     , m_statusLabel(nullptr)
     , m_localSpectrum(nullptr)
     , m_remoteSpectrum(nullptr)
@@ -1097,6 +1133,7 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_addMicButton(nullptr)            // Phase 1
     , m_addSpeakerButton(nullptr)        // Phase 1
     , m_audioVisualizerTimer(nullptr)    // Phase 1
+    , m_multiDeviceScrollArea(nullptr)   // Phase 1
 {
     PTRACE(0, "QtVideo\t🟨 QtVideoMainWindow constructor ENTER");
     
@@ -1190,7 +1227,8 @@ void QtVideoMainWindow::setupUI()
     mainLayout->addLayout(spectrumLayout);
 
     // 入出力ゲインスライダー（Mic / Speaker を横並び）
-    QHBoxLayout* gainRow = new QHBoxLayout();
+    m_gainRowWidget = new QWidget(this);
+    QHBoxLayout* gainRow = new QHBoxLayout(m_gainRowWidget);
 
     auto buildGainBox = [this](const QString& title,
                                QSlider** sliderOut,
@@ -1240,7 +1278,7 @@ void QtVideoMainWindow::setupUI()
     
     gainRow->addLayout(buildGainBox("Speaker Gain", &m_spkGainSlider, &m_spkGainValueLabel));
 
-    mainLayout->addLayout(gainRow);
+    mainLayout->addWidget(m_gainRowWidget);
 
     // コントロールパネル
     QHBoxLayout* controlLayout = new QHBoxLayout();
@@ -1365,18 +1403,20 @@ void QtVideoMainWindow::setupConnections()
     auto applyGainIndex = [this](int idx) {
         if (idx < 0) idx = 0;
         if (idx >= kGainSteps) idx = kGainSteps - 1;
-        g_inputGainLinear.store(kLinTable[idx], std::memory_order_relaxed);
+        m_baseMicGainIndex = idx;
         const int db = kDbTable[idx];
         const QString label = QString("%1%2 dB").arg(db > 0 ? "+" : "").arg(db);
         m_gainValueLabel->setText(label);
+        onGainChanged();
     };
     auto applySpeakerGainIndex = [this](int idx) {
         if (idx < 0) idx = 0;
         if (idx >= kGainSteps) idx = kGainSteps - 1;
-        g_outputGainLinear.store(kLinTable[idx], std::memory_order_relaxed);
+        m_baseSpeakerGainIndex = idx;
         const int db = kDbTable[idx];
         const QString label = QString("%1%2 dB").arg(db > 0 ? "+" : "").arg(db);
         m_spkGainValueLabel->setText(label);
+        onGainChanged();
     };
 
     connect(m_gainSlider, &QSlider::valueChanged, this, applyGainIndex);
@@ -1427,6 +1467,9 @@ void QtVideoMainWindow::populateDeviceLists()
         m_micCombo->currentText(),
         m_speakerCombo->currentText(),
         m_cameraCombo->currentText());
+
+    // マルチデバイス設定も同期（旧式ベースデバイス含む）
+    onDeviceRowChanged();
 }
 
 void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
@@ -1691,10 +1734,14 @@ void QtVideoMainWindow::onDisconnectClicked()
         
         // ビジュアライザーをリセット
         for (auto* row : m_micRows) {
-            row->updateLevelMeter(0.0);
+            if (row) {
+                row->resetSpectrum(160, 16000);
+            }
         }
         for (auto* row : m_speakerRows) {
-            row->updateLevelMeter(0.0);
+            if (row) {
+                row->resetSpectrum(160, 16000);
+            }
         }
     }
 }
@@ -1729,6 +1776,7 @@ void QtVideoMainWindow::onMicDeviceChanged(int index)
     QString device = m_micCombo->currentText();
     QT_TRACE(1, "Mic device changed: " << device.toStdString());
     QtVideoManager::instance().applyDeviceSelection(device, m_speakerCombo->currentText(), m_cameraCombo->currentText());
+    onDeviceRowChanged();  // マルチデバイス設定も更新
 }
 
 void QtVideoMainWindow::onSpeakerDeviceChanged(int index)
@@ -1737,6 +1785,7 @@ void QtVideoMainWindow::onSpeakerDeviceChanged(int index)
     QString device = m_speakerCombo->currentText();
     QT_TRACE(1, "Speaker device changed: " << device.toStdString());
     QtVideoManager::instance().applyDeviceSelection(m_micCombo->currentText(), device, m_cameraCombo->currentText());
+    onDeviceRowChanged();  // マルチデバイス設定も更新
 }
 
 void QtVideoMainWindow::onCameraDeviceChanged(int index)
@@ -3266,10 +3315,12 @@ void QtVideoMainWindow::setupMultiDeviceAudioUI(QVBoxLayout* mainLayout)
     QScrollArea* scrollArea = new QScrollArea(this);
     scrollArea->setWidget(multiDeviceBox);
     scrollArea->setWidgetResizable(true);  // コンテンツに合わせてリサイズ
-    scrollArea->setMinimumHeight(250);     // 最小高さ（初期表示を広く）
+    scrollArea->setMinimumHeight(70);      // 初期はコンパクト
     scrollArea->setMaximumHeight(500);     // 最大高さ（これ以上は自動スクロール）
     scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scrollArea->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+    m_multiDeviceScrollArea = scrollArea;
     
     mainLayout->addWidget(scrollArea);
     
@@ -3309,6 +3360,12 @@ void QtVideoMainWindow::onAddMicClicked()
     m_micRows.append(row);
 
     PTRACE(0, "QtVideo\t✅✅✅ Mic row added - total now: " << m_micRows.size());
+    // 追加行の初期ゲインは旧式の現在値に合わせる
+    AudioDeviceEntry entry = row->getDeviceEntry();
+    entry.gain = kLinTable[m_baseMicGainIndex];
+    row->setDeviceEntry(entry);
+    updateDeviceRowControls(m_micRows);
+    updateMultiDevicePanelHeight();
     onDeviceRowChanged();  // 追加直後に設定を反映
 }
 
@@ -3338,6 +3395,12 @@ void QtVideoMainWindow::onAddSpeakerClicked()
     m_speakerRows.append(row);
 
     QT_TRACE(2, "Speaker row added (total=" << m_speakerRows.size() << ")");
+    // 追加行の初期ゲインは旧式の現在値に合わせる
+    AudioDeviceEntry entry = row->getDeviceEntry();
+    entry.gain = kLinTable[m_baseSpeakerGainIndex];
+    row->setDeviceEntry(entry);
+    updateDeviceRowControls(m_speakerRows);
+    updateMultiDevicePanelHeight();
     onDeviceRowChanged();  // 追加直後に設定を反映
 }
 void QtVideoMainWindow::onDeviceRowRemoveRequested(AudioDeviceRowWidget* widget)
@@ -3348,9 +3411,13 @@ void QtVideoMainWindow::onDeviceRowRemoveRequested(AudioDeviceRowWidget* widget)
 
     if (micIndex >= 0) {
         removeDeviceRow(widget, m_micRows);
+        updateDeviceRowControls(m_micRows);
+        updateMultiDevicePanelHeight();
         QT_TRACE(2, "Mic row removed (remaining=" << m_micRows.size() << ")");
     } else if (speakerIndex >= 0) {
         removeDeviceRow(widget, m_speakerRows);
+        updateDeviceRowControls(m_speakerRows);
+        updateMultiDevicePanelHeight();
         QT_TRACE(2, "Speaker row removed (remaining=" << m_speakerRows.size() << ")");
     }
     
@@ -3414,12 +3481,12 @@ void QtVideoMainWindow::updateAudioVisualizers()
         // 接続なし or 未確立 → ビジュアライザーをリセット
         for (int i = 0; i < m_micRows.size(); i++) {
             if (m_micRows[i]) {
-                m_micRows[i]->updateLevelMeter(0.0);
+                m_micRows[i]->resetSpectrum(160, 16000);
             }
         }
         for (int i = 0; i < m_speakerRows.size(); i++) {
             if (m_speakerRows[i]) {
-                m_speakerRows[i]->updateLevelMeter(0.0);
+                m_speakerRows[i]->resetSpectrum(160, 16000);
             }
         }
         return;
@@ -3433,19 +3500,30 @@ void QtVideoMainWindow::updateAudioVisualizers()
     if (micMixer) {
         size_t micCount = micMixer->GetDeviceCount();
         QT_TRACE(4, "updateAudioVisualizers: micCount=" << micCount);
+        const unsigned micRate = micMixer->GetSampleRate();
+        const size_t fallbackSamples = micMixer->GetFrameSamples();
+        const bool muted = conn->IsLocalMicMuted();
+        const size_t micOffset = (m_micCombo && !m_micCombo->currentText().isEmpty()) ? 1 : 0;
         
         // UI行数を実際のデバイス数でクリップ
-        size_t maxMicIndex = (micCount < (size_t)m_micRows.size()) ? micCount : (size_t)m_micRows.size();
+        size_t available = (micCount > micOffset) ? (micCount - micOffset) : 0;
+        size_t maxMicIndex = (available < (size_t)m_micRows.size()) ? available : (size_t)m_micRows.size();
         QT_TRACE(4, "updateAudioVisualizers: maxMicIndex=" << maxMicIndex);
         
         for (size_t i = 0; i < maxMicIndex; i++) {
             QT_TRACE(4, "updateAudioVisualizers: Processing mic " << i << " m_micRows[i]=" << (void*)m_micRows[i]);
-            if (m_micRows[i] && i < micCount) {  // 二重チェック
-                QT_TRACE(4, "updateAudioVisualizers: Getting mic level for device " << i);
-                double level = micMixer->GetDeviceLevel(i);
-                QT_TRACE(4, "updateAudioVisualizers: Got level=" << level << ", updating meter");
-                m_micRows[i]->updateLevelMeter(level);
-                QT_TRACE(4, "updateAudioVisualizers: Updated meter for device " << i);
+            size_t devIndex = i + micOffset;
+            if (m_micRows[i] && devIndex < micCount) {  // 二重チェック
+                if (muted) {
+                    m_micRows[i]->resetSpectrum(fallbackSamples, micRate);
+                    continue;
+                }
+                std::vector<int16_t> samples;
+                if (micMixer->GetDeviceSamples(devIndex, samples) && !samples.empty()) {
+                    m_micRows[i]->updateSpectrum(samples.data(), samples.size(), 1, micRate);
+                } else {
+                    m_micRows[i]->resetSpectrum(fallbackSamples, micRate);
+                }
             }
         }
         QT_TRACE(4, "updateAudioVisualizers: Resetting excess mic rows from " << maxMicIndex);
@@ -3453,7 +3531,7 @@ void QtVideoMainWindow::updateAudioVisualizers()
         for (size_t i = maxMicIndex; i < (size_t)m_micRows.size(); i++) {
             QT_TRACE(4, "updateAudioVisualizers: Resetting mic row " << i << " m_micRows[i]=" << (void*)m_micRows[i]);
             if (m_micRows[i]) {
-                m_micRows[i]->updateLevelMeter(0.0);
+                m_micRows[i]->resetSpectrum(fallbackSamples, micRate);
                 QT_TRACE(4, "updateAudioVisualizers: Reset mic row " << i);
             }
         }
@@ -3463,7 +3541,7 @@ void QtVideoMainWindow::updateAudioVisualizers()
         QT_TRACE(4, "updateAudioVisualizers: No micMixer, resetting all mic rows");
         for (int i = 0; i < m_micRows.size(); i++) {
             if (m_micRows[i]) {
-                m_micRows[i]->updateLevelMeter(0.0);
+                m_micRows[i]->resetSpectrum(160, 16000);
             }
         }
     }
@@ -3476,27 +3554,34 @@ void QtVideoMainWindow::updateAudioVisualizers()
     if (speakerFanout) {
         size_t speakerCount = speakerFanout->GetDeviceCount();
         QT_TRACE(4, "updateAudioVisualizers: speakerCount=" << speakerCount);
+        const unsigned spkRate = speakerFanout->GetSampleRate();
+        const size_t spkOffset = (m_speakerCombo && !m_speakerCombo->currentText().isEmpty()) ? 1 : 0;
         
         // UI行数を実際のデバイス数でクリップ
-        size_t maxSpeakerIndex = (speakerCount < (size_t)m_speakerRows.size()) ? speakerCount : (size_t)m_speakerRows.size();
+        size_t available = (speakerCount > spkOffset) ? (speakerCount - spkOffset) : 0;
+        size_t maxSpeakerIndex = (available < (size_t)m_speakerRows.size()) ? available : (size_t)m_speakerRows.size();
         for (size_t i = 0; i < maxSpeakerIndex; i++) {
-            if (m_speakerRows[i] && i < speakerCount) {  // 二重チェック
-                QT_TRACE(4, "updateAudioVisualizers: Getting speaker level for device " << i);
-                double level = speakerFanout->GetDeviceLevel(i);
-                m_speakerRows[i]->updateLevelMeter(level);
+            size_t devIndex = i + spkOffset;
+            if (m_speakerRows[i] && devIndex < speakerCount) {  // 二重チェック
+                std::vector<int16_t> samples;
+                if (speakerFanout->GetDeviceSamples(devIndex, samples) && !samples.empty()) {
+                    m_speakerRows[i]->updateSpectrum(samples.data(), samples.size(), 1, spkRate);
+                } else {
+                    m_speakerRows[i]->resetSpectrum(spkRate / 100, spkRate);
+                }
             }
         }
         // 実際のデバイス数より多い行はリセット
         for (size_t i = maxSpeakerIndex; i < (size_t)m_speakerRows.size(); i++) {
             if (m_speakerRows[i]) {
-                m_speakerRows[i]->updateLevelMeter(0.0);
+                m_speakerRows[i]->resetSpectrum(spkRate / 100, spkRate);
             }
         }
     } else {
         // SpeakerFanoutがない場合は全てリセット
         for (int i = 0; i < m_speakerRows.size(); i++) {
             if (m_speakerRows[i]) {
-                m_speakerRows[i]->updateLevelMeter(0.0);
+                m_speakerRows[i]->resetSpectrum(160, 16000);
             }
         }
     }
@@ -3523,12 +3608,12 @@ void QtVideoMainWindow::stopAudioVisualizerTimer()
     // ビジュアライザーをリセット
     for (auto* row : m_micRows) {
         if (row) {
-            row->updateLevelMeter(0.0);
+            row->resetSpectrum(160, 16000);
         }
     }
     for (auto* row : m_speakerRows) {
         if (row) {
-            row->updateLevelMeter(0.0);
+            row->resetSpectrum(160, 16000);
         }
     }
 }
@@ -3537,12 +3622,39 @@ AudioDeviceSelection QtVideoMainWindow::getAudioDeviceSelection() const
 {
     AudioDeviceSelection selection;
 
+    QSet<QString> seenInputs;
+    QSet<QString> seenOutputs;
+
+    if (m_micCombo) {
+        const QString name = m_micCombo->currentText();
+        if (!name.isEmpty()) {
+            selection.inputDevices.append(AudioDeviceEntry(name, kLinTable[m_baseMicGainIndex], false));
+            seenInputs.insert(name);
+        }
+    }
+
+    if (m_speakerCombo) {
+        const QString name = m_speakerCombo->currentText();
+        if (!name.isEmpty()) {
+            selection.outputDevices.append(AudioDeviceEntry(name, kLinTable[m_baseSpeakerGainIndex], false));
+            seenOutputs.insert(name);
+        }
+    }
+
     for (const AudioDeviceRowWidget* row : m_micRows) {
-        selection.inputDevices.append(row->getDeviceEntry());
+        AudioDeviceEntry entry = row->getDeviceEntry();
+        if (!entry.name.isEmpty() && !seenInputs.contains(entry.name)) {
+            selection.inputDevices.append(entry);
+            seenInputs.insert(entry.name);
+        }
     }
 
     for (const AudioDeviceRowWidget* row : m_speakerRows) {
-        selection.outputDevices.append(row->getDeviceEntry());
+        AudioDeviceEntry entry = row->getDeviceEntry();
+        if (!entry.name.isEmpty() && !seenOutputs.contains(entry.name)) {
+            selection.outputDevices.append(entry);
+            seenOutputs.insert(entry.name);
+        }
     }
 
     return selection;
@@ -3565,6 +3677,9 @@ void QtVideoMainWindow::setAudioDeviceSelection(const AudioDeviceSelection& sele
 
     // 新しい設定で行を追加
     for (const AudioDeviceEntry& entry : selection.inputDevices) {
+        if (m_micCombo && entry.name == m_micCombo->currentText()) {
+            continue;  // 旧式の基本デバイスは行にしない
+        }
         onAddMicClicked();
         if (!m_micRows.isEmpty()) {
             m_micRows.last()->setDeviceEntry(entry);
@@ -3572,11 +3687,18 @@ void QtVideoMainWindow::setAudioDeviceSelection(const AudioDeviceSelection& sele
     }
 
     for (const AudioDeviceEntry& entry : selection.outputDevices) {
+        if (m_speakerCombo && entry.name == m_speakerCombo->currentText()) {
+            continue;  // 旧式の基本デバイスは行にしない
+        }
         onAddSpeakerClicked();
         if (!m_speakerRows.isEmpty()) {
             m_speakerRows.last()->setDeviceEntry(entry);
         }
     }
+
+    updateDeviceRowControls(m_micRows);
+    updateDeviceRowControls(m_speakerRows);
+    updateMultiDevicePanelHeight();
 
     QT_TRACE(2, "Audio device selection applied: "
              << selection.inputDevices.size() << " mics, "
@@ -3603,6 +3725,40 @@ void QtVideoMainWindow::removeDeviceRow(AudioDeviceRowWidget* widget,
     if (rows.size() == 1) {
         rows[0]->setRemoveButtonVisible(false);
     }
+}
+
+void QtVideoMainWindow::updateDeviceRowControls(QVector<AudioDeviceRowWidget*>& rows)
+{
+    for (int i = 0; i < rows.size(); i++) {
+        AudioDeviceRowWidget* row = rows[i];
+        if (!row) {
+            continue;
+        }
+        // ミュートは全体のみ（行ミュートは常に非表示）
+        row->setMuteButtonVisible(false);
+        // 先頭行は削除不可、追加行のみ削除可
+        row->setRemoveButtonVisible(i > 0);
+    }
+}
+
+void QtVideoMainWindow::updateMultiDevicePanelHeight()
+{
+    if (!m_multiDeviceScrollArea) {
+        return;
+    }
+    const int rows = std::max(m_micRows.size(), m_speakerRows.size());
+    if (rows <= 0) {
+        m_multiDeviceScrollArea->setMinimumHeight(70);
+        m_multiDeviceScrollArea->setMaximumHeight(90);
+        return;
+    }
+    // 旧式ビジュアライザーの高さに合わせて余裕を持たせる
+    const int baseHeight = 150;   // タイトル/ボタン/余白
+    const int rowHeight = 120;    // 1行あたりの目安
+    int height = baseHeight + rows * rowHeight;
+    height = qBound(220, height, 520);
+    m_multiDeviceScrollArea->setMinimumHeight(height);
+    m_multiDeviceScrollArea->setMaximumHeight(520);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

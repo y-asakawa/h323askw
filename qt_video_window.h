@@ -38,6 +38,7 @@
 #include <QSettings>
 #include <QCompleter>
 #include <QInputDialog>
+#include <QScrollArea>
 #include <QGuiApplication>
 #include <QWindow>
 #include <QMessageBox>
@@ -365,10 +366,24 @@ public:
     void setRemoveButtonVisible(bool show);
 
     /**
-     * @brief 音声レベルメーターを更新
-     * @param level 音声レベル（0.0～1.0）
+     * @brief ミュートボタンの表示/非表示
+     * @param show true=表示, false=非表示
      */
-    void updateLevelMeter(double level);
+    void setMuteButtonVisible(bool show);
+
+    /**
+     * @brief 音声レベルメーターを更新
+     * @param pcmData PCMデータ
+     * @param sampleCount サンプル数
+     * @param channels チャンネル数
+     * @param sampleRate サンプルレート
+     */
+    void updateSpectrum(const int16_t* pcmData, size_t sampleCount, int channels, int sampleRate);
+
+    /**
+     * @brief ビジュアライザーをリセット
+     */
+    void resetSpectrum(size_t sampleCount, int sampleRate);
 
 signals:
     /**
@@ -404,7 +419,7 @@ private:
     QLabel* m_gainLabel;                 // ゲイン表示ラベル
     QCheckBox* m_muteCheckbox;           // ミュート
     QPushButton* m_removeButton;         // 削除ボタン
-    QProgressBar* m_levelMeter;          // 音声レベルビジュアライザー
+    QtAudioSpectrumWidget* m_spectrum;   // 旧式ビジュアライザー
 };
 
 // ==================== End of Phase 1 Audio UI ====================
@@ -636,6 +651,17 @@ private:
      */
     void removeDeviceRow(AudioDeviceRowWidget* widget, QVector<AudioDeviceRowWidget*>& rows);
 
+    /**
+     * @brief 行ごとのUI制御を更新（削除/ミュート表示など）
+     * @param rows ウィジェット配列（m_micRows または m_speakerRows）
+     */
+    void updateDeviceRowControls(QVector<AudioDeviceRowWidget*>& rows);
+
+    /**
+     * @brief マルチデバイスパネルの高さを更新
+     */
+    void updateMultiDevicePanelHeight();
+
     // ==================== End of Phase 1 Audio UI Private Methods ====================
 
     // ビデオ表示
@@ -655,10 +681,13 @@ private:
     QCheckBox* m_cameraCheckbox;
     QPushButton* m_contentButton;  // コンテンツ再表示ボタン
     QPushButton* m_contentSendButton; // コンテンツ送信ボタン
+    QWidget* m_gainRowWidget;          // 旧来の全体ゲインUI
     QSlider* m_gainSlider;           // マイク入力ゲイン
     QLabel* m_gainValueLabel;        // 現在のdB表示
     QSlider* m_spkGainSlider;        // スピーカー出力ゲイン
     QLabel* m_spkGainValueLabel;     // スピーカーのdB表示
+    int m_baseMicGainIndex;          // 旧式マイクゲイン(0-9)
+    int m_baseSpeakerGainIndex;      // 旧式スピーカーゲイン(0-9)
     
     // デバイス選択
     QComboBox* m_micCombo;
@@ -689,6 +718,7 @@ private:
     QPushButton* m_addMicButton;                   // マイク追加ボタン
     QPushButton* m_addSpeakerButton;               // スピーカー追加ボタン
     QTimer* m_audioVisualizerTimer;                // ビジュアライザー更新タイマー (75ms間隔)
+    QScrollArea* m_multiDeviceScrollArea;          // マルチデバイススクロール領域
 
     // ==================== End of Phase 1 Audio UI Members ====================
 

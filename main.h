@@ -274,6 +274,24 @@ class MicMixerChannel : public PChannel
      * @return デバイス数
      */
     size_t GetDeviceCount() const;
+
+    /**
+     * @brief 指定デバイスの最新PCMサンプルを取得
+     * @param index デバイスのインデックス
+     * @param outSamples 出力バッファ（コピー）
+     * @return 取得成功時 true
+     */
+    bool GetDeviceSamples(size_t index, std::vector<int16_t>& outSamples) const;
+
+    /**
+     * @brief サンプルレートを取得
+     */
+    unsigned GetSampleRate() const { return m_sampleRate; }
+
+    /**
+     * @brief フレームサンプル数を取得
+     */
+    unsigned GetFrameSamples() const { return m_frameSamples; }
     
   private:
     struct DeviceHandle {
@@ -282,6 +300,7 @@ class MicMixerChannel : public PChannel
         double gain;
         bool muted;
         std::vector<int16_t> buffer;  // デバイス用の一時バッファ
+        std::vector<int16_t> lastSamples; // ビジュアライザー用の最新サンプル
         double lastLevel;             // 最新の音声レベル (0.0～1.0)
         
         DeviceHandle() : channel(nullptr), gain(1.0), muted(false), lastLevel(0.0) {}
@@ -359,6 +378,19 @@ class SpeakerFanoutChannel : public PChannel
      * @return デバイス数
      */
     size_t GetDeviceCount() const;
+
+    /**
+     * @brief 指定スピーカーの最新PCMサンプルを取得
+     * @param index デバイスのインデックス
+     * @param outSamples 出力バッファ（コピー）
+     * @return 取得成功時 true
+     */
+    bool GetDeviceSamples(size_t index, std::vector<int16_t>& outSamples) const;
+
+    /**
+     * @brief サンプルレートを取得
+     */
+    unsigned GetSampleRate() const { return m_sampleRate; }
     
   private:
     struct SpeakerHandle {
@@ -366,6 +398,7 @@ class SpeakerFanoutChannel : public PChannel
         PSoundChannel* channel;
         double gain;
         bool muted;
+        std::vector<int16_t> lastSamples; // ビジュアライザー用の最新サンプル
         double lastLevel;             // 最新の音声レベル (0.0～1.0)
         
         SpeakerHandle() : channel(nullptr), gain(1.0), muted(false), lastLevel(0.0) {}

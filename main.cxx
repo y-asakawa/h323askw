@@ -62,6 +62,30 @@ std::atomic<double> g_inputGainLinear{1.0};
 // ソフトウェアスピーカーゲイン（Qt スライダーから更新）: 1.0 = 0 dB
 std::atomic<double> g_outputGainLinear{1.0};
 
+namespace {
+constexpr size_t kSpectrumHistorySamples = 512;
+
+void UpdateSpectrumHistory(std::vector<int16_t>& history, const int16_t* data, size_t count)
+{
+  if (history.size() != kSpectrumHistorySamples) {
+    history.assign(kSpectrumHistorySamples, 0);
+  }
+
+  if (!data || count == 0) {
+    std::fill(history.begin(), history.end(), 0);
+    return;
+  }
+
+  if (count >= kSpectrumHistorySamples) {
+    std::copy(data + (count - kSpectrumHistorySamples), data + count, history.begin());
+    return;
+  }
+
+  std::rotate(history.begin(), history.begin() + count, history.end());
+  std::copy(data, data + count, history.end() - count);
+}
+}  // namespace
+
 #if defined(USE_SPEEXDSP)
 namespace {
 constexpr unsigned kSpeexFrameDivisor = 100;          // 10ms frames (rate / 100)
@@ -17409,23 +17433,23 @@ void MyH323Connection::ToggleMicMute()
     PTRACE(1, "H323ASKW\t🔊 ToggleMicMute: " << (currentMuted ? "MUTED" : "UNMUTED") 
            << " → " << (newMuted ? "MUTED" : "UNMUTED"));
     
-    // H.245 Indicationを送信 (newMuted=true → Inactive, newMuted=false → Active)
-    if (SendLogicalChannelActivity(!newMuted)) {
-        // 送信成功した場合のみ状態を更新
-        m_localMicMuted = newMuted;
-        PTRACE(1, "H323ASKW\t✅ Mute state updated: " << (newMuted ? "🔇 MUTED" : "🎤 UNMUTED"));
-        
-        // 🎤 Qt6 UIにミュート状態を即座に反映
+    // まずローカル状態を更新（H.245の成否に依存させない）
+    m_localMicMuted = newMuted;
+    PTRACE(1, "H323ASKW\t✅ Mute state updated: " << (newMuted ? "🔇 MUTED" : "🎤 UNMUTED"));
+    
+    // 🎤 Qt6 UIにミュート状態を即座に反映
 #ifdef USE_QT6
-        QtVideoManager::instance().updateMuteState(newMuted, m_remoteMicMuted.load());
+    QtVideoManager::instance().updateMuteState(newMuted, m_remoteMicMuted.load());
 #endif
 
-        // 🎧 USB HID デバイスのLEDを同期 (Jabra等の物理ミュートボタンLED)
-        if (g_hidController != nullptr) {
-            g_hidController->SetMuteState(newMuted);
-        }
-    } else {
-        PTRACE(1, "H323ASKW\t❌ Failed to toggle mute - state unchanged");
+    // 🎧 USB HID デバイスのLEDを同期 (Jabra等の物理ミュートボタンLED)
+    if (g_hidController != nullptr) {
+        g_hidController->SetMuteState(newMuted);
+    }
+
+    // H.245 Indicationを送信 (newMuted=true → Inactive, newMuted=false → Active)
+    if (!SendLogicalChannelActivity(!newMuted)) {
+        PTRACE(1, "H323ASKW\t⚠️ Failed to send mute indication (local mute still applied)");
     }
 }
 
@@ -17805,6 +17829,16 @@ size_t MicMixerChannel::GetDeviceCount() const
   return m_activeDevices ? m_activeDevices->size() : 0;
 }
 
+bool MicMixerChannel::GetDeviceSamples(size_t index, std::vector<int16_t>& outSamples) const
+{
+  PWaitAndSignal lock(m_devicesMutex);
+  if (!m_activeDevices || index >= m_activeDevices->size()) {
+    return false;
+  }
+  outSamples = (*m_activeDevices)[index]->lastSamples;
+  return !outSamples.empty();
+}
+
 /**
  * @brief デバイスから音声データを読み出し
  * @param dev デバイスハンドル
@@ -17903,7 +17937,11 @@ PBoolean MicMixerChannel::Read(void* buf, PINDEX len)
   
   for (auto& devHandle : *devices) {
     if (!devHandle->channel || devHandle->muted) {
-      devHandle->lastLevel = 0.0;  // ミュート時はレベル0
+      {
+        PWaitAndSignal lock(m_devicesMutex);
+        devHandle->lastLevel = 0.0;  // ミュート時はレベル0
+        UpdateSpectrumHistory(devHandle->lastSamples, nullptr, 0);
+      }
       continue;  // ミュート中はスキップ
     }
     
@@ -17912,17 +17950,33 @@ PBoolean MicMixerChannel::Read(void* buf, PINDEX len)
       inputBuffers.push_back(devHandle->buffer.data());
       inputGains.push_back(devHandle->gain);
       
-      // 音声レベルを計算 (RMS)
+      // ビジュアライザー用にゲイン適用したサンプルを保存
+      std::vector<int16_t> scaled(samples);
       int64_t sum = 0;
       for (PINDEX i = 0; i < samples; i++) {
-        int32_t val = devHandle->buffer[i];
+        int32_t val = static_cast<int32_t>(std::lround(
+          static_cast<double>(devHandle->buffer[i]) * devHandle->gain));
+        if (val > 32767) {
+          val = 32767;
+        } else if (val < -32768) {
+          val = -32768;
+        }
+        scaled[i] = static_cast<int16_t>(val);
         sum += val * val;
       }
       double rms = std::sqrt((double)sum / (double)samples);
-      devHandle->lastLevel = rms / 32768.0;  // 0.0～1.0に正規化
+      {
+        PWaitAndSignal lock(m_devicesMutex);
+        UpdateSpectrumHistory(devHandle->lastSamples, scaled.data(), scaled.size());
+        devHandle->lastLevel = rms / 32768.0;  // 0.0～1.0に正規化
+      }
       PTRACE(4, "MicMixer\t📊 Device read successful: rms=" << rms << " lastLevel=" << devHandle->lastLevel);
     } else {
-      devHandle->lastLevel = 0.0;  // 読み出し失敗時はレベル0
+      {
+        PWaitAndSignal lock(m_devicesMutex);
+        devHandle->lastLevel = 0.0;  // 読み出し失敗時はレベル0
+        UpdateSpectrumHistory(devHandle->lastSamples, nullptr, 0);
+      }
       PTRACE(4, "MicMixer\t⚠️ Device read failed - setting level to 0");
     }
   }
@@ -17935,35 +17989,26 @@ PBoolean MicMixerChannel::Read(void* buf, PINDEX len)
     MixSamples(inputBuffers, inputGains, outBuf, samples);
   }
   
-  // 4. マスタゲインを適用（既存の g_inputGainLinear）
-  double masterGain = g_inputGainLinear.load(std::memory_order_relaxed);
-  if (std::abs(masterGain - 1.0) > 0.001) {
-    for (PINDEX i = 0; i < samples; i++) {
-      int32_t val = static_cast<int32_t>(std::lround(
-        static_cast<double>(outBuf[i]) * masterGain));
-      if (val > 32767) {
-        outBuf[i] = 32767;
-      } else if (val < -32768) {
-        outBuf[i] = -32768;
-      } else {
-        outBuf[i] = static_cast<int16_t>(val);
+  // 4. 全体ミュート確認（既存の IsLocalMicMuted）
+  if (m_connection && m_connection->IsLocalMicMuted()) {
+    memset(outBuf, 0, len);
+    PWaitAndSignal lock(m_devicesMutex);
+    if (devices) {
+      for (auto& devHandle : *devices) {
+        devHandle->lastLevel = 0.0;
+        UpdateSpectrumHistory(devHandle->lastSamples, nullptr, 0);
       }
     }
   }
   
-  // 5. 全体ミュート確認（既存の IsLocalMicMuted）
-  if (m_connection && m_connection->IsLocalMicMuted()) {
-    memset(outBuf, 0, len);
-  }
-  
-  // 6. SpeexDSP 処理（AEC/NS/AGC）
+  // 5. SpeexDSP 処理（AEC/NS/AGC）
 #if defined(USE_SPEEXDSP)
   if (m_speexProcessor && !m_speexProcessor->IsForceBypass()) {
     m_speexProcessor->ProcessCapture(outBuf, samples);
   }
 #endif
   
-  // 7. スペクトラム表示用に送信（既存関数）
+  // 6. スペクトラム表示用に送信（既存関数）
   UpdateLocalAudioSpectrum(outBuf, samples, 1, m_sampleRate);
 
   lastReadCount = len;
@@ -18176,6 +18221,16 @@ size_t SpeakerFanoutChannel::GetDeviceCount() const
   return m_activeSpeakers ? m_activeSpeakers->size() : 0;
 }
 
+bool SpeakerFanoutChannel::GetDeviceSamples(size_t index, std::vector<int16_t>& outSamples) const
+{
+  PWaitAndSignal lock(m_speakersMutex);
+  if (!m_activeSpeakers || index >= m_activeSpeakers->size()) {
+    return false;
+  }
+  outSamples = (*m_activeSpeakers)[index]->lastSamples;
+  return !outSamples.empty();
+}
+
 /**
  * @brief 音声データを書き込み（複数スピーカーへファンアウト）
  * @param buf 入力バッファ
@@ -18192,21 +18247,9 @@ PBoolean SpeakerFanoutChannel::Write(const void* buf, PINDEX len)
   const int16_t* inBuf = static_cast<const int16_t*>(buf);
   const PINDEX samples = len / sizeof(int16_t);
   
-  // 1. マスタゲインを適用（既存の g_outputGainLinear）
+  // 1. 入力をそのまま保持
   m_tempBuffer.resize(samples);
-  double masterGain = g_outputGainLinear.load(std::memory_order_relaxed);
-  
-  for (PINDEX i = 0; i < samples; i++) {
-    int32_t val = static_cast<int32_t>(std::lround(
-      static_cast<double>(inBuf[i]) * masterGain));
-    if (val > 32767) {
-      m_tempBuffer[i] = 32767;
-    } else if (val < -32768) {
-      m_tempBuffer[i] = -32768;
-    } else {
-      m_tempBuffer[i] = static_cast<int16_t>(val);
-    }
-  }
+  std::copy(inBuf, inBuf + samples, m_tempBuffer.begin());
   
   // 2. スペクトラム表示用（既存関数）
   UpdateRemoteAudioSpectrum(m_tempBuffer.data(), samples, 1, m_sampleRate);
@@ -18234,7 +18277,11 @@ PBoolean SpeakerFanoutChannel::Write(const void* buf, PINDEX len)
   
   for (auto& spkHandle : *speakers) {
     if (!spkHandle->channel || spkHandle->muted) {
-      spkHandle->lastLevel = 0.0;  // ミュート時はレベル0
+      {
+        PWaitAndSignal lock(m_speakersMutex);
+        spkHandle->lastLevel = 0.0;  // ミュート時はレベル0
+        UpdateSpectrumHistory(spkHandle->lastSamples, nullptr, 0);
+      }
       continue;  // ミュート中はスキップ
     }
     
@@ -18260,7 +18307,11 @@ PBoolean SpeakerFanoutChannel::Write(const void* buf, PINDEX len)
         sum += v * v;
       }
       double rms = std::sqrt((double)sum / (double)samples);
-      spkHandle->lastLevel = rms / 32768.0;  // 0.0～1.0に正規化
+      {
+        PWaitAndSignal lock(m_speakersMutex);
+        UpdateSpectrumHistory(spkHandle->lastSamples, deviceBuf.data(), deviceBuf.size());
+        spkHandle->lastLevel = rms / 32768.0;  // 0.0～1.0に正規化
+      }
       
       if (!spkHandle->channel->Write(deviceBuf.data(), len)) {
         PString errText = spkHandle->channel->GetErrorText();
@@ -18269,6 +18320,18 @@ PBoolean SpeakerFanoutChannel::Write(const void* buf, PINDEX len)
       }
     } else {
       // ゲイン = 1.0 ならそのまま書き込み
+      {
+        PWaitAndSignal lock(m_speakersMutex);
+        UpdateSpectrumHistory(spkHandle->lastSamples, m_tempBuffer.data(), m_tempBuffer.size());
+        // 音声レベルを計算 (RMS)
+        int64_t sum = 0;
+        for (PINDEX i = 0; i < samples; i++) {
+          int32_t v = m_tempBuffer[i];
+          sum += v * v;
+        }
+        double rms = std::sqrt((double)sum / (double)samples);
+        spkHandle->lastLevel = rms / 32768.0;  // 0.0～1.0に正規化
+      }
       if (!spkHandle->channel->Write(m_tempBuffer.data(), len)) {
         PString errText = spkHandle->channel->GetErrorText();
         PTRACE(3, "SpeakerFanout\t⚠️ Failed to write to speaker " 
