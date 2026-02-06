@@ -1156,9 +1156,26 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
 
 QtVideoMainWindow::~QtVideoMainWindow()
 {
+    QT_TRACE(1, "QtVideoMainWindow destructor ENTER");
+    
+    // 通話フラグをクリア（タイマーコールバックを停止）
+    m_isCallActive.store(false, std::memory_order_release);
+    
+    // タイマーを停止
+    if (m_audioVisualizerTimer) {
+        m_audioVisualizerTimer->stop();
+        m_audioVisualizerTimer->deleteLater();
+        m_audioVisualizerTimer = nullptr;
+    }
+    
+    // 親子関係で自動削除される前に、手動でクリア（安全のため）
+    m_micRows.clear();
+    m_speakerRows.clear();
+    
     // 終了時に履歴を保存
     saveAddressHistory();
     m_running = false;
+    
     QT_TRACE(1, "QtVideoMainWindow destroyed");
 }
 
