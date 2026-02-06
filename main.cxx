@@ -1573,8 +1573,12 @@ static void Qt6ApplyAudioDeviceSelectionCallback(const AudioDeviceSelection& sel
     
     // 接続状態をチェック
     MyH323Connection* conn = ep->GetCurrentConnection();
-    if (conn) {
-        PTRACE(2, "Qt6AudioCallback\t⚠️ Cannot change devices during active call - config will be applied on next connection");
+    if (conn && conn->IsEstablished()) {
+        // 通話中でもスピーカー分配を反映させる
+        conn->UpdateAudioDevices(config);
+        PTRACE(2, "Qt6AudioCallback\t✅ Applied multi-device config to active connection");
+    } else if (conn) {
+        PTRACE(2, "Qt6AudioCallback\t⚠️ Connection not established yet - config will be applied on connect");
     } else {
         PTRACE(2, "Qt6AudioCallback\t✅ Config saved - will be applied when connecting");
     }
@@ -17802,6 +17806,16 @@ void MicMixerChannel::UpdateGainSettings(const CoreAudioDeviceConfig& cfg)
         break;
       }
     }
+    if (!updated && i < cfg.inputs.size()) {
+      // フォールバック: 順序一致で更新（名前不一致時の救済）
+      const auto& newConfig = cfg.inputs[i];
+      dev->gain = newConfig.gain;
+      dev->muted = newConfig.muted;
+      updated = true;
+      PTRACE(3, "MicMixer\t   Device " << i << " (" << dev->name
+             << ") fallback by index: gain=" << dev->gain
+             << ", muted=" << (dev->muted ? "yes" : "no"));
+    }
     if (!updated) {
       PTRACE(4, "MicMixer\t   Device " << i << " (" << dev->name
              << ") not found in config - keeping existing gain");
@@ -18228,6 +18242,16 @@ void SpeakerFanoutChannel::UpdateGainSettings(const CoreAudioDeviceConfig& cfg)
         break;
       }
     }
+    if (!updated && i < cfg.outputs.size()) {
+      // フォールバック: 順序一致で更新（名前不一致時の救済）
+      const auto& newConfig = cfg.outputs[i];
+      spk->gain = newConfig.gain;
+      spk->muted = newConfig.muted;
+      updated = true;
+      PTRACE(3, "SpeakerFanout\t   Speaker " << i << " (" << spk->name
+             << ") fallback by index: gain=" << spk->gain
+             << ", muted=" << (spk->muted ? "yes" : "no"));
+    }
     if (!updated) {
       PTRACE(4, "SpeakerFanout\t   Speaker " << i << " (" << spk->name
              << ") not found in config - keeping existing gain");
@@ -18291,10 +18315,7 @@ PBoolean SpeakerFanoutChannel::Write(const void* buf, PINDEX len)
   m_tempBuffer.resize(samples);
   std::copy(inBuf, inBuf + samples, m_tempBuffer.begin());
   
-  // 2. スペクトラム表示用（既存関数）
-  UpdateRemoteAudioSpectrum(m_tempBuffer.data(), samples, 1, m_sampleRate);
-  
-  // 3. SpeexDSP の Playback 処理（AEC参照信号）
+  // 2. SpeexDSP の Playback 処理（AEC参照信号）
   // ※ 1回だけ実行（複数スピーカーでも参照信号は1本）
 #if defined(USE_SPEEXDSP)
   if (m_speexProcessor && !m_speexProcessor->IsForceBypass()) {
@@ -18302,7 +18323,7 @@ PBoolean SpeakerFanoutChannel::Write(const void* buf, PINDEX len)
   }
 #endif
   
-  // 4. 各スピーカーへ配信
+  // 3. 各スピーカーへ配信
   std::shared_ptr<SpeakerSet> speakers;
   {
     PWaitAndSignal lock(m_speakersMutex);
@@ -18315,12 +18336,20 @@ PBoolean SpeakerFanoutChannel::Write(const void* buf, PINDEX len)
     return TRUE;  // スピーカーなしでもエラーにしない
   }
   
-  for (auto& spkHandle : *speakers) {
+  bool baseSpectrumUpdated = false;
+  for (size_t spkIndex = 0; spkIndex < speakers->size(); ++spkIndex) {
+    auto& spkHandle = (*speakers)[spkIndex];
+    const bool isBaseSpeaker = (spkIndex == 0);
     if (!spkHandle->channel || spkHandle->muted) {
       {
         PWaitAndSignal lock(m_speakersMutex);
         spkHandle->lastLevel = 0.0;  // ミュート時はレベル0
         UpdateSpectrumHistory(spkHandle->lastSamples, nullptr, 0);
+      }
+      if (isBaseSpeaker && !baseSpectrumUpdated) {
+        std::vector<int16_t> silence(samples, 0);
+        UpdateRemoteAudioSpectrum(silence.data(), silence.size(), 1, m_sampleRate);
+        baseSpectrumUpdated = true;
       }
       continue;  // ミュート中はスキップ
     }
@@ -18352,6 +18381,10 @@ PBoolean SpeakerFanoutChannel::Write(const void* buf, PINDEX len)
         UpdateSpectrumHistory(spkHandle->lastSamples, deviceBuf.data(), deviceBuf.size());
         spkHandle->lastLevel = rms / 32768.0;  // 0.0～1.0に正規化
       }
+      if (isBaseSpeaker && !baseSpectrumUpdated) {
+        UpdateRemoteAudioSpectrum(deviceBuf.data(), deviceBuf.size(), 1, m_sampleRate);
+        baseSpectrumUpdated = true;
+      }
       
       if (!spkHandle->channel->Write(deviceBuf.data(), len)) {
         PString errText = spkHandle->channel->GetErrorText();
@@ -18372,12 +18405,21 @@ PBoolean SpeakerFanoutChannel::Write(const void* buf, PINDEX len)
         double rms = std::sqrt((double)sum / (double)samples);
         spkHandle->lastLevel = rms / 32768.0;  // 0.0～1.0に正規化
       }
+      if (isBaseSpeaker && !baseSpectrumUpdated) {
+        UpdateRemoteAudioSpectrum(m_tempBuffer.data(), m_tempBuffer.size(), 1, m_sampleRate);
+        baseSpectrumUpdated = true;
+      }
       if (!spkHandle->channel->Write(m_tempBuffer.data(), len)) {
         PString errText = spkHandle->channel->GetErrorText();
         PTRACE(3, "SpeakerFanout\t⚠️ Failed to write to speaker " 
                << spkHandle->name << ": " << errText);
       }
     }
+  }
+
+  if (!baseSpectrumUpdated) {
+    std::vector<int16_t> silence(samples, 0);
+    UpdateRemoteAudioSpectrum(silence.data(), silence.size(), 1, m_sampleRate);
   }
 
   lastWriteCount = len;
