@@ -79,6 +79,33 @@ struct CoreAudioDeviceConfig {
     CoreAudioDeviceConfig() {}
 };
 
+// ============================================================================
+// Phase 2: Multi-Device Video Support - Core Data Structures
+// ============================================================================
+
+/**
+ * @struct CoreVideoDeviceEntry
+ * @brief 単一カメラデバイスのエントリ（Core側）
+ */
+struct CoreVideoDeviceEntry {
+    PString name;        // PTLib形式のデバイス名
+    bool muted;          // デバイス個別のミュート
+    
+    CoreVideoDeviceEntry() : muted(false) {}
+    CoreVideoDeviceEntry(const PString& n, bool m = false)
+        : name(n), muted(m) {}
+};
+
+/**
+ * @struct CoreVideoDeviceConfig
+ * @brief Core側の映像デバイス設定
+ */
+struct CoreVideoDeviceConfig {
+    std::vector<CoreVideoDeviceEntry> cameras;  // カメラ設定（最大4台）
+    
+    CoreVideoDeviceConfig() {}
+};
+
 #if defined(H323_VIDEO) && defined(USE_QT6)
 // 🎬 Preview callback (kept in sync with plugin ABI: two pointer-sized fields)
 typedef struct PreviewCallback {
@@ -419,6 +446,89 @@ class SpeakerFanoutChannel : public PChannel
     
     std::shared_ptr<SpeakerSet> OpenSpeakers(
         const std::vector<CoreAudioDeviceEntry>& entries);
+};
+
+// ============================================================================
+// Phase 2: Multi-Device Video - Mosaic Video Input Device
+// ============================================================================
+
+/**
+ * @class MosaicVideoInputDevice
+ * @brief 複数USBカメラをモザイク合成する仮想ビデオ入力デバイス
+ */
+class MosaicVideoInputDevice : public PVideoInputDevice
+{
+    PCLASSINFO(MosaicVideoInputDevice, PVideoInputDevice);
+    
+  public:
+    MosaicVideoInputDevice();
+    virtual ~MosaicVideoInputDevice();
+    
+    // PVideoInputDevice overrides
+    virtual PBoolean Open(const PString & deviceName, PBoolean startImmediate = true);
+    virtual PBoolean IsOpen();
+    virtual PBoolean Close();
+    virtual PBoolean Start();
+    virtual PBoolean Stop();
+    virtual PBoolean IsCapturing();
+    virtual PStringArray GetDeviceNames() const;
+    virtual PBoolean GetFrameData(BYTE * buffer, PINDEX * bytesReturned = NULL);
+    virtual PBoolean GetFrameDataNoDelay(BYTE * buffer, PINDEX * bytesReturned = NULL);
+    virtual PINDEX GetMaxFrameBytes();
+    
+    virtual PBoolean SetFrameSize(unsigned width, unsigned height);
+    virtual PBoolean SetFrameRate(unsigned rate);
+    
+    /**
+     * @brief デバイス構成の更新（通話中に呼び出し可能）
+     * @param cfg 新しいカメラデバイス設定
+     */
+    void UpdateDevices(const std::vector<CoreVideoDeviceEntry>& cfg);
+    
+    /**
+     * @brief 現在のカメラ数を取得
+     * @return カメラ数
+     */
+    size_t GetDeviceCount() const;
+    
+  private:
+    struct CameraHandle {
+        PString name;
+        PVideoInputDevice* device;
+        bool muted;
+        unsigned width;
+        unsigned height;
+        std::vector<BYTE> frameBuffer;
+        PTime lastFrameTime;
+        
+        CameraHandle() : device(nullptr), muted(false), width(0), height(0) {}
+        ~CameraHandle() { if (device) delete device; }
+    };
+    
+    using CameraSet = std::vector<std::shared_ptr<CameraHandle>>;
+    
+    std::shared_ptr<CameraSet> m_activeCameras;
+    PMutex m_camerasMutex;
+    
+    unsigned m_outputWidth;
+    unsigned m_outputHeight;
+    unsigned m_frameRate;
+    bool m_isOpen;
+    bool m_isStarted;
+    
+    // Mosaic composition methods
+    void ComposeMosaicFrame(const CameraSet& cameras, BYTE* outputBuffer);
+    void CalculateLayout(size_t cameraCount, int& rows, int& cols);
+    void CopyTileToMosaic(const BYTE* srcYUV, unsigned srcW, unsigned srcH,
+                         BYTE* dstYUV, unsigned dstW, unsigned dstH,
+                         int row, int col, int rows, int cols);
+    void FillBlackTile(BYTE* dstYUV, unsigned dstW, unsigned dstH,
+                      int row, int col, int rows, int cols);
+    void FillBlackFrame(BYTE* buffer, unsigned width, unsigned height);
+    
+    // Helper
+    std::shared_ptr<CameraSet> OpenCameras(
+        const std::vector<CoreVideoDeviceEntry>& entries);
 };
 
 // グローバル関数：スペクトラム更新（Qt6 UIへの橋渡し）
@@ -880,6 +990,12 @@ class MyH323Connection : public H323Connection
      * @param cfg 新しい音声デバイス設定
      */
     void UpdateAudioDevices(const CoreAudioDeviceConfig& cfg);
+    
+    /**
+     * @brief 通話中に映像デバイス構成を更新（モザイク）
+     * @param cfg 新しい映像デバイス設定
+     */
+    void UpdateVideoDevices(const CoreVideoDeviceConfig& cfg);
 
     CallDetail details;
     
@@ -1492,6 +1608,9 @@ public:
     MicMixerChannel* m_micMixer;           // 複数マイク → 1本のPCM
     SpeakerFanoutChannel* m_speakerFanout; // 1本のPCM → 複数スピーカー
     
+    // Phase 2: Multi-Device Video
+    MosaicVideoInputDevice* m_mosaicVideoInput; // モザイクビデオ入力
+    
 public:
     /**
      * SendLogicalChannelActivity - H.245 MiscellaneousIndication送信
@@ -1677,6 +1796,34 @@ class MyH323EndPoint : public H323EndPoint
         }
     }
     
+    // ============================================================
+    // Phase 2: Multi-Device Video Configuration
+    // ============================================================
+    
+    /**
+     * @brief 現在の映像デバイス設定を取得
+     * @return CoreVideoDeviceConfig 映像デバイス設定
+     */
+    CoreVideoDeviceConfig GetVideoDeviceConfig() const {
+        PWaitAndSignal lock(m_videoConfigMutex);
+        return m_videoDeviceConfig;
+    }
+    
+    /**
+     * @brief 映像デバイス設定を更新（UIからのコールバック経由）
+     * @param cfg 新しい映像デバイス設定
+     */
+    void UpdateVideoDeviceConfig(const CoreVideoDeviceConfig& cfg) {
+        PWaitAndSignal lock(m_videoConfigMutex);
+        m_videoDeviceConfig = cfg;
+        PTRACE(1, "H323ASKW\tVideo device config updated: "
+               << cfg.cameras.size() << " cameras");
+        for (size_t i = 0; i < cfg.cameras.size(); i++) {
+            PTRACE(2, "H323ASKW\t  Camera[" << i << "]: " << cfg.cameras[i].name 
+                   << " (muted=" << (cfg.cameras[i].muted ? "yes" : "no") << ")");
+        }
+    }
+    
     /**
      * @brief 現在アクティブな接続を取得（マルチデバイス設定の動的適用用）
      * @return 接続がある場合はMyH323Connection*、ない場合はnullptr
@@ -1718,6 +1865,10 @@ class MyH323EndPoint : public H323EndPoint
     // Phase 1: Multi-Device Audio Configuration
     mutable PMutex m_audioConfigMutex;
     CoreAudioDeviceConfig m_audioDeviceConfig;
+    
+    // Phase 2: Multi-Device Video Configuration
+    mutable PMutex m_videoConfigMutex;
+    CoreVideoDeviceConfig m_videoDeviceConfig;
     
     // *** Audio Device Configuration ***
     PString m_audioInputDevice;     // Microphone device name

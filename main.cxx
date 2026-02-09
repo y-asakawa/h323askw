@@ -31,7 +31,14 @@
 // #endif
 
 #include <ptlib.h>
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winconsistent-missing-override"
+#endif
 #include "main.h"
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
 #include "version.h"
 
 // USB HID Controller for physical mute button integration
@@ -1564,18 +1571,39 @@ static void Qt6ApplyAudioDeviceSelectionCallback(const AudioDeviceSelection& sel
         config.outputs.push_back(coreEntry);
     }
     
+    CoreVideoDeviceConfig videoConfig;
+    for (const VideoDeviceEntry& entry : selection.cameraDevices) {
+        CoreVideoDeviceEntry coreEntry;
+        coreEntry.name = PString((const char*)entry.name.toUtf8());
+        coreEntry.muted = entry.muted;
+        videoConfig.cameras.push_back(coreEntry);
+    }
+    
     PTRACE(1, "Qt6AudioCallback\tReceived multi-device config: "
            << config.inputs.size() << " inputs, "
-           << config.outputs.size() << " outputs");
+           << config.outputs.size() << " outputs, "
+           << videoConfig.cameras.size() << " cameras");
     
     // エンドポイントに設定を保存（次回の接続時に使用）
     ep->UpdateAudioDeviceConfig(config);
+    ep->UpdateVideoDeviceConfig(videoConfig);
+    
+#ifdef H323_VIDEO
+    if (!videoConfig.cameras.empty()) {
+        ep->SetUseUSBCamera(true);
+        ep->SetUSBCameraDeviceName(videoConfig.cameras[0].name);
+    } else {
+        ep->SetUseUSBCamera(false);
+        ep->SetUSBCameraDeviceName("");
+    }
+#endif
     
     // 接続状態をチェック
     MyH323Connection* conn = ep->GetCurrentConnection();
     if (conn && conn->IsEstablished()) {
         // 通話中でもスピーカー分配を反映させる
         conn->UpdateAudioDevices(config);
+        conn->UpdateVideoDevices(videoConfig);
         PTRACE(2, "Qt6AudioCallback\t✅ Applied multi-device config to active connection");
     } else if (conn) {
         PTRACE(2, "Qt6AudioCallback\t⚠️ Connection not established yet - config will be applied on connect");
@@ -4944,6 +4972,7 @@ MyH323Connection::MyH323Connection(MyH323EndPoint & ep, unsigned callRef)
   // Phase 1: Multi-Device Audio Channels
   , m_micMixer(nullptr)
   , m_speakerFanout(nullptr)
+  , m_mosaicVideoInput(nullptr)
 {
     detectInBandDTMF = FALSE; // turn off in-band DTMF detection (uses a huge amount of CPU)
     
@@ -5085,6 +5114,12 @@ MyH323Connection::~MyH323Connection()
         m_speakerFanout = NULL;
     }
     
+    if (m_mosaicVideoInput != NULL) {
+        // NOTE: Video channel owns the attached input device and will delete it.
+        PTRACE(3, "H323ASKW\tClearing MosaicVideoInputDevice pointer (owned by video channel)");
+        m_mosaicVideoInput = NULL;
+    }
+    
     PTRACE(3, "H323ASKW\t✅ MyH323Connection destructor completed successfully");
 }
 
@@ -5137,6 +5172,35 @@ void MyH323Connection::UpdateAudioDevices(const CoreAudioDeviceConfig& cfg)
   }
   
   PTRACE(1, "H323ASKW\t✅ Connection: Audio device update complete");
+}
+
+/**
+ * @brief 通話中に映像デバイス構成を更新（モザイク）
+ * @param cfg 新しい映像デバイス設定
+ */
+void MyH323Connection::UpdateVideoDevices(const CoreVideoDeviceConfig& cfg)
+{
+  PTRACE(1, "H323ASKW\t🔄 Connection: Updating video devices during call");
+  PTRACE(2, "H323ASKW\t   Cameras: " << cfg.cameras.size());
+  
+  if (!IsEstablished()) {
+    PTRACE(2, "H323ASKW\t   Connection not established yet - config will be applied on next call");
+    return;
+  }
+
+  if (videoChannelOut) {
+    PVideoInputDevice* reader = videoChannelOut->GetVideoReader();
+    if (reader && reader != m_mosaicVideoInput) {
+      m_mosaicVideoInput = dynamic_cast<MosaicVideoInputDevice*>(reader);
+    }
+  }
+
+  if (m_mosaicVideoInput) {
+    m_mosaicVideoInput->UpdateDevices(cfg.cameras);
+    PTRACE(1, "H323ASKW\t✅ Connection: Video device update complete");
+  } else {
+    PTRACE(2, "H323ASKW\t   MosaicVideoInputDevice not yet initialized (will be created on next call)");
+  }
 }
 
 /**
@@ -8821,8 +8885,20 @@ PBoolean MyH323Connection::OpenVideoChannel(PBoolean isEncoding, H323VideoCodec 
 {
   PTRACE(1, "H323ASKW\tOpenVideoChannel called: isEncoding=" << isEncoding);
   
+  bool isH239 = false;
+#if (H323PLUS_VER >= 1271)
+  isH239 = codec.GetRTPSessionID() > 2;
+#endif
+  
+  CoreVideoDeviceConfig videoCfg;
+  bool useMosaic = false;
+  if (isEncoding && !isH239) {
+    videoCfg = endpoint.GetVideoDeviceConfig();
+    useMosaic = !videoCfg.cameras.empty();
+  }
+  
   // Apply USB camera resolution if encoding and USB camera is enabled
-  if (isEncoding && endpoint.IsUsingUSBCamera()) {
+  if (isEncoding && (endpoint.IsUsingUSBCamera() || useMosaic)) {
     PTRACE(1, "H323ASKW\t*** APPLYING USB CAMERA RESOLUTION FOR VIDEO ENCODING ***");
     
     // CRITICAL FIX: Force 720p for MCU compatibility
@@ -8855,11 +8931,6 @@ PBoolean MyH323Connection::OpenVideoChannel(PBoolean isEncoding, H323VideoCodec 
     PTRACE(1, "H323ASKW\tSet MCU TX compatibility environment variables");
   }
   
-  bool isH239 = false;
-#if (H323PLUS_VER >= 1271)
-  isH239 = codec.GetRTPSessionID() > 2;
-#endif
-  
   PString deviceName;
   
   // 🎥 Camera candidate structure to track driver+device pairs
@@ -8876,8 +8947,11 @@ PBoolean MyH323Connection::OpenVideoChannel(PBoolean isEncoding, H323VideoCodec 
     fprintf(stderr, "[CAMERA_DEBUG] isEncoding=true, isH239=%d, IsUsingUSBCamera=%d\n", 
             isH239, endpoint.IsUsingUSBCamera());
     fflush(stderr);
-    
-    if (endpoint.IsUsingUSBCamera() && !isH239) {
+
+    if (useMosaic) {
+      deviceName = "MosaicCamera";
+      PTRACE(1, "H323ASKW\t🎞️ Using MosaicVideoInputDevice (" << videoCfg.cameras.size() << " cameras)");
+    } else if (endpoint.IsUsingUSBCamera() && !isH239) {
       fprintf(stderr, "[CAMERA_DEBUG] Entering USB camera selection logic\n");
       fflush(stderr);
       
@@ -9037,14 +9111,16 @@ PBoolean MyH323Connection::OpenVideoChannel(PBoolean isEncoding, H323VideoCodec 
     }
     
     // Determine final device name based on camera selection
-    if (selectedCamera.isValid()) {
-      deviceName = selectedCamera.device;  // For now, store device name (will use driver+device for CreateOpenedDevice)
-    } else if (endpoint.IsUsingUSBCamera() && !isH239) {
-      PTRACE(1, "H323ASKW\t⚠️  Falling back to Fake video device (USB camera not found)");
-      deviceName = endpoint.GetVideoPattern(isH239);
-    } else {
-      // Use test pattern
-      deviceName = endpoint.GetVideoPattern(isH239);
+    if (!useMosaic) {
+      if (selectedCamera.isValid()) {
+        deviceName = selectedCamera.device;  // For now, store device name (will use driver+device for CreateOpenedDevice)
+      } else if (endpoint.IsUsingUSBCamera() && !isH239) {
+        PTRACE(1, "H323ASKW\t⚠️  Falling back to Fake video device (USB camera not found)");
+        deviceName = endpoint.GetVideoPattern(isH239);
+      } else {
+        // Use test pattern
+        deviceName = endpoint.GetVideoPattern(isH239);
+      }
     }
   } else {
     // For decoding (incoming video) - Enhanced display system selection
@@ -9080,7 +9156,19 @@ PBoolean MyH323Connection::OpenVideoChannel(PBoolean isEncoding, H323VideoCodec 
   
   if (isEncoding) {
     // For encoding (input devices)
-    if (selectedCamera.isValid()) {
+    if (useMosaic) {
+      if (!m_mosaicVideoInput) {
+        m_mosaicVideoInput = new MosaicVideoInputDevice();
+      }
+      if (m_mosaicVideoInput) {
+        m_mosaicVideoInput->SetFrameRate(endpoint.GetFrameRate());
+        if (!m_mosaicVideoInput->IsOpen()) {
+          m_mosaicVideoInput->Open(deviceName, TRUE);
+        }
+        m_mosaicVideoInput->UpdateDevices(videoCfg.cameras);
+        device = (PVideoDevice *)m_mosaicVideoInput;
+      }
+    } else if (selectedCamera.isValid()) {
       // 🎯 CRITICAL: Use driver+device for USB camera to avoid Fake fallback
       PTRACE(1, "H323ASKW\t🎥 Creating USB camera with driver+device: driver=" << selectedCamera.driver 
                 << ", device=" << selectedCamera.device);
@@ -9165,7 +9253,7 @@ PBoolean MyH323Connection::OpenVideoChannel(PBoolean isEncoding, H323VideoCodec 
       cap.SetFrameRate(endpoint.GetFrameRate());
       
       // Add frame sizes starting with optimal camera resolution if USB camera is enabled
-      if (endpoint.IsUsingUSBCamera()) {
+      if (endpoint.IsUsingUSBCamera() && !useMosaic) {
         // Auto-detect optimal resolution and add it first for priority
         unsigned optimalWidth = 352, optimalHeight = 288;  // CIF fallback
         const char* resolutionName;
@@ -9252,7 +9340,11 @@ PBoolean MyH323Connection::OpenVideoChannel(PBoolean isEncoding, H323VideoCodec 
   
   if (!device->Open(deviceName, TRUE)) {
     PTRACE(1, "H323ASKW\tFailed to open video device \"" << deviceName << '"');
-    delete device;
+    if (!(useMosaic && device == (PVideoDevice*)m_mosaicVideoInput)) {
+      delete device;
+    } else {
+      m_mosaicVideoInput = NULL;
+    }
     return FALSE;
   }
 
@@ -18424,4 +18516,482 @@ PBoolean SpeakerFanoutChannel::Write(const void* buf, PINDEX len)
 
   lastWriteCount = len;
   return TRUE;
+}
+
+// ============================================================================
+// Phase 2: MosaicVideoInputDevice Implementation
+// ============================================================================
+
+MosaicVideoInputDevice::MosaicVideoInputDevice()
+  : m_outputWidth(1280)
+  , m_outputHeight(720)
+  , m_frameRate(30)
+  , m_isOpen(false)
+  , m_isStarted(false)
+{
+  m_activeCameras = std::make_shared<CameraSet>();
+  PVideoFrameInfo::SetFrameSize(m_outputWidth, m_outputHeight);
+  PVideoFrameInfo::SetFrameRate(m_frameRate);
+  PVideoFrameInfo::SetColourFormat("YUV420P");
+}
+
+MosaicVideoInputDevice::~MosaicVideoInputDevice()
+{
+  Close();
+}
+
+PBoolean MosaicVideoInputDevice::Open(const PString & deviceName, PBoolean startImmediate)
+{
+  if (m_isOpen) {
+    return TRUE;
+  }
+  
+  this->deviceName = deviceName;
+  m_isOpen = true;
+  PVideoFrameInfo::SetColourFormat("YUV420P");
+  if (m_outputWidth == 0 || m_outputHeight == 0) {
+    m_outputWidth = 1280;
+    m_outputHeight = 720;
+  }
+  PVideoFrameInfo::SetFrameSize(m_outputWidth, m_outputHeight);
+  PVideoFrameInfo::SetFrameRate(m_frameRate);
+  
+  if (startImmediate) {
+    Start();
+  }
+  
+  return TRUE;
+}
+
+PBoolean MosaicVideoInputDevice::IsOpen()
+{
+  return m_isOpen;
+}
+
+PBoolean MosaicVideoInputDevice::Close()
+{
+  Stop();
+  {
+    PWaitAndSignal lock(m_camerasMutex);
+    m_activeCameras = std::make_shared<CameraSet>();
+  }
+  m_isOpen = false;
+  return TRUE;
+}
+
+PBoolean MosaicVideoInputDevice::Start()
+{
+  m_isStarted = true;
+  std::shared_ptr<CameraSet> cameras;
+  {
+    PWaitAndSignal lock(m_camerasMutex);
+    cameras = m_activeCameras;
+  }
+  if (cameras) {
+    for (auto& cam : *cameras) {
+      if (cam->device && !cam->device->IsCapturing()) {
+        cam->device->Start();
+      }
+    }
+  }
+  return TRUE;
+}
+
+PBoolean MosaicVideoInputDevice::Stop()
+{
+  m_isStarted = false;
+  std::shared_ptr<CameraSet> cameras;
+  {
+    PWaitAndSignal lock(m_camerasMutex);
+    cameras = m_activeCameras;
+  }
+  if (cameras) {
+    for (auto& cam : *cameras) {
+      if (cam->device && cam->device->IsCapturing()) {
+        cam->device->Stop();
+      }
+    }
+  }
+  return TRUE;
+}
+
+PBoolean MosaicVideoInputDevice::IsCapturing()
+{
+  return m_isStarted;
+}
+
+PStringArray MosaicVideoInputDevice::GetDeviceNames() const
+{
+  PStringArray names;
+  names.AppendString("MosaicCamera");
+  return names;
+}
+
+PBoolean MosaicVideoInputDevice::SetFrameSize(unsigned width, unsigned height)
+{
+  if (width < 2 || height < 2) {
+    return FALSE;
+  }
+  if (width & 1u) {
+    --width;
+  }
+  if (height & 1u) {
+    --height;
+  }
+  m_outputWidth = width;
+  m_outputHeight = height;
+  return PVideoFrameInfo::SetFrameSize(width, height);
+}
+
+PBoolean MosaicVideoInputDevice::SetFrameRate(unsigned rate)
+{
+  if (rate == 0) {
+    return FALSE;
+  }
+  m_frameRate = rate;
+  return PVideoFrameInfo::SetFrameRate(rate);
+}
+
+PINDEX MosaicVideoInputDevice::GetMaxFrameBytes()
+{
+  return (m_outputWidth * m_outputHeight * 3) / 2;
+}
+
+PBoolean MosaicVideoInputDevice::GetFrameData(BYTE * buffer, PINDEX * bytesReturned)
+{
+  if (m_frameRate > 0) {
+    PThread::Sleep(1000 / m_frameRate);
+  }
+  return GetFrameDataNoDelay(buffer, bytesReturned);
+}
+
+PBoolean MosaicVideoInputDevice::GetFrameDataNoDelay(BYTE * buffer, PINDEX * bytesReturned)
+{
+  if (!buffer) {
+    return FALSE;
+  }
+  
+  std::shared_ptr<CameraSet> cameras;
+  {
+    PWaitAndSignal lock(m_camerasMutex);
+    cameras = m_activeCameras;
+  }
+  
+  if (!cameras || cameras->empty()) {
+    FillBlackFrame(buffer, m_outputWidth, m_outputHeight);
+    if (bytesReturned) {
+      *bytesReturned = GetMaxFrameBytes();
+    }
+    return TRUE;
+  }
+  
+  for (auto& cam : *cameras) {
+    if (!cam->device || cam->muted) {
+      continue;
+    }
+    if (!cam->device->IsCapturing() && m_isStarted) {
+      cam->device->Start();
+    }
+    if (cam->width == 0 || cam->height == 0) {
+      cam->width = cam->device->GetFrameWidth();
+      cam->height = cam->device->GetFrameHeight();
+    }
+    const PINDEX frameBytes = (cam->width * cam->height * 3) / 2;
+    if (frameBytes == 0) {
+      continue;
+    }
+    cam->frameBuffer.resize(frameBytes);
+    PINDEX capturedBytes = frameBytes;
+    if (cam->device->GetFrameDataNoDelay(cam->frameBuffer.data(), &capturedBytes) &&
+        capturedBytes == frameBytes) {
+      cam->lastFrameTime = PTime();
+    } else {
+      // Failed/partial frame: keep this tile black for this cycle.
+      cam->frameBuffer.clear();
+    }
+  }
+  
+  ComposeMosaicFrame(*cameras, buffer);
+  
+  if (bytesReturned) {
+    *bytesReturned = GetMaxFrameBytes();
+  }
+  
+  return TRUE;
+}
+
+void MosaicVideoInputDevice::UpdateDevices(const std::vector<CoreVideoDeviceEntry>& cfg)
+{
+  PWaitAndSignal lock(m_camerasMutex);
+  
+  PTRACE(1, "H323ASKW\tMosaicVideo: Updating devices - " << cfg.size() << " cameras");
+  
+  auto newCameras = OpenCameras(cfg);
+  m_activeCameras = newCameras;
+  
+  PTRACE(1, "H323ASKW\tMosaicVideo: Device update complete");
+}
+
+size_t MosaicVideoInputDevice::GetDeviceCount() const
+{
+  PWaitAndSignal lock(m_camerasMutex);
+  return m_activeCameras ? m_activeCameras->size() : 0;
+}
+
+void MosaicVideoInputDevice::ComposeMosaicFrame(const CameraSet& cameras, BYTE* outputBuffer)
+{
+  int rows, cols;
+  CalculateLayout(cameras.size(), rows, cols);
+  if (rows == 0 || cols == 0) {
+    FillBlackFrame(outputBuffer, m_outputWidth, m_outputHeight);
+    return;
+  }
+  
+  FillBlackFrame(outputBuffer, m_outputWidth, m_outputHeight);
+  
+  int idx = 0;
+  for (const auto& cam : cameras) {
+    if (idx >= rows * cols) {
+      break;
+    }
+    int row = idx / cols;
+    int col = idx % cols;
+    if (cam->muted || cam->frameBuffer.empty()) {
+      FillBlackTile(outputBuffer, m_outputWidth, m_outputHeight, row, col, rows, cols);
+    } else {
+      CopyTileToMosaic(cam->frameBuffer.data(),
+                       cam->width, cam->height,
+                       outputBuffer, m_outputWidth, m_outputHeight,
+                       row, col, rows, cols);
+    }
+    ++idx;
+  }
+}
+
+void MosaicVideoInputDevice::CalculateLayout(size_t cameraCount, int& rows, int& cols)
+{
+  switch (cameraCount) {
+    case 0:
+      rows = 0; cols = 0; break;
+    case 1:
+      rows = 1; cols = 1; break;
+    case 2:
+      rows = 1; cols = 2; break;
+    case 3:
+    case 4:
+    default:
+      rows = 2; cols = 2; break;
+  }
+}
+
+void MosaicVideoInputDevice::CopyTileToMosaic(
+    const BYTE* srcYUV, unsigned srcW, unsigned srcH,
+    BYTE* dstYUV, unsigned dstW, unsigned dstH,
+    int row, int col, int rows, int cols)
+{
+  if (!srcYUV || srcW == 0 || srcH == 0 || rows == 0 || cols == 0) {
+    return;
+  }
+  
+  unsigned tileW = dstW / cols;
+  unsigned tileH = dstH / rows;
+  if (tileW == 0 || tileH == 0) {
+    return;
+  }
+
+  // Keep source aspect ratio (letterbox/pillarbox inside each tile).
+  unsigned copyW = tileW;
+  unsigned copyH = tileH;
+  const uint64_t lhs = static_cast<uint64_t>(srcW) * tileH;
+  const uint64_t rhs = static_cast<uint64_t>(srcH) * tileW;
+  if (lhs > rhs) {
+    copyH = static_cast<unsigned>((static_cast<uint64_t>(tileW) * srcH) / srcW);
+  } else if (lhs < rhs) {
+    copyW = static_cast<unsigned>((static_cast<uint64_t>(tileH) * srcW) / srcH);
+  }
+  if (copyW == 0 || copyH == 0) {
+    return;
+  }
+
+  // YUV420 requires 2x2 chroma sampling alignment.
+  if ((copyW & 1u) && copyW > 1) {
+    --copyW;
+  }
+  if ((copyH & 1u) && copyH > 1) {
+    --copyH;
+  }
+  if (copyW == 0 || copyH == 0) {
+    return;
+  }
+
+  unsigned offsetX = col * tileW + (tileW - copyW) / 2;
+  unsigned offsetY = row * tileH + (tileH - copyH) / 2;
+  if (offsetX & 1u) {
+    if (offsetX + copyW + 1 <= (col + 1) * tileW) {
+      ++offsetX;
+    } else if (offsetX > col * tileW) {
+      --offsetX;
+    }
+  }
+  if (offsetY & 1u) {
+    if (offsetY + copyH + 1 <= (row + 1) * tileH) {
+      ++offsetY;
+    } else if (offsetY > row * tileH) {
+      --offsetY;
+    }
+  }
+
+  const BYTE* srcY = srcYUV;
+  const BYTE* srcU = srcY + (srcW * srcH);
+  const BYTE* srcV = srcU + (srcW / 2) * (srcH / 2);
+  
+  BYTE* dstY = dstYUV + offsetY * dstW + offsetX;
+  BYTE* dstUPlane = dstYUV + (dstW * dstH);
+  BYTE* dstVPlane = dstUPlane + (dstW / 2) * (dstH / 2);
+  BYTE* dstU = dstUPlane + (offsetY / 2) * (dstW / 2) + (offsetX / 2);
+  BYTE* dstV = dstVPlane + (offsetY / 2) * (dstW / 2) + (offsetX / 2);
+  
+  // Y plane (nearest-neighbor scaling, aspect-ratio preserved)
+  for (unsigned y = 0; y < copyH; ++y) {
+    unsigned srcYPos = (y * srcH) / copyH;
+    const BYTE* srcRow = srcY + srcYPos * srcW;
+    BYTE* dstRow = dstY + y * dstW;
+    for (unsigned x = 0; x < copyW; ++x) {
+      unsigned srcXPos = (x * srcW) / copyW;
+      dstRow[x] = srcRow[srcXPos];
+    }
+  }
+  
+  // U/V planes (nearest-neighbor scaling, 1/2 resolution)
+  unsigned copyW2 = copyW / 2;
+  unsigned copyH2 = copyH / 2;
+  unsigned srcW2 = srcW / 2;
+  unsigned srcH2 = srcH / 2;
+  
+  if (copyW2 == 0 || copyH2 == 0 || srcW2 == 0 || srcH2 == 0) {
+    return;
+  }
+  
+  for (unsigned y = 0; y < copyH2; ++y) {
+    unsigned srcYPos = (y * srcH2) / copyH2;
+    const BYTE* srcURow = srcU + srcYPos * srcW2;
+    const BYTE* srcVRow = srcV + srcYPos * srcW2;
+    BYTE* dstURow = dstU + y * (dstW / 2);
+    BYTE* dstVRow = dstV + y * (dstW / 2);
+    for (unsigned x = 0; x < copyW2; ++x) {
+      unsigned srcXPos = (x * srcW2) / copyW2;
+      dstURow[x] = srcURow[srcXPos];
+      dstVRow[x] = srcVRow[srcXPos];
+    }
+  }
+}
+
+void MosaicVideoInputDevice::FillBlackTile(
+    BYTE* dstYUV, unsigned dstW, unsigned dstH,
+    int row, int col, int rows, int cols)
+{
+  if (!dstYUV || rows == 0 || cols == 0) {
+    return;
+  }
+  
+  unsigned tileW = dstW / cols;
+  unsigned tileH = dstH / rows;
+  unsigned offsetX = col * tileW;
+  unsigned offsetY = row * tileH;
+  
+  BYTE* dstY = dstYUV + offsetY * dstW + offsetX;
+  BYTE* dstU = dstYUV + (dstW * dstH) + (offsetY / 2) * (dstW / 2) + (offsetX / 2);
+  BYTE* dstV = dstU + (dstW / 2) * (dstH / 2);
+  
+  for (unsigned y = 0; y < tileH; ++y) {
+    memset(dstY + y * dstW, 16, tileW);
+  }
+  
+  unsigned tileW2 = tileW / 2;
+  unsigned tileH2 = tileH / 2;
+  for (unsigned y = 0; y < tileH2; ++y) {
+    memset(dstU + y * (dstW / 2), 128, tileW2);
+    memset(dstV + y * (dstW / 2), 128, tileW2);
+  }
+}
+
+void MosaicVideoInputDevice::FillBlackFrame(BYTE* buffer, unsigned width, unsigned height)
+{
+  if (!buffer || width == 0 || height == 0) {
+    return;
+  }
+  const PINDEX ySize = width * height;
+  const PINDEX uvSize = ySize / 4;
+  memset(buffer, 16, ySize);
+  memset(buffer + ySize, 128, uvSize);
+  memset(buffer + ySize + uvSize, 128, uvSize);
+}
+
+std::shared_ptr<MosaicVideoInputDevice::CameraSet>
+MosaicVideoInputDevice::OpenCameras(const std::vector<CoreVideoDeviceEntry>& entries)
+{
+  auto cameras = std::make_shared<CameraSet>();
+  cameras->reserve(entries.size());
+  
+#if defined(__APPLE__)
+  LoadVideoPlugins();
+#endif
+  
+  for (const auto& entry : entries) {
+    auto handle = std::make_shared<CameraHandle>();
+    handle->name = entry.name;
+    handle->muted = entry.muted;
+    
+    PVideoInputDevice* device = nullptr;
+    
+#if defined(__APPLE__)
+    PStringArray drivers;
+    drivers.AppendString("MacOS");
+    drivers.AppendString("AVFoundation");
+    drivers.AppendString("QTKit");
+    for (PINDEX d = 0; d < drivers.GetSize(); ++d) {
+      device = PVideoInputDevice::CreateOpenedDevice(drivers[d], entry.name, TRUE);
+      if (device && device->IsOpen()) {
+        break;
+      }
+      if (device) {
+        delete device;
+        device = nullptr;
+      }
+    }
+#elif defined(_WIN32)
+    device = PVideoInputDevice::CreateOpenedDevice("DirectShow", entry.name, TRUE);
+#elif defined(__linux__)
+    device = PVideoInputDevice::CreateOpenedDevice("V4L2", entry.name, TRUE);
+#endif
+    
+    if (!device) {
+      device = PVideoInputDevice::CreateDeviceByName(entry.name);
+      if (device && !device->IsOpen()) {
+        if (!device->Open(entry.name, TRUE)) {
+          delete device;
+          device = nullptr;
+        }
+      }
+    }
+    
+    if (device && device->IsOpen()) {
+      device->SetColourFormatConverter("YUV420P");
+      device->SetFrameRate(m_frameRate);
+      handle->device = device;
+      handle->width = device->GetFrameWidth();
+      handle->height = device->GetFrameHeight();
+      
+      PTRACE(3, "H323ASKW\tOpened camera: " << entry.name
+             << " (" << handle->width << "x" << handle->height << ")");
+      cameras->push_back(handle);
+    } else {
+      PTRACE(2, "H323ASKW\tFailed to open camera: " << entry.name);
+      if (device) {
+        delete device;
+      }
+    }
+  }
+  
+  return cameras;
 }

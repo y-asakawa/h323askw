@@ -26,6 +26,7 @@
 #include <QHBoxLayout>
 #include <QSplitter>
 #include <QPushButton>
+#include <QDialog>
 #include <QLineEdit>
 #include <QCheckBox>
 #include <QComboBox>
@@ -80,12 +81,26 @@ struct AudioDeviceEntry {
 };
 
 /**
+ * @struct VideoDeviceEntry
+ * @brief 単一カメラデバイスのエントリ（UI側）
+ */
+struct VideoDeviceEntry {
+    QString name;        // デバイス名
+    bool muted;          // デバイス個別のミュート状態
+    
+    VideoDeviceEntry() : muted(false) {}
+    VideoDeviceEntry(const QString& n, bool m = false)
+        : name(n), muted(m) {}
+};
+
+/**
  * @struct AudioDeviceSelection
  * @brief UI全体の音声デバイス選択状態
  */
 struct AudioDeviceSelection {
     QVector<AudioDeviceEntry> inputDevices;   // マイク（最大4台）
     QVector<AudioDeviceEntry> outputDevices;  // スピーカー（最大4台）
+    QVector<VideoDeviceEntry> cameraDevices;  // カメラ（最大4台）
     
     AudioDeviceSelection() {}
 };
@@ -422,6 +437,42 @@ private:
     QtAudioSpectrumWidget* m_spectrum;   // 旧式ビジュアライザー
 };
 
+/**
+ * @class VideoDeviceRowWidget
+ * @brief 単一のカメラデバイス行を表すウィジェット
+ */
+class VideoDeviceRowWidget : public QWidget
+{
+    Q_OBJECT
+
+public:
+    explicit VideoDeviceRowWidget(const QStringList& availableDevices,
+                                  QWidget* parent = nullptr);
+    virtual ~VideoDeviceRowWidget();
+
+    VideoDeviceEntry getDeviceEntry() const;
+    void setDeviceEntry(const VideoDeviceEntry& entry);
+    void updateDeviceList(const QStringList& devices);
+    void setRemoveButtonVisible(bool show);
+    void setMuteButtonVisible(bool show);
+
+signals:
+    void deviceChanged();
+    void removeRequested(VideoDeviceRowWidget* widget);
+
+private slots:
+    void onDeviceComboChanged(int index);
+    void onMuteToggled(bool checked);
+    void onRemoveClicked();
+
+private:
+    void setupUI(const QStringList& availableDevices);
+
+    QComboBox* m_deviceCombo;
+    QCheckBox* m_muteCheckbox;
+    QPushButton* m_removeButton;
+};
+
 // ==================== End of Phase 1 Audio UI ====================
 
 /**
@@ -601,7 +652,10 @@ private slots:
     void onMicDeviceChanged(int index);
     void onSpeakerDeviceChanged(int index);
     void onCameraDeviceChanged(int index);
+    void onAddCameraClicked();
+    void onCameraRowRemoveRequested(VideoDeviceRowWidget* widget);
     void onSeparateWindowsClicked();
+    void onMultiDeviceWindowClicked();
     void onContentWindowClicked();
     void onContentSendClicked();
     void onRemoteWindowClosed();
@@ -617,6 +671,7 @@ private:
     void clearAddressHistory();
     void appendClearHistoryItem();
     bool isClearHistoryItem(int index) const;
+    void setupMultiDeviceWindow();
 
     // ==================== Phase 1: Multi-Device Audio UI Private Methods ====================
     
@@ -624,6 +679,7 @@ private:
      * @brief マルチデバイスUIをセットアップ（setupUI内で呼ばれる）
      */
     void setupMultiDeviceAudioUI(QVBoxLayout* mainLayout);
+    void setupMultiDeviceCameraUI(QVBoxLayout* mainLayout);
 
     /**
      * @brief 現在のオーディオデバイス設定を取得
@@ -656,11 +712,13 @@ private:
      * @param rows ウィジェット配列（m_micRows または m_speakerRows）
      */
     void updateDeviceRowControls(QVector<AudioDeviceRowWidget*>& rows);
+    void updateCameraRowControls();
 
     /**
      * @brief マルチデバイスパネルの高さを更新
      */
     void updateMultiDevicePanelHeight();
+    void removeCameraRow(VideoDeviceRowWidget* widget);
 
     // ==================== End of Phase 1 Audio UI Private Methods ====================
 
@@ -671,6 +729,7 @@ private:
     // ウィンドウ分離用
     QSplitter* m_videoSplitter;      // ビデオスプリッター
     QPushButton* m_separateButton;   // 分離/結合ボタン
+    QPushButton* m_multiDeviceButton; // マルチデバイス設定ウィンドウ表示ボタン
     bool m_windowsSeparated;         // 分離状態フラグ
 
     // コントロール
@@ -719,6 +778,12 @@ private:
     QPushButton* m_addSpeakerButton;               // スピーカー追加ボタン
     QTimer* m_audioVisualizerTimer;                // ビジュアライザー更新タイマー (75ms間隔)
     QScrollArea* m_multiDeviceScrollArea;          // マルチデバイススクロール領域
+    QDialog* m_multiDeviceWindow;                  // マルチデバイス設定ウィンドウ
+    
+    // マルチデバイスカメラ用UI
+    QVector<VideoDeviceRowWidget*> m_cameraRows;   // カメラ行ウィジェット配列
+    QVBoxLayout* m_cameraRowsLayout;               // カメラ行レイアウト
+    QPushButton* m_addCameraButton;                // カメラ追加ボタン
 
     // ==================== End of Phase 1 Audio UI Members ====================
 

@@ -41,12 +41,12 @@ constexpr int kGainSteps = 10;
 const int kDbTable[kGainSteps]   = {-12, -6, -3, 0, 3, 6, 9, 12, 15, 18};
 const double kLinTable[kGainSteps] = {0.25, 0.50, 0.71, 1.00, 1.41, 2.00, 2.82, 4.00, 5.62, 7.94};
 
-double DbToLinear(double db)
+[[maybe_unused]] double DbToLinear(double db)
 {
     return std::pow(10.0, db / 20.0);
 }
 
-double LinearToDb(double linear)
+[[maybe_unused]] double LinearToDb(double linear)
 {
     if (linear <= 0.0) {
         return -120.0;
@@ -1096,6 +1096,113 @@ void AudioDeviceRowWidget::resetSpectrum(size_t sampleCount, int sampleRate)
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// VideoDeviceRowWidget Implementation (Phase 2)
+///////////////////////////////////////////////////////////////////////////////
+
+VideoDeviceRowWidget::VideoDeviceRowWidget(const QStringList& availableDevices,
+                                           QWidget* parent)
+    : QWidget(parent)
+    , m_deviceCombo(nullptr)
+    , m_muteCheckbox(nullptr)
+    , m_removeButton(nullptr)
+{
+    setupUI(availableDevices);
+}
+
+VideoDeviceRowWidget::~VideoDeviceRowWidget()
+{
+    // Qt親子関係で自動削除されるため、明示的なdeleteは不要
+}
+
+void VideoDeviceRowWidget::setupUI(const QStringList& availableDevices)
+{
+    QHBoxLayout* layout = new QHBoxLayout(this);
+    layout->setContentsMargins(4, 2, 4, 2);
+    layout->setSpacing(8);
+
+    m_deviceCombo = new QComboBox(this);
+    m_deviceCombo->addItems(availableDevices);
+    m_deviceCombo->setMinimumWidth(240);
+    layout->addWidget(m_deviceCombo);
+
+    m_muteCheckbox = new QCheckBox("Mute", this);
+    layout->addWidget(m_muteCheckbox);
+
+    m_removeButton = new QPushButton("×", this);
+    m_removeButton->setMaximumWidth(30);
+    m_removeButton->setToolTip("Remove this camera");
+    layout->addWidget(m_removeButton);
+
+    layout->addStretch();
+
+    connect(m_deviceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &VideoDeviceRowWidget::onDeviceComboChanged);
+    connect(m_muteCheckbox, &QCheckBox::toggled,
+            this, &VideoDeviceRowWidget::onMuteToggled);
+    connect(m_removeButton, &QPushButton::clicked,
+            this, &VideoDeviceRowWidget::onRemoveClicked);
+}
+
+VideoDeviceEntry VideoDeviceRowWidget::getDeviceEntry() const
+{
+    VideoDeviceEntry entry;
+    entry.name = m_deviceCombo->currentText();
+    entry.muted = m_muteCheckbox ? m_muteCheckbox->isChecked() : false;
+    return entry;
+}
+
+void VideoDeviceRowWidget::setDeviceEntry(const VideoDeviceEntry& entry)
+{
+    int index = m_deviceCombo->findText(entry.name);
+    if (index >= 0) {
+        m_deviceCombo->setCurrentIndex(index);
+    }
+    if (m_muteCheckbox) {
+        m_muteCheckbox->setChecked(entry.muted);
+    }
+}
+
+void VideoDeviceRowWidget::updateDeviceList(const QStringList& devices)
+{
+    QString currentDevice = m_deviceCombo->currentText();
+    m_deviceCombo->clear();
+    m_deviceCombo->addItems(devices);
+    int index = m_deviceCombo->findText(currentDevice);
+    if (index >= 0) {
+        m_deviceCombo->setCurrentIndex(index);
+    }
+}
+
+void VideoDeviceRowWidget::setRemoveButtonVisible(bool show)
+{
+    m_removeButton->setVisible(show);
+}
+
+void VideoDeviceRowWidget::setMuteButtonVisible(bool show)
+{
+    if (m_muteCheckbox) {
+        m_muteCheckbox->setVisible(show);
+    }
+}
+
+void VideoDeviceRowWidget::onDeviceComboChanged(int index)
+{
+    Q_UNUSED(index);
+    emit deviceChanged();
+}
+
+void VideoDeviceRowWidget::onMuteToggled(bool checked)
+{
+    Q_UNUSED(checked);
+    emit deviceChanged();
+}
+
+void VideoDeviceRowWidget::onRemoveClicked()
+{
+    emit removeRequested(this);
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // QtVideoMainWindow Implementation
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -1105,6 +1212,7 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_remoteVideo(nullptr)
     , m_videoSplitter(nullptr)
     , m_separateButton(nullptr)
+    , m_multiDeviceButton(nullptr)
     , m_windowsSeparated(false)
     , m_addressCombo(nullptr)
     , m_connectButton(nullptr)
@@ -1114,15 +1222,15 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_contentButton(nullptr)
     , m_contentSendButton(nullptr)
     , m_gainRowWidget(nullptr)
-    , m_micCombo(nullptr)
-    , m_speakerCombo(nullptr)
-    , m_cameraCombo(nullptr)
     , m_gainSlider(nullptr)
     , m_gainValueLabel(nullptr)
     , m_spkGainSlider(nullptr)
     , m_spkGainValueLabel(nullptr)
     , m_baseMicGainIndex(3)
     , m_baseSpeakerGainIndex(3)
+    , m_micCombo(nullptr)
+    , m_speakerCombo(nullptr)
+    , m_cameraCombo(nullptr)
     , m_statusLabel(nullptr)
     , m_localSpectrum(nullptr)
     , m_remoteSpectrum(nullptr)
@@ -1134,11 +1242,14 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_addSpeakerButton(nullptr)        // Phase 1
     , m_audioVisualizerTimer(nullptr)    // Phase 1
     , m_multiDeviceScrollArea(nullptr)   // Phase 1
+    , m_multiDeviceWindow(nullptr)
+    , m_cameraRowsLayout(nullptr)
+    , m_addCameraButton(nullptr)
 {
     PTRACE(0, "QtVideo\t🟨 QtVideoMainWindow constructor ENTER");
     
     setWindowTitle("H323ASKW - Video Client");
-    setMinimumSize(1000, 850);  // Phase 1: マルチデバイスUI対応で縦長に
+    setMinimumSize(1000, 700);
 
     setupUI();
     setupConnections();
@@ -1337,6 +1448,11 @@ void QtVideoMainWindow::setupUI()
     m_separateButton = new QPushButton("↗ Separate", this);
     m_separateButton->setToolTip("Separate local and remote video into different windows");
     controlLayout->addWidget(m_separateButton);
+
+    // マルチデバイス設定ウィンドウ表示ボタン
+    m_multiDeviceButton = new QPushButton("Multi-Device", this);
+    m_multiDeviceButton->setToolTip("Show Multi-Device Audio and Multi-Camera configuration");
+    controlLayout->addWidget(m_multiDeviceButton);
     
     // コンテンツ再表示ボタン
     m_contentButton = new QPushButton("Content", this);
@@ -1374,13 +1490,31 @@ void QtVideoMainWindow::setupUI()
 
     mainLayout->addLayout(deviceLayout);
 
-    // ==================== Phase 1: Multi-Device Audio UI Setup ====================
-    setupMultiDeviceAudioUI(mainLayout);
-    // ==================== End of Phase 1 Audio UI Setup ====================
+    setupMultiDeviceWindow();
 
     // ステータスバー
     m_statusLabel = new QLabel("Ready", this);
     statusBar()->addPermanentWidget(m_statusLabel);
+}
+
+void QtVideoMainWindow::setupMultiDeviceWindow()
+{
+    if (m_multiDeviceWindow != nullptr) {
+        return;
+    }
+
+    m_multiDeviceWindow = new QDialog(this);
+    m_multiDeviceWindow->setWindowFlags(Qt::Window);
+    m_multiDeviceWindow->setWindowTitle("Multi-Device Configuration - H323ASKW");
+    m_multiDeviceWindow->setMinimumSize(1180, 560);
+    m_multiDeviceWindow->resize(1260, 680);
+
+    QVBoxLayout* layout = new QVBoxLayout(m_multiDeviceWindow);
+    layout->setContentsMargins(8, 8, 8, 8);
+    layout->setSpacing(8);
+
+    setupMultiDeviceAudioUI(layout);
+    setupMultiDeviceCameraUI(layout);
 }
 
 void QtVideoMainWindow::setupConnections()
@@ -1397,6 +1531,7 @@ void QtVideoMainWindow::setupConnections()
 
     // ウィンドウ分離ボタン
     connect(m_separateButton, &QPushButton::clicked, this, &QtVideoMainWindow::onSeparateWindowsClicked);
+    connect(m_multiDeviceButton, &QPushButton::clicked, this, &QtVideoMainWindow::onMultiDeviceWindowClicked);
     // コンテンツ再表示ボタン
     connect(m_contentButton, &QPushButton::clicked, this, &QtVideoMainWindow::onContentWindowClicked);
     // コンテンツ送信ボタン
@@ -1448,6 +1583,12 @@ void QtVideoMainWindow::setupConnections()
     connect(m_addSpeakerButton, &QPushButton::clicked, this, &QtVideoMainWindow::onAddSpeakerClicked);
     PTRACE(0, "QtVideo\t🟦 Phase 1 signals connected successfully");
     // ==================== End of Phase 1 Audio UI Connections ====================
+    
+    // ==================== Phase 2: Multi-Device Camera UI Connections ====================
+    if (m_addCameraButton) {
+        connect(m_addCameraButton, &QPushButton::clicked, this, &QtVideoMainWindow::onAddCameraClicked);
+    }
+    // ==================== End of Phase 2 Camera UI Connections ====================
 }
 
 void QtVideoMainWindow::populateDeviceLists()
@@ -1474,6 +1615,12 @@ void QtVideoMainWindow::populateDeviceLists()
     setItems(m_micCombo, micList, "Default Microphone");
     setItems(m_speakerCombo, speakerList, "Default Speaker");
     setItems(m_cameraCombo, cameraList, "Default Camera");
+    for (auto* row : m_cameraRows) {
+        if (row) {
+            row->updateDeviceList(cameraList);
+        }
+    }
+    updateCameraRowControls();
 
     QT_TRACE(1, "Device lists populated (Mic=" << micList.size()
              << ", Spk=" << speakerList.size()
@@ -1810,7 +1957,10 @@ void QtVideoMainWindow::onCameraDeviceChanged(int index)
     Q_UNUSED(index);
     QString device = m_cameraCombo->currentText();
     QT_TRACE(1, "Camera device changed: " << device.toStdString());
-    QtVideoManager::instance().applyDeviceSelection(m_micCombo->currentText(), m_speakerCombo->currentText(), device);
+    if (m_cameraRows.isEmpty()) {
+        QtVideoManager::instance().applyDeviceSelection(m_micCombo->currentText(), m_speakerCombo->currentText(), device);
+    }
+    onDeviceRowChanged();  // マルチカメラ設定も更新
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -2718,12 +2868,14 @@ void QtVideoManager::applyAudioDeviceSelection(const AudioDeviceSelection& selec
     PTRACE(0, "QtVideo\t🟣 QtVideoManager::applyAudioDeviceSelection() ENTER");
     PTRACE(0, "QtVideo\t🟣   inputDevices: " << selection.inputDevices.size());
     PTRACE(0, "QtVideo\t🟣   outputDevices: " << selection.outputDevices.size());
+    PTRACE(0, "QtVideo\t🟣   cameraDevices: " << selection.cameraDevices.size());
     
     if (m_applyAudioDeviceSelectionCb) {
         PTRACE(0, "QtVideo\t🟣 Callback exists - calling it...");
         QT_TRACE(1, "Calling ApplyAudioDeviceSelectionCallback: "
                  << selection.inputDevices.size() << " mics, "
-                 << selection.outputDevices.size() << " speakers");
+                 << selection.outputDevices.size() << " speakers, "
+                 << selection.cameraDevices.size() << " cameras");
         m_applyAudioDeviceSelectionCb(selection, m_applyAudioDeviceSelectionUserData);
         PTRACE(0, "QtVideo\t🟣 Callback returned");
     } else {
@@ -3067,6 +3219,28 @@ void QtVideoMainWindow::onSeparateWindowsClicked()
     }
 }
 
+void QtVideoMainWindow::onMultiDeviceWindowClicked()
+{
+    if (!m_multiDeviceWindow) {
+        return;
+    }
+
+    updateMultiDevicePanelHeight();
+    if (m_multiDeviceWindow->width() < m_multiDeviceWindow->minimumWidth()) {
+        m_multiDeviceWindow->resize(m_multiDeviceWindow->minimumWidth(),
+                                    m_multiDeviceWindow->height());
+    }
+
+    if (!m_multiDeviceWindow->isVisible()) {
+        QPoint mainPos = this->pos();
+        m_multiDeviceWindow->move(mainPos.x() + 40, mainPos.y() + 40);
+    }
+
+    m_multiDeviceWindow->show();
+    m_multiDeviceWindow->raise();
+    m_multiDeviceWindow->activateWindow();
+}
+
 void QtVideoMainWindow::onContentWindowClicked()
 {
     QT_TRACE(1, "Content button clicked - requesting content window");
@@ -3277,10 +3451,12 @@ void QtVideoMainWindow::setupMultiDeviceAudioUI(QVBoxLayout* mainLayout)
     
     // マルチデバイスオーディオ設定パネル
     QGroupBox* multiDeviceBox = new QGroupBox("Multi-Device Audio Configuration (Phase 1)", this);
+    multiDeviceBox->setMinimumWidth(1120);
     QVBoxLayout* multiDeviceLayout = new QVBoxLayout(multiDeviceBox);
 
     // 横並びレイアウト: 左=マイク、右=スピーカー
     QHBoxLayout* deviceColumnsLayout = new QHBoxLayout();
+    deviceColumnsLayout->setSpacing(12);
     
     // ========== 左列: マイク設定 ==========
     QVBoxLayout* micColumn = new QVBoxLayout();
@@ -3325,6 +3501,8 @@ void QtVideoMainWindow::setupMultiDeviceAudioUI(QVBoxLayout* mainLayout)
     speakerColumn->addStretch();  // 下に余白
     
     deviceColumnsLayout->addLayout(speakerColumn);
+    deviceColumnsLayout->setStretch(0, 1);
+    deviceColumnsLayout->setStretch(2, 1);
     
     multiDeviceLayout->addLayout(deviceColumnsLayout);
 
@@ -3337,11 +3515,32 @@ void QtVideoMainWindow::setupMultiDeviceAudioUI(QVBoxLayout* mainLayout)
     scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     scrollArea->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+    scrollArea->setMinimumWidth(1120);
     m_multiDeviceScrollArea = scrollArea;
     
     mainLayout->addWidget(scrollArea);
     
     PTRACE(0, "QtVideo\t🔵 setupMultiDeviceAudioUI() EXIT - UI created successfully");
+}
+
+void QtVideoMainWindow::setupMultiDeviceCameraUI(QVBoxLayout* mainLayout)
+{
+    QGroupBox* cameraBox = new QGroupBox("Multi-Camera Configuration", this);
+    QVBoxLayout* cameraLayout = new QVBoxLayout(cameraBox);
+
+    QLabel* cameraTitle = new QLabel("<b>Cameras (Up to 4)</b>", this);
+    cameraLayout->addWidget(cameraTitle);
+
+    m_cameraRowsLayout = new QVBoxLayout();
+    m_cameraRowsLayout->setSpacing(4);
+    cameraLayout->addLayout(m_cameraRowsLayout);
+
+    m_addCameraButton = new QPushButton("+ Add Camera", this);
+    m_addCameraButton->setMaximumWidth(150);
+    cameraLayout->addWidget(m_addCameraButton, 0, Qt::AlignLeft);
+
+    cameraLayout->addStretch();
+    mainLayout->addWidget(cameraBox);
 }
 
 void QtVideoMainWindow::onAddMicClicked()
@@ -3420,6 +3619,36 @@ void QtVideoMainWindow::onAddSpeakerClicked()
     updateMultiDevicePanelHeight();
     onDeviceRowChanged();  // 追加直後に設定を反映
 }
+
+void QtVideoMainWindow::onAddCameraClicked()
+{
+    if (m_cameraRows.size() >= 4) {
+        QMessageBox::warning(this, "Limit Reached", "Maximum 4 cameras allowed.");
+        return;
+    }
+
+    QStringList devices = getAvailableDevices(QT_DEVICE_TYPE_CAMERA);
+    VideoDeviceRowWidget* row = new VideoDeviceRowWidget(devices, this);
+
+    connect(row, &VideoDeviceRowWidget::removeRequested,
+            this, &QtVideoMainWindow::onCameraRowRemoveRequested);
+    connect(row, &VideoDeviceRowWidget::deviceChanged,
+            this, &QtVideoMainWindow::onDeviceRowChanged);
+
+    row->setRemoveButtonVisible(m_cameraRows.size() > 0);
+    m_cameraRowsLayout->addWidget(row);
+    m_cameraRows.append(row);
+
+    updateCameraRowControls();
+    onDeviceRowChanged();
+}
+
+void QtVideoMainWindow::onCameraRowRemoveRequested(VideoDeviceRowWidget* widget)
+{
+    removeCameraRow(widget);
+    updateCameraRowControls();
+    onDeviceRowChanged();
+}
 void QtVideoMainWindow::onDeviceRowRemoveRequested(AudioDeviceRowWidget* widget)
 {
     // マイクかスピーカーか判定
@@ -3449,11 +3678,16 @@ void QtVideoMainWindow::onDeviceRowChanged()
     
     AudioDeviceSelection selection = getAudioDeviceSelection();
     PTRACE(0, "QtVideo\tDevice change: " << selection.inputDevices.size() << " mics, "
-             << selection.outputDevices.size() << " speakers");
+             << selection.outputDevices.size() << " speakers, "
+             << selection.cameraDevices.size() << " cameras");
     
     // デバイス内容をログ出力
     for (size_t i = 0; i < selection.inputDevices.size(); i++) {
         PTRACE(0, "QtVideo\t  Input[" << i << "]: " << selection.inputDevices[i].name.toStdString());
+    }
+    for (size_t i = 0; i < selection.cameraDevices.size(); i++) {
+        PTRACE(0, "QtVideo\t  Camera[" << i << "]: " << selection.cameraDevices[i].name.toStdString()
+               << (selection.cameraDevices[i].muted ? " (muted)" : ""));
     }
     
     // QtVideoManager経由でバックエンドに適用
@@ -3641,6 +3875,7 @@ AudioDeviceSelection QtVideoMainWindow::getAudioDeviceSelection() const
 
     QSet<QString> seenInputs;
     QSet<QString> seenOutputs;
+    QSet<QString> seenCameras;
 
     if (m_micCombo) {
         const QString name = m_micCombo->currentText();
@@ -3674,6 +3909,24 @@ AudioDeviceSelection QtVideoMainWindow::getAudioDeviceSelection() const
         }
     }
 
+    if (m_cameraRows.isEmpty()) {
+        if (m_cameraCombo) {
+            const QString name = m_cameraCombo->currentText();
+            if (!name.isEmpty()) {
+                selection.cameraDevices.append(VideoDeviceEntry(name, false));
+                seenCameras.insert(name);
+            }
+        }
+    } else {
+        for (const VideoDeviceRowWidget* row : m_cameraRows) {
+            VideoDeviceEntry entry = row->getDeviceEntry();
+            if (!entry.name.isEmpty() && !seenCameras.contains(entry.name)) {
+                selection.cameraDevices.append(entry);
+                seenCameras.insert(entry.name);
+            }
+        }
+    }
+
     return selection;
 }
 
@@ -3689,6 +3942,12 @@ void QtVideoMainWindow::setAudioDeviceSelection(const AudioDeviceSelection& sele
     while (m_speakerRows.size() > 0) {
         AudioDeviceRowWidget* row = m_speakerRows.takeLast();
         m_speakerRowsLayout->removeWidget(row);
+        row->deleteLater();
+    }
+
+    while (m_cameraRows.size() > 0) {
+        VideoDeviceRowWidget* row = m_cameraRows.takeLast();
+        m_cameraRowsLayout->removeWidget(row);
         row->deleteLater();
     }
 
@@ -3713,13 +3972,25 @@ void QtVideoMainWindow::setAudioDeviceSelection(const AudioDeviceSelection& sele
         }
     }
 
+    for (const VideoDeviceEntry& entry : selection.cameraDevices) {
+        if (m_cameraCombo && entry.name == m_cameraCombo->currentText()) {
+            continue;
+        }
+        onAddCameraClicked();
+        if (!m_cameraRows.isEmpty()) {
+            m_cameraRows.last()->setDeviceEntry(entry);
+        }
+    }
+
     updateDeviceRowControls(m_micRows);
     updateDeviceRowControls(m_speakerRows);
+    updateCameraRowControls();
     updateMultiDevicePanelHeight();
 
     QT_TRACE(2, "Audio device selection applied: "
              << selection.inputDevices.size() << " mics, "
-             << selection.outputDevices.size() << " speakers");
+             << selection.outputDevices.size() << " speakers, "
+             << selection.cameraDevices.size() << " cameras");
 }
 
 QStringList QtVideoMainWindow::getAvailableDevices(int deviceType)
@@ -3776,6 +4047,28 @@ void QtVideoMainWindow::updateMultiDevicePanelHeight()
     height = qBound(220, height, 520);
     m_multiDeviceScrollArea->setMinimumHeight(height);
     m_multiDeviceScrollArea->setMaximumHeight(520);
+}
+
+void QtVideoMainWindow::updateCameraRowControls()
+{
+    for (int i = 0; i < m_cameraRows.size(); ++i) {
+        if (m_cameraRows[i]) {
+            m_cameraRows[i]->setRemoveButtonVisible(m_cameraRows.size() > 1);
+        }
+    }
+    if (m_addCameraButton) {
+        m_addCameraButton->setEnabled(m_cameraRows.size() < 4);
+    }
+}
+
+void QtVideoMainWindow::removeCameraRow(VideoDeviceRowWidget* widget)
+{
+    int index = m_cameraRows.indexOf(widget);
+    if (index < 0) {
+        return;
+    }
+    m_cameraRows.removeAt(index);
+    widget->deleteLater();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -100,6 +100,7 @@ endif
 CLEAN_FILES += PWL*
 
 STDCCFLAGS += -Wno-unused-variable
+STDCCFLAGS += -Wno-inconsistent-missing-override
 
 PKG_CONFIG ?= $(shell which pkg-config 2>/dev/null)
 
