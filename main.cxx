@@ -62,7 +62,15 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cmath>
+#include <cstdio>
+#include <sstream>
 #include <dlfcn.h>  // 🎬 For dlsym (preview callback workaround)
+#ifndef _WIN32
+#include <unistd.h>
+#else
+#include <process.h>
+#define getpid _getpid
+#endif
 
 // ソフトウェアマイクゲイン（Qt スライダーから更新）: 1.0 = 0 dB
 std::atomic<double> g_inputGainLinear{1.0};
@@ -92,6 +100,492 @@ void UpdateSpectrumHistory(std::vector<int16_t>& history, const int16_t* data, s
   std::copy(data, data + count, history.end() - count);
 }
 }  // namespace
+
+class H323RecordingManager
+{
+public:
+  enum Mode {
+    LocalOnly,
+    RemoteOnly,
+    Mixed
+  };
+
+  explicit H323RecordingManager(MyH323Connection* connection)
+    : m_connection(connection)
+  {
+  }
+
+  ~H323RecordingManager()
+  {
+    Stop();
+  }
+
+  bool Start(const PString& filename, Mode mode)
+  {
+    Stop();
+
+    PWaitAndSignal lock(m_mutex);
+
+    m_mode = mode;
+    m_outputFile = filename;
+    m_videoFrames = 0;
+    m_audioSamples = 0;
+    m_videoWidth = 0;
+    m_videoHeight = 0;
+    m_audioSampleRate = 0;
+    m_loggedSizeMismatch = false;
+    m_loggedMixedAudioPolicy = false;
+    m_lastLocalVideo = CachedVideoFrame();
+    m_lastRemoteVideo = CachedVideoFrame();
+    m_mixedFrameBuffer.clear();
+
+    if (m_mode == Mixed) {
+      m_videoWidth = kMixedOutputWidth;
+      m_videoHeight = kMixedOutputHeight;
+      const size_t mixedBytes = static_cast<size_t>(m_videoWidth) * m_videoHeight * 3 / 2;
+      m_mixedFrameBuffer.resize(mixedBytes);
+      FillBlackFrame(m_mixedFrameBuffer.data(), m_videoWidth, m_videoHeight);
+    }
+
+    const long long ticks = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+    const int pid = static_cast<int>(::getpid());
+
+    m_videoRawFile = psprintf("/tmp/h323askw_record_%d_%lld_video.yuv", pid, ticks);
+    m_audioRawFile = psprintf("/tmp/h323askw_record_%d_%lld_audio.pcm", pid, ticks);
+
+    m_videoFp = std::fopen((const char*)m_videoRawFile, "wb");
+    if (m_videoFp == NULL) {
+      PTRACE(1, "H323ASKW\tRECORDING: failed to open raw video file " << m_videoRawFile);
+      std::remove((const char*)m_videoRawFile);
+      return false;
+    }
+
+    m_audioFp = std::fopen((const char*)m_audioRawFile, "wb");
+    if (m_audioFp == NULL) {
+      std::fclose(m_videoFp);
+      m_videoFp = NULL;
+      PTRACE(1, "H323ASKW\tRECORDING: failed to open raw audio file " << m_audioRawFile);
+      std::remove((const char*)m_videoRawFile);
+      std::remove((const char*)m_audioRawFile);
+      return false;
+    }
+
+    m_isRecording.store(true, std::memory_order_release);
+
+    PTRACE(1, "H323ASKW\tRECORDING: started output=" << m_outputFile
+           << " mode=" << ModeToString(m_mode)
+           << " rawVideo=" << m_videoRawFile
+           << " rawAudio=" << m_audioRawFile);
+    return true;
+  }
+
+  bool Stop()
+  {
+    PString outputFile;
+    PString videoRawFile;
+    PString audioRawFile;
+    unsigned videoWidth = 0;
+    unsigned videoHeight = 0;
+    unsigned audioSampleRate = 0;
+    uint64_t videoFrames = 0;
+    uint64_t audioSamples = 0;
+
+    {
+      PWaitAndSignal lock(m_mutex);
+
+      if (!m_isRecording.load(std::memory_order_acquire)) {
+        return true;
+      }
+
+      m_isRecording.store(false, std::memory_order_release);
+
+      if (m_videoFp != NULL) {
+        std::fclose(m_videoFp);
+        m_videoFp = NULL;
+      }
+      if (m_audioFp != NULL) {
+        std::fclose(m_audioFp);
+        m_audioFp = NULL;
+      }
+
+      outputFile = m_outputFile;
+      videoRawFile = m_videoRawFile;
+      audioRawFile = m_audioRawFile;
+      videoWidth = m_videoWidth;
+      videoHeight = m_videoHeight;
+      audioSampleRate = m_audioSampleRate;
+      videoFrames = m_videoFrames;
+      audioSamples = m_audioSamples;
+    }
+
+    const bool hasVideo = videoFrames > 0 && videoWidth > 0 && videoHeight > 0;
+    const bool hasAudio = audioSamples > 0 && audioSampleRate > 0;
+
+    if (!hasVideo && !hasAudio) {
+      std::remove((const char*)videoRawFile);
+      std::remove((const char*)audioRawFile);
+      PTRACE(1, "H323ASKW\tRECORDING: stopped (no captured media)");
+      return true;
+    }
+
+    std::ostringstream cmd;
+    cmd << "ffmpeg -y -loglevel error ";
+
+    if (hasVideo) {
+      cmd << "-f rawvideo -pix_fmt yuv420p "
+          << "-video_size " << videoWidth << "x" << videoHeight << " "
+          << "-framerate 30 "
+          << "-i " << ShellQuote((const char*)videoRawFile) << " ";
+    }
+
+    if (hasAudio) {
+      cmd << "-f s16le -ar " << audioSampleRate << " -ac 1 "
+          << "-i " << ShellQuote((const char*)audioRawFile) << " ";
+    }
+
+    if (hasVideo) {
+      cmd << "-c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p ";
+    }
+    if (hasAudio) {
+      cmd << "-c:a aac -b:a 128k ";
+    }
+    if (hasVideo && hasAudio) {
+      cmd << "-shortest ";
+    }
+    cmd << "-movflags +faststart " << ShellQuote((const char*)outputFile);
+
+    PTRACE(1, "H323ASKW\tRECORDING: finalizing MP4 via ffmpeg");
+    int rc = std::system(cmd.str().c_str());
+
+    if (rc == 0) {
+      std::remove((const char*)videoRawFile);
+      std::remove((const char*)audioRawFile);
+      PTRACE(1, "H323ASKW\tRECORDING: stopped output=" << outputFile
+             << " videoFrames=" << videoFrames
+             << " audioSamples=" << audioSamples
+             << " sampleRate=" << audioSampleRate);
+      return true;
+    }
+
+    PTRACE(1, "H323ASKW\tRECORDING: ffmpeg failed rc=" << rc
+           << " output=" << outputFile
+           << " raw files kept for debugging");
+    return false;
+  }
+
+  bool IsRecording() const
+  {
+    return m_isRecording.load(std::memory_order_acquire);
+  }
+
+  void WriteVideoFrame(const BYTE* yuvData, unsigned width, unsigned height, bool isLocal)
+  {
+    if (yuvData == NULL || width == 0 || height == 0) {
+      return;
+    }
+
+    PWaitAndSignal lock(m_mutex);
+    if (!m_isRecording.load(std::memory_order_acquire) || m_videoFp == NULL) {
+      return;
+    }
+
+    if (m_mode == Mixed) {
+      CachedVideoFrame& target = isLocal ? m_lastLocalVideo : m_lastRemoteVideo;
+      const size_t inputBytes = static_cast<size_t>(width) * height * 3 / 2;
+      target.width = width;
+      target.height = height;
+      target.data.resize(inputBytes);
+      std::memcpy(target.data.data(), yuvData, inputBytes);
+      target.valid = true;
+
+      ComposeMixedFrame();
+
+      const size_t frameBytes = static_cast<size_t>(m_videoWidth) * m_videoHeight * 3 / 2;
+      if (std::fwrite(m_mixedFrameBuffer.data(), 1, frameBytes, m_videoFp) != frameBytes) {
+        PTRACE(1, "H323ASKW\tRECORDING: failed to write mixed video frame");
+        return;
+      }
+
+      ++m_videoFrames;
+      return;
+    }
+
+    if (!ShouldCaptureVideo(isLocal)) {
+      return;
+    }
+
+    if (m_videoWidth == 0 || m_videoHeight == 0) {
+      m_videoWidth = width;
+      m_videoHeight = height;
+    }
+
+    if (width != m_videoWidth || height != m_videoHeight) {
+      if (!m_loggedSizeMismatch) {
+        PTRACE(1, "H323ASKW\tRECORDING: video size changed " << m_videoWidth << "x" << m_videoHeight
+               << " -> " << width << "x" << height << ", dropping mismatched frames");
+        m_loggedSizeMismatch = true;
+      }
+      return;
+    }
+
+    const size_t frameBytes = static_cast<size_t>(width) * height * 3 / 2;
+    if (std::fwrite(yuvData, 1, frameBytes, m_videoFp) != frameBytes) {
+      PTRACE(1, "H323ASKW\tRECORDING: failed to write video frame");
+      return;
+    }
+
+    ++m_videoFrames;
+  }
+
+  void WriteAudioFrame(const int16_t* pcmData, size_t samples, unsigned sampleRate, bool isLocal)
+  {
+    if (pcmData == NULL || samples == 0 || sampleRate == 0) {
+      return;
+    }
+
+    PWaitAndSignal lock(m_mutex);
+    if (!m_isRecording.load(std::memory_order_acquire) || m_audioFp == NULL || !ShouldCaptureAudio(isLocal)) {
+      return;
+    }
+
+    if (m_audioSampleRate == 0) {
+      m_audioSampleRate = sampleRate;
+    }
+
+    if (sampleRate != m_audioSampleRate) {
+      PTRACE(2, "H323ASKW\tRECORDING: sample rate changed "
+             << m_audioSampleRate << " -> " << sampleRate
+             << ", dropping audio chunk");
+      return;
+    }
+
+    const size_t bytes = samples * sizeof(int16_t);
+    if (std::fwrite(pcmData, 1, bytes, m_audioFp) != bytes) {
+      PTRACE(1, "H323ASKW\tRECORDING: failed to write audio frame");
+      return;
+    }
+
+    m_audioSamples += samples;
+  }
+
+private:
+  struct CachedVideoFrame {
+    std::vector<BYTE> data;
+    unsigned width = 0;
+    unsigned height = 0;
+    bool valid = false;
+  };
+
+  static constexpr unsigned kMixedOutputWidth = 1280;
+  static constexpr unsigned kMixedOutputHeight = 720;
+
+  static std::string ShellQuote(const std::string& text)
+  {
+    std::string out;
+    out.reserve(text.size() + 8);
+    out.push_back('\'');
+    for (size_t i = 0; i < text.size(); ++i) {
+      if (text[i] == '\'')
+        out += "'\\''";
+      else
+        out.push_back(text[i]);
+    }
+    out.push_back('\'');
+    return out;
+  }
+
+  bool ShouldCaptureVideo(bool isLocal) const
+  {
+    switch (m_mode) {
+      case LocalOnly:
+        return isLocal;
+      case RemoteOnly:
+        return !isLocal;
+      case Mixed:
+        return true;
+      default:
+        return true;
+    }
+  }
+
+  bool ShouldCaptureAudio(bool isLocal)
+  {
+    switch (m_mode) {
+      case LocalOnly:
+        return isLocal;
+      case RemoteOnly:
+        return !isLocal;
+      case Mixed:
+        if (!m_loggedMixedAudioPolicy) {
+          PTRACE(1, "H323ASKW\tRECORDING: mixed mode audio uses REMOTE stream");
+          m_loggedMixedAudioPolicy = true;
+        }
+        return !isLocal;
+      default:
+        return true;
+    }
+  }
+
+  static void FillBlackFrame(BYTE* buffer, unsigned width, unsigned height)
+  {
+    if (!buffer || width == 0 || height == 0) {
+      return;
+    }
+    const size_t ySize = static_cast<size_t>(width) * height;
+    const size_t uvSize = ySize / 4;
+    std::memset(buffer, 16, ySize);
+    std::memset(buffer + ySize, 128, uvSize);
+    std::memset(buffer + ySize + uvSize, 128, uvSize);
+  }
+
+  static void CopyIntoCell(const BYTE* srcYUV, unsigned srcW, unsigned srcH,
+                           BYTE* dstYUV, unsigned dstW, unsigned dstH,
+                           unsigned cellX, unsigned cellY, unsigned cellW, unsigned cellH)
+  {
+    if (!srcYUV || !dstYUV || srcW == 0 || srcH == 0 || dstW == 0 || dstH == 0 || cellW == 0 || cellH == 0) {
+      return;
+    }
+
+    unsigned copyW = cellW;
+    unsigned copyH = cellH;
+    const uint64_t lhs = static_cast<uint64_t>(srcW) * cellH;
+    const uint64_t rhs = static_cast<uint64_t>(srcH) * cellW;
+    if (lhs > rhs) {
+      copyH = static_cast<unsigned>((static_cast<uint64_t>(cellW) * srcH) / srcW);
+    } else if (lhs < rhs) {
+      copyW = static_cast<unsigned>((static_cast<uint64_t>(cellH) * srcW) / srcH);
+    }
+    if (copyW == 0 || copyH == 0) {
+      return;
+    }
+
+    if ((copyW & 1u) && copyW > 1) {
+      --copyW;
+    }
+    if ((copyH & 1u) && copyH > 1) {
+      --copyH;
+    }
+    if (copyW == 0 || copyH == 0) {
+      return;
+    }
+
+    unsigned offsetX = cellX + (cellW - copyW) / 2;
+    unsigned offsetY = cellY + (cellH - copyH) / 2;
+    if (offsetX & 1u) {
+      if (offsetX + copyW + 1 <= cellX + cellW)
+        ++offsetX;
+      else if (offsetX > cellX)
+        --offsetX;
+    }
+    if (offsetY & 1u) {
+      if (offsetY + copyH + 1 <= cellY + cellH)
+        ++offsetY;
+      else if (offsetY > cellY)
+        --offsetY;
+    }
+
+    const BYTE* srcY = srcYUV;
+    const BYTE* srcU = srcY + (srcW * srcH);
+    const BYTE* srcV = srcU + (srcW / 2) * (srcH / 2);
+
+    BYTE* dstY = dstYUV + offsetY * dstW + offsetX;
+    BYTE* dstUPlane = dstYUV + (dstW * dstH);
+    BYTE* dstVPlane = dstUPlane + (dstW / 2) * (dstH / 2);
+    BYTE* dstU = dstUPlane + (offsetY / 2) * (dstW / 2) + (offsetX / 2);
+    BYTE* dstV = dstVPlane + (offsetY / 2) * (dstW / 2) + (offsetX / 2);
+
+    for (unsigned y = 0; y < copyH; ++y) {
+      const unsigned srcYPos = (y * srcH) / copyH;
+      const BYTE* srcRow = srcY + srcYPos * srcW;
+      BYTE* dstRow = dstY + y * dstW;
+      for (unsigned x = 0; x < copyW; ++x) {
+        const unsigned srcXPos = (x * srcW) / copyW;
+        dstRow[x] = srcRow[srcXPos];
+      }
+    }
+
+    const unsigned copyW2 = copyW / 2;
+    const unsigned copyH2 = copyH / 2;
+    const unsigned srcW2 = srcW / 2;
+    const unsigned srcH2 = srcH / 2;
+    if (copyW2 == 0 || copyH2 == 0 || srcW2 == 0 || srcH2 == 0) {
+      return;
+    }
+
+    for (unsigned y = 0; y < copyH2; ++y) {
+      const unsigned srcYPos = (y * srcH2) / copyH2;
+      const BYTE* srcURow = srcU + srcYPos * srcW2;
+      const BYTE* srcVRow = srcV + srcYPos * srcW2;
+      BYTE* dstURow = dstU + y * (dstW / 2);
+      BYTE* dstVRow = dstV + y * (dstW / 2);
+      for (unsigned x = 0; x < copyW2; ++x) {
+        const unsigned srcXPos = (x * srcW2) / copyW2;
+        dstURow[x] = srcURow[srcXPos];
+        dstVRow[x] = srcVRow[srcXPos];
+      }
+    }
+  }
+
+  void ComposeMixedFrame()
+  {
+    if (m_mixedFrameBuffer.empty()) {
+      return;
+    }
+
+    FillBlackFrame(m_mixedFrameBuffer.data(), m_videoWidth, m_videoHeight);
+
+    const unsigned cellW = m_videoWidth / 2;
+    const unsigned cellH = m_videoHeight;
+
+    if (m_lastLocalVideo.valid) {
+      CopyIntoCell(m_lastLocalVideo.data.data(), m_lastLocalVideo.width, m_lastLocalVideo.height,
+                   m_mixedFrameBuffer.data(), m_videoWidth, m_videoHeight,
+                   0, 0, cellW, cellH);
+    }
+    if (m_lastRemoteVideo.valid) {
+      CopyIntoCell(m_lastRemoteVideo.data.data(), m_lastRemoteVideo.width, m_lastRemoteVideo.height,
+                   m_mixedFrameBuffer.data(), m_videoWidth, m_videoHeight,
+                   cellW, 0, cellW, cellH);
+    }
+  }
+
+  const char* ModeToString(Mode mode) const
+  {
+    switch (mode) {
+      case LocalOnly:
+        return "local";
+      case RemoteOnly:
+        return "remote";
+      case Mixed:
+      default:
+        return "mixed";
+    }
+  }
+
+  MyH323Connection* m_connection;
+  Mode m_mode = RemoteOnly;
+  std::atomic<bool> m_isRecording { false };
+  mutable PMutex m_mutex;
+
+  PString m_outputFile;
+  PString m_videoRawFile;
+  PString m_audioRawFile;
+
+  FILE* m_videoFp = NULL;
+  FILE* m_audioFp = NULL;
+
+  unsigned m_videoWidth = 0;
+  unsigned m_videoHeight = 0;
+  unsigned m_audioSampleRate = 0;
+  uint64_t m_videoFrames = 0;
+  uint64_t m_audioSamples = 0;
+  bool m_loggedSizeMismatch = false;
+  bool m_loggedMixedAudioPolicy = false;
+  CachedVideoFrame m_lastLocalVideo;
+  CachedVideoFrame m_lastRemoteVideo;
+  std::vector<BYTE> m_mixedFrameBuffer;
+};
 
 #if defined(USE_SPEEXDSP)
 namespace {
@@ -1904,6 +2398,10 @@ void H323ASKW::Main()
     "-tmaxwait:"     // Maximum interval between calls in seconds
     "-mic:"          // Microphone device name
     "-speaker:"      // Speaker device name
+    "-record:"       // Record output file path
+    "-record-mode:"  // Recording mode: local|remote|mixed
+    "-record-auto-start." // Start recording when call is established
+    "-record-auto-stop."  // Stop recording when call is cleared
     , FALSE);
 
   // ============================================================
@@ -1939,6 +2437,8 @@ void H323ASKW::Main()
     cout << "  --list-audio-devices  List available audio devices" << endl;
     cout << "  --mic \"name\"          Select microphone device" << endl;
     cout << "  --speaker \"name\"      Select speaker device" << endl;
+    cout << "  --record \"file.mp4\"    Record call to MP4" << endl;
+    cout << "  --record-mode mode     Recording mode: local|remote|mixed" << endl;
     cout << endl;
     cout << "Timing Options:" << endl;
     cout << "  --tmaxest secs        Max time to wait for established" << endl;
@@ -2195,6 +2695,10 @@ void H323ASKW::Main()
             "  --tmaxcall secs      Maximum call duration in seconds [28800 = 8 hours]\n"
             "  --tminwait secs      Minimum interval between calls in seconds [10]\n"
             "  --tmaxwait secs      Maximum interval between calls in seconds [30]\n"
+            "  --record file        Record call media to MP4 file\n"
+            "  --record-mode mode   Recording mode: local, remote(default), mixed\n"
+            "  --record-auto-start  Start recording automatically on call establishment\n"
+            "  --record-auto-stop   Stop recording automatically on call clear\n"
             "  --fuzzing            Enable RTP fuzzing\n"
             "  --fuzz-header        Percentage of RTP header to randomly overwrite [50]\n"
             "  --fuzz-media         Percentage of RTP media to randomly overwrite [0]\n"
@@ -4905,6 +5409,58 @@ MyH323Connection::MediaType MyH323Connection::ClassifyIncomingRTP(WORD dstPort, 
   }
 }
 
+namespace {
+H323RecordingManager::Mode ParseRecordingMode(const PString& modeText)
+{
+  PCaselessString mode = modeText;
+  if (mode == "local")
+    return H323RecordingManager::LocalOnly;
+  if (mode == "mixed")
+    return H323RecordingManager::Mixed;
+  return H323RecordingManager::RemoteOnly;
+}
+}
+
+bool MyH323Connection::StartRecording(const PString& filename, const PString& mode)
+{
+  if (m_recordingManager.get() == NULL) {
+    m_recordingManager.reset(new H323RecordingManager(this));
+  }
+
+  if (filename.IsEmpty()) {
+    PTRACE(1, "H323ASKW\tRECORDING: empty filename");
+    return false;
+  }
+
+  return m_recordingManager->Start(filename, ParseRecordingMode(mode));
+}
+
+void MyH323Connection::StopRecording()
+{
+  if (m_recordingManager.get() != NULL) {
+    m_recordingManager->Stop();
+  }
+}
+
+bool MyH323Connection::IsRecording() const
+{
+  return m_recordingManager.get() != NULL && m_recordingManager->IsRecording();
+}
+
+void MyH323Connection::RecordVideoFrame(const BYTE* yuvData, unsigned width, unsigned height, bool isLocal)
+{
+  if (m_recordingManager.get() != NULL) {
+    m_recordingManager->WriteVideoFrame(yuvData, width, height, isLocal);
+  }
+}
+
+void MyH323Connection::RecordAudioFrame(const int16_t* pcmData, size_t samples, unsigned sampleRate, bool isLocal)
+{
+  if (m_recordingManager.get() != NULL) {
+    m_recordingManager->WriteAudioFrame(pcmData, samples, sampleRate, isLocal);
+  }
+}
+
 MyH323Connection::MyH323Connection(MyH323EndPoint & ep, unsigned callRef)
   : H323Connection(ep, callRef)
   , endpoint(ep)
@@ -4975,6 +5531,7 @@ MyH323Connection::MyH323Connection(MyH323EndPoint & ep, unsigned callRef)
   , m_mosaicVideoInput(nullptr)
 {
     detectInBandDTMF = FALSE; // turn off in-band DTMF detection (uses a huge amount of CPU)
+    m_recordingManager.reset(new H323RecordingManager(this));
     
 #if defined(USE_SPEEXDSP)
     m_aecDelayMs = ReadEnvMs("H323ASKW_AEC_DELAY_MS", kDefaultPlaybackDelayMs);
@@ -5065,6 +5622,8 @@ void MyH323Connection::PollRTPPacketsTick(PThread &, INT)
 
 MyH323Connection::~MyH323Connection()
 {
+    StopRecording();
+
     // ✅ FIX 4: Segmentation Faultの修正 - 適切なリソースクリーンアップ
     PTRACE(3, "H323ASKW\t🔧 FIX 4: MyH323Connection destructor - cleaning up resources");
     
@@ -8456,7 +9015,11 @@ void MyH323Connection::OnCleared()
     PTRACE(4, "H323ASKW\tCLOSE_TRACE: OnCleared ENTRY - session=2 at " << __FUNCTION__);
     
     PTRACE(1, "H323ASKW\t🔧 INTEGRATION: OnCleared - Final event processing before cleanup");
-    
+    if (IsRecording()) {
+        PTRACE(1, "H323ASKW\tRECORDING: stopping on call clear");
+        StopRecording();
+    }
+
 #ifdef USE_QT6
     // コールバック用グローバルポインタをクリア
     if (g_currentConnection == this) {
@@ -8664,7 +9227,7 @@ PBoolean MyH323Connection::OpenAudioChannel(PBoolean isEncoding, unsigned buffer
       
       // Create SpeakerFanoutChannel (PChannel-derived)
       // Pass full config, sample rate, speex processor
-      m_speakerFanout = new SpeakerFanoutChannel(multiDeviceConfig, rate, m_speexProcessor);
+      m_speakerFanout = new SpeakerFanoutChannel(this, multiDeviceConfig, rate, m_speexProcessor);
       if (!m_speakerFanout) {
         PTRACE(1, "H323ASKW\t❌ Failed to create SpeakerFanoutChannel");
         return FALSE;
@@ -8766,7 +9329,7 @@ PBoolean MyH323Connection::OpenAudioChannel(PBoolean isEncoding, unsigned buffer
     PTRACE(1, "H323ASKW\t🎤 Microphone wrapped with MutableMicChannel for mute support + spectrum");
   } else {
     // Speaker - wrap with SpectrumSpeakerChannel for spectrum display
-    SpectrumSpeakerChannel* spectrumSpk = new SpectrumSpeakerChannel(snd, rate, speexProc);
+    SpectrumSpeakerChannel* spectrumSpk = new SpectrumSpeakerChannel(snd, this, rate, speexProc);
     codec.AttachChannel(spectrumSpk);
     PTRACE(1, "H323ASKW\t🔊 Speaker wrapped with SpectrumSpeakerChannel for spectrum display");
   }
@@ -10204,6 +10767,37 @@ void MyH323Connection::OnEstablished()
     g_currentConnection = this;  // コールバック用グローバルポインタ
     PTRACE(1, "H323ASKW\t🎤 H323Connection registered with QtVideoManager for mute control");
 #endif
+
+    PArgList & args = PProcess::Current().GetArguments();
+    if (!IsRecording() && args.HasOption("record")) {
+        PString requestedFile = args.GetOptionString("record");
+        if (requestedFile.IsEmpty()) {
+            requestedFile = "call_recording.mp4";
+        }
+
+        if (requestedFile.Find('.') == P_MAX_INDEX) {
+            requestedFile += ".mp4";
+        }
+
+        PString outputFile = requestedFile;
+        if (PFile::Exists(outputFile)) {
+            PINDEX dot = outputFile.FindLast('.');
+            PString suffix = "_" + PTime().AsString("yyyyMMdd_hhmmss");
+            if (dot == P_MAX_INDEX) {
+                outputFile += suffix;
+            } else {
+                outputFile = outputFile.Left(dot) + suffix + outputFile.Mid(dot);
+            }
+        }
+
+        PString recordMode = args.GetOptionString("record-mode", "remote");
+        if (!StartRecording(outputFile, recordMode)) {
+            PTRACE(1, "H323ASKW\tRECORDING: failed to start output=" << outputFile);
+        } else {
+            PTRACE(1, "H323ASKW\tRECORDING: auto-started output=" << outputFile
+                   << " mode=" << recordMode);
+        }
+    }
     
     // *** 🚀 HIGHEST PRIORITY: Set up Polycom RequestMode timer IMMEDIATELY ***
     PTRACE(1, "H323ASKW\t🚀 POLYCOM STRATEGY: Setting up RequestMode timer for bidirectional video");
@@ -12265,7 +12859,7 @@ PBoolean Qt6VideoOutputDevice::SetFrameData(unsigned x, unsigned y, unsigned wid
         PTRACE(4, "Qt6\t📹 Sending LOCAL frame to Qt6: " << width << "x" << height);
         manager.queueLocalFrame(data, bufferSize, width, height);
     }
-    
+
     // 🎤 Update mute state every 15 frames (to reduce overhead)
     if (m_frameCount % 15 == 0) {
         MyH323Connection* conn = manager.getH323Connection();
@@ -17695,6 +18289,9 @@ PBoolean MutableMicChannel::Read(void* buf, PINDEX len)
   // Send audio data to spectrum analyzer (16-bit PCM, mono)
   // len is in bytes, each sample is 2 bytes (16-bit)
   size_t sampleCount = len / 2;
+  if (m_connection != NULL) {
+    m_connection->RecordAudioFrame(reinterpret_cast<const int16_t*>(buf), sampleCount, m_sampleRate, true);
+  }
   UpdateLocalAudioSpectrum(reinterpret_cast<const int16_t*>(buf), sampleCount, 1, m_sampleRate);
   
   return TRUE;
@@ -17703,9 +18300,11 @@ PBoolean MutableMicChannel::Read(void* buf, PINDEX len)
 ///////////////////////////////////////////////////////////////////////////////
 // SpectrumSpeakerChannel implementation - Captures speaker audio for spectrum display
 SpectrumSpeakerChannel::SpectrumSpeakerChannel(PSoundChannel* soundChannel,
+                                               MyH323Connection* connection,
                                                int sampleRate,
                                                const std::shared_ptr<SpeexAudioProcessor>& speexProcessor)
-  : m_sampleRate(sampleRate)
+  : m_connection(connection)
+  , m_sampleRate(sampleRate)
   , m_speexProcessor(speexProcessor)
 {
   Open(soundChannel);
@@ -17738,6 +18337,9 @@ PBoolean SpectrumSpeakerChannel::Write(const void* buf, PINDEX len)
 #endif
 
   // Send audio data to spectrum analyzer using post-gain samples
+  if (m_connection != NULL) {
+    m_connection->RecordAudioFrame(out.data(), sampleCount, m_sampleRate, false);
+  }
   UpdateRemoteAudioSpectrum(out.data(), sampleCount, 1, m_sampleRate);
   
   // Write to actual speaker with adjusted samples
@@ -18150,6 +18752,9 @@ PBoolean MicMixerChannel::Read(void* buf, PINDEX len)
   } else {
     UpdateLocalAudioSpectrum(outBuf, samples, 1, m_sampleRate);
   }
+  if (m_connection != NULL) {
+    m_connection->RecordAudioFrame(outBuf, samples, m_sampleRate, true);
+  }
 
   lastReadCount = len;
   return TRUE;
@@ -18190,10 +18795,12 @@ void UpdateRemoteAudioSpectrum(const int16_t* pcmData, size_t sampleCount, int c
 /**
  * @brief コンストラクタ: 複数スピーカーファンアウトを初期化
  */
-SpeakerFanoutChannel::SpeakerFanoutChannel(const CoreAudioDeviceConfig& initialConfig,
+SpeakerFanoutChannel::SpeakerFanoutChannel(MyH323Connection* connection,
+                                           const CoreAudioDeviceConfig& initialConfig,
                                            unsigned sampleRate,
                                            const std::shared_ptr<SpeexAudioProcessor>& speexProcessor)
-  : m_sampleRate(sampleRate)
+  : m_connection(connection)
+  , m_sampleRate(sampleRate)
   , m_speexProcessor(speexProcessor)
   , m_isOpen(true)
 {
@@ -18512,6 +19119,9 @@ PBoolean SpeakerFanoutChannel::Write(const void* buf, PINDEX len)
   if (!baseSpectrumUpdated) {
     std::vector<int16_t> silence(samples, 0);
     UpdateRemoteAudioSpectrum(silence.data(), silence.size(), 1, m_sampleRate);
+  }
+  if (m_connection != NULL) {
+    m_connection->RecordAudioFrame(m_tempBuffer.data(), samples, m_sampleRate, false);
   }
 
   lastWriteCount = len;

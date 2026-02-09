@@ -177,6 +177,7 @@ class Qt6VideoOutputDevice : public PVideoOutputDevice
 #endif // USE_QT6
 
 class SpeexAudioProcessor;  // SpeexDSP-based audio processor (AEC/NS/AGC)
+class H323RecordingManager;
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -234,12 +235,14 @@ class SpectrumSpeakerChannel : public PIndirectChannel
     
   public:
     SpectrumSpeakerChannel(PSoundChannel* soundChannel,
+                           MyH323Connection* connection,
                            int sampleRate,
                            const std::shared_ptr<SpeexAudioProcessor>& speexProcessor);
     
     virtual PBoolean Write(const void* buf, PINDEX len) override;
     
   private:
+    MyH323Connection* m_connection;
     int m_sampleRate;
     std::shared_ptr<SpeexAudioProcessor> m_speexProcessor;
 };
@@ -370,7 +373,8 @@ class SpeakerFanoutChannel : public PChannel
     PCLASSINFO(SpeakerFanoutChannel, PChannel);
     
   public:
-    SpeakerFanoutChannel(const CoreAudioDeviceConfig& initialConfig,
+    SpeakerFanoutChannel(MyH323Connection* connection,
+                         const CoreAudioDeviceConfig& initialConfig,
                          unsigned sampleRate,
                          const std::shared_ptr<SpeexAudioProcessor>& speexProcessor);
     
@@ -438,6 +442,7 @@ class SpeakerFanoutChannel : public PChannel
     std::shared_ptr<SpeakerSet> m_activeSpeakers;
     PMutex m_speakersMutex;
     
+    MyH323Connection* m_connection;
     unsigned m_sampleRate;
     std::shared_ptr<SpeexAudioProcessor> m_speexProcessor;
     bool m_isOpen;
@@ -1603,6 +1608,7 @@ public:
     // Playback->mic delay (ms) fed to Speex echo canceller (tunable via env/UI)
     unsigned m_aecDelayMs = 0;
 #endif
+    std::unique_ptr<H323RecordingManager> m_recordingManager;
     
     // Phase 1: Multi-Device Audio Channels
     MicMixerChannel* m_micMixer;           // 複数マイク → 1本のPCM
@@ -1648,6 +1654,13 @@ public:
     bool IsLocalMicMuted() const { return m_localMicMuted.load(); }
     bool IsRemoteMicMuted() const { return m_remoteMicMuted.load(); }
     bool IsLocalCameraMuted() const { return m_localCameraMuted.load(); }
+    
+    // Recording controls
+    bool StartRecording(const PString& filename, const PString& mode = "remote");
+    void StopRecording();
+    bool IsRecording() const;
+    void RecordVideoFrame(const BYTE* yuvData, unsigned width, unsigned height, bool isLocal);
+    void RecordAudioFrame(const int16_t* pcmData, size_t samples, unsigned sampleRate, bool isLocal);
     
     /**
      * Phase 1: Multi-Device Audio アクセサ

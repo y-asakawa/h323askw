@@ -20,6 +20,9 @@
 #include <QSet>
 #include <QTimer>       // Phase 1: Audio Visualizer Timer
 #include <QMessageBox>  // Phase 1: Multi-Device Audio UI
+#include <QFileDialog>
+#include <QStandardPaths>
+#include <QFileInfo>
 #include <QGroupBox>    // Phase 1: Multi-Device Audio UI
 #include <QScrollArea>  // Phase 1: Multi-Device Audio UI - スクロール対応
 #ifdef Q_OS_MAC
@@ -1227,6 +1230,7 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_addressCombo(nullptr)
     , m_connectButton(nullptr)
     , m_disconnectButton(nullptr)
+    , m_recordButton(nullptr)
     , m_muteCheckbox(nullptr)
     , m_cameraCheckbox(nullptr)
     , m_contentButton(nullptr)
@@ -1255,6 +1259,7 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_connectBlinkOn(false)
     , m_connectBlinkActive(false)
     , m_connectEstablished(false)
+    , m_recordingActive(false)
     , m_multiDeviceScrollArea(nullptr)   // Phase 1
     , m_multiDeviceWindow(nullptr)
     , m_cameraRowsLayout(nullptr)
@@ -1377,6 +1382,55 @@ void QtVideoMainWindow::updateDisconnectButtonStyle()
         "  border-color: #9e9e9e;"
         "}"
     );
+}
+
+void QtVideoMainWindow::updateRecordButtonStyle()
+{
+    if (!m_recordButton)
+        return;
+
+    if (m_recordingActive) {
+        m_recordButton->setStyleSheet(
+            "QPushButton#recordButton {"
+            "  border: 3px solid #8b0000;"
+            "  border-radius: 4px;"
+            "  padding: 3px 10px;"
+            "  background-color: #c62828;"
+            "  color: white;"
+            "  font-weight: 700;"
+            "}"
+            "QPushButton#recordButton:disabled {"
+            "  border-color: #9e9e9e;"
+            "  background-color: #cccccc;"
+            "  color: #777777;"
+            "}"
+        );
+    } else {
+        m_recordButton->setStyleSheet(
+            "QPushButton#recordButton {"
+            "  border: 3px solid #c62828;"
+            "  border-radius: 4px;"
+            "  padding: 3px 10px;"
+            "  background-color: transparent;"
+            "  color: #8b0000;"
+            "  font-weight: 600;"
+            "}"
+            "QPushButton#recordButton:disabled {"
+            "  border-color: #9e9e9e;"
+            "  color: #7a7a7a;"
+            "}"
+        );
+    }
+}
+
+void QtVideoMainWindow::setRecordingUiState(bool recording)
+{
+    m_recordingActive = recording;
+    if (m_recordButton) {
+        m_recordButton->setText(recording ? "■ Stop REC" : "● REC");
+        m_recordButton->setToolTip(recording ? "Stop recording" : "Start recording");
+    }
+    updateRecordButtonStyle();
 }
 
 void QtVideoMainWindow::startConnectBlink()
@@ -1544,14 +1598,19 @@ void QtVideoMainWindow::setupUI()
     m_connectButton->setObjectName("connectButton");
     m_disconnectButton = new QPushButton("Disconnect", this);
     m_disconnectButton->setObjectName("disconnectButton");
+    m_recordButton = new QPushButton("● REC", this);
+    m_recordButton->setObjectName("recordButton");
     updateConnectButtonStyle();
     updateDisconnectButtonStyle();
+    setRecordingUiState(false);
     m_disconnectButton->setEnabled(false);
+    m_recordButton->setEnabled(false);
 
     controlLayout->addWidget(addressLabel);
     controlLayout->addWidget(m_addressCombo);
     controlLayout->addWidget(m_connectButton);
     controlLayout->addWidget(m_disconnectButton);
+    controlLayout->addWidget(m_recordButton);
     controlLayout->addStretch();
 
     // ミュート/カメラ
@@ -1641,6 +1700,7 @@ void QtVideoMainWindow::setupConnections()
     // ボタン接続
     connect(m_connectButton, &QPushButton::clicked, this, &QtVideoMainWindow::onConnectClicked);
     connect(m_disconnectButton, &QPushButton::clicked, this, &QtVideoMainWindow::onDisconnectClicked);
+    connect(m_recordButton, &QPushButton::clicked, this, &QtVideoMainWindow::onRecordClicked);
     connect(m_addressCombo, QOverload<int>::of(&QComboBox::activated),
             this, &QtVideoMainWindow::onAddressActivated);
     
@@ -1781,6 +1841,10 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
                 safeThis->m_connectButton->setEnabled(false);
                 safeThis->m_connectEstablished = true;
                 safeThis->stopConnectBlink();
+                if (safeThis->m_recordButton) {
+                    safeThis->m_recordButton->setEnabled(true);
+                }
+                safeThis->setRecordingUiState(connection->IsRecording());
                 safeThis->m_muteCheckbox->setEnabled(true);
                 safeThis->m_cameraCheckbox->setEnabled(true);
                 if (safeThis->m_micCombo)
@@ -1801,6 +1865,10 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
                 safeThis->m_connectButton->setEnabled(true);
                 safeThis->m_connectEstablished = false;
                 safeThis->stopConnectBlink();
+                if (safeThis->m_recordButton) {
+                    safeThis->m_recordButton->setEnabled(false);
+                }
+                safeThis->setRecordingUiState(false);
                 safeThis->m_muteCheckbox->setEnabled(false);
                 safeThis->m_cameraCheckbox->setEnabled(false);
                 if (safeThis->m_micCombo)
@@ -1827,6 +1895,10 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
             m_connectButton->setEnabled(false);
             m_connectEstablished = true;
             stopConnectBlink();
+            if (m_recordButton) {
+                m_recordButton->setEnabled(true);
+            }
+            setRecordingUiState(connection->IsRecording());
             m_muteCheckbox->setEnabled(true);
             m_cameraCheckbox->setEnabled(true);
             if (m_micCombo)
@@ -1847,6 +1919,10 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
             m_connectButton->setEnabled(true);
             m_connectEstablished = false;
             stopConnectBlink();
+            if (m_recordButton) {
+                m_recordButton->setEnabled(false);
+            }
+            setRecordingUiState(false);
             m_muteCheckbox->setEnabled(false);
             m_cameraCheckbox->setEnabled(false);
             if (m_micCombo)
@@ -2087,6 +2163,57 @@ void QtVideoMainWindow::onDisconnectClicked()
             }
         }
     }
+}
+
+void QtVideoMainWindow::onRecordClicked()
+{
+    if (m_h323Connection == nullptr) {
+        setConnectionStatus("No active call");
+        return;
+    }
+
+    if (m_h323Connection->IsRecording()) {
+        m_h323Connection->StopRecording();
+        setRecordingUiState(false);
+        setConnectionStatus("Recording stopped");
+        return;
+    }
+
+    QString defaultDir = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+    if (defaultDir.isEmpty()) {
+        defaultDir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    }
+
+    QSettings settings("h323askw", "QtVideoMainWindow");
+    const QString lastDir = settings.value("recording/lastDir", defaultDir).toString();
+    const QString defaultName = QString("call_%1.mp4").arg(
+        QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
+
+    QString selectedPath = QFileDialog::getSaveFileName(
+        this,
+        tr("Save Recording"),
+        QFileInfo(lastDir, defaultName).absoluteFilePath(),
+        tr("MP4 files (*.mp4);;All files (*)"));
+
+    if (selectedPath.isEmpty()) {
+        return;
+    }
+
+    if (!selectedPath.endsWith(".mp4", Qt::CaseInsensitive)) {
+        selectedPath += ".mp4";
+    }
+
+    settings.setValue("recording/lastDir", QFileInfo(selectedPath).absolutePath());
+
+    if (!m_h323Connection->StartRecording(selectedPath.toUtf8().constData(), "mixed")) {
+        QMessageBox::warning(this, tr("Recording"),
+                             tr("Failed to start recording."));
+        setRecordingUiState(false);
+        return;
+    }
+
+    setRecordingUiState(true);
+    setConnectionStatus("Recording: " + QFileInfo(selectedPath).fileName());
 }
 
 void QtVideoMainWindow::onMuteToggled(bool checked)
@@ -2455,6 +2582,10 @@ void QtVideoManager::enqueueLocalFrame(const unsigned char* yuvData, unsigned wi
 {
     Q_UNUSED(dataSize);
     if (m_mainWindow && yuvData && width > 0 && height > 0) {
+        MyH323Connection* conn = getH323Connection();
+        if (conn && conn->IsRecording()) {
+            conn->RecordVideoFrame(yuvData, width, height, true);
+        }
         // enqueueLocalFrameはシグナル経由でQueuedConnectionを使うのでスレッドセーフ
         m_mainWindow->enqueueLocalFrame(yuvData, width, height);
     }
@@ -2464,6 +2595,10 @@ void QtVideoManager::enqueueRemoteFrame(const unsigned char* yuvData, unsigned w
 {
     Q_UNUSED(dataSize);
     if (m_mainWindow && yuvData && width > 0 && height > 0) {
+        MyH323Connection* conn = getH323Connection();
+        if (conn && conn->IsRecording()) {
+            conn->RecordVideoFrame(yuvData, width, height, false);
+        }
         // enqueueRemoteFrameはシグナル経由でQueuedConnectionを使うのでスレッドセーフ
         m_mainWindow->enqueueRemoteFrame(yuvData, width, height);
     }
@@ -3629,7 +3764,7 @@ void QtVideoMainWindow::setupMultiDeviceAudioUI(QVBoxLayout* mainLayout)
     PTRACE(0, "QtVideo\t🔵 setupMultiDeviceAudioUI() ENTER");
     
     // マルチデバイスオーディオ設定パネル
-    QGroupBox* multiDeviceBox = new QGroupBox("Multi-Device Audio Configuration (Phase 1)", this);
+    QGroupBox* multiDeviceBox = new QGroupBox("Multi-Audio Configuration", this);
     multiDeviceBox->setMinimumWidth(1120);
     QVBoxLayout* multiDeviceLayout = new QVBoxLayout(multiDeviceBox);
 

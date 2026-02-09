@@ -642,8 +642,10 @@ public slots:
 private:
     void updateConnectButtonStyle();
     void updateDisconnectButtonStyle();
+    void updateRecordButtonStyle();
     void startConnectBlink();
     void stopConnectBlink();
+    void setRecordingUiState(bool recording);
 
     /**
      * @brief 通話がアクティブかどうかのフラグ（スレッドセーフ）
@@ -658,6 +660,7 @@ protected:
 private slots:
     void onConnectClicked();
     void onDisconnectClicked();
+    void onRecordClicked();
     void onMuteToggled(bool checked);
     void onCameraToggled(bool checked);
     void onMicDeviceChanged(int index);
@@ -747,6 +750,7 @@ private:
     QComboBox* m_addressCombo;  // 履歴付きアドレス入力
     QPushButton* m_connectButton;
     QPushButton* m_disconnectButton;
+    QPushButton* m_recordButton;
     QCheckBox* m_muteCheckbox;
     QCheckBox* m_cameraCheckbox;
     QPushButton* m_contentButton;  // コンテンツ再表示ボタン
@@ -792,6 +796,7 @@ private:
     bool m_connectBlinkOn;                         // 点滅表示ON/OFF
     bool m_connectBlinkActive;                     // 点滅有効状態
     bool m_connectEstablished;                     // 接続完了状態（Connect反転表示）
+    bool m_recordingActive;                        // 録画中状態
     QScrollArea* m_multiDeviceScrollArea;          // マルチデバイススクロール領域
     QDialog* m_multiDeviceWindow;                  // マルチデバイス設定ウィンドウ
     
