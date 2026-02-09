@@ -1043,6 +1043,16 @@ void AudioDeviceRowWidget::setMuteButtonVisible(bool show)
     }
 }
 
+void AudioDeviceRowWidget::setDeviceSelectionEnabled(bool enabled)
+{
+    if (m_deviceCombo) {
+        m_deviceCombo->setEnabled(enabled);
+    }
+    if (m_removeButton) {
+        m_removeButton->setEnabled(enabled);
+    }
+}
+
 void AudioDeviceRowWidget::onDeviceComboChanged(int index)
 {
     PTRACE(0, "QtVideo\t🟣 AudioDeviceRowWidget::onDeviceComboChanged() index=" << index);
@@ -1241,6 +1251,10 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_addMicButton(nullptr)            // Phase 1
     , m_addSpeakerButton(nullptr)        // Phase 1
     , m_audioVisualizerTimer(nullptr)    // Phase 1
+    , m_connectBlinkTimer(nullptr)
+    , m_connectBlinkOn(false)
+    , m_connectBlinkActive(false)
+    , m_connectEstablished(false)
     , m_multiDeviceScrollArea(nullptr)   // Phase 1
     , m_multiDeviceWindow(nullptr)
     , m_cameraRowsLayout(nullptr)
@@ -1261,6 +1275,15 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     connect(m_audioVisualizerTimer, &QTimer::timeout, this, &QtVideoMainWindow::updateAudioVisualizers);
     // タイマーはonConnectClicked()で開始、onDisconnectClicked()で停止
 
+    m_connectBlinkTimer = new QTimer(this);
+    m_connectBlinkTimer->setInterval(500);
+    connect(m_connectBlinkTimer, &QTimer::timeout, this, [this]() {
+        if (!m_connectBlinkActive)
+            return;
+        m_connectBlinkOn = !m_connectBlinkOn;
+        updateConnectButtonStyle();
+    });
+
     QT_TRACE(1, "QtVideoMainWindow created");
     PTRACE(0, "QtVideo\t🟨 QtVideoMainWindow constructor EXIT");
 }
@@ -1278,6 +1301,11 @@ QtVideoMainWindow::~QtVideoMainWindow()
         m_audioVisualizerTimer->deleteLater();
         m_audioVisualizerTimer = nullptr;
     }
+    if (m_connectBlinkTimer) {
+        m_connectBlinkTimer->stop();
+        m_connectBlinkTimer->deleteLater();
+        m_connectBlinkTimer = nullptr;
+    }
     
     // 親子関係で自動削除される前に、手動でクリア（安全のため）
     m_micRows.clear();
@@ -1288,6 +1316,95 @@ QtVideoMainWindow::~QtVideoMainWindow()
     m_running = false;
     
     QT_TRACE(1, "QtVideoMainWindow destroyed");
+}
+
+void QtVideoMainWindow::updateConnectButtonStyle()
+{
+    if (!m_connectButton)
+        return;
+
+    QString borderColor = "#2e7d32";
+    QString backgroundColor = "transparent";
+    QString textColor = "#1b5e20";
+    QString disabledBorderColor = "#9e9e9e";
+    QString disabledTextColor = "#7a7a7a";
+
+    if (m_connectEstablished) {
+        // 接続完了時は色反転（塗りつぶし＋白文字）
+        borderColor = "#2e7d32";
+        backgroundColor = "#2e7d32";
+        textColor = "#ffffff";
+        disabledBorderColor = borderColor;
+        disabledTextColor = "#ffffff";
+    } else if (m_connectBlinkActive) {
+        borderColor = m_connectBlinkOn ? "#2e7d32" : "#9e9e9e";
+        backgroundColor = m_connectBlinkOn ? "#e8f5e9" : "transparent";
+        textColor = m_connectBlinkOn ? "#1b5e20" : "#4a4a4a";
+        disabledBorderColor = borderColor;
+        disabledTextColor = textColor;
+    }
+
+    m_connectButton->setStyleSheet(QString(
+        "QPushButton#connectButton {"
+        "  border: 3px solid %1;"
+        "  border-radius: 4px;"
+        "  padding: 3px 10px;"
+        "  background-color: %2;"
+        "  color: %3;"
+        "}"
+        "QPushButton#connectButton:disabled {"
+        "  border: 3px solid %4;"
+        "  border-radius: 4px;"
+        "  padding: 3px 10px;"
+        "  background-color: %2;"
+        "  color: %5;"
+        "}"
+    ).arg(borderColor, backgroundColor, textColor, disabledBorderColor, disabledTextColor));
+}
+
+void QtVideoMainWindow::updateDisconnectButtonStyle()
+{
+    if (!m_disconnectButton)
+        return;
+
+    m_disconnectButton->setStyleSheet(
+        "QPushButton#disconnectButton {"
+        "  border: 3px solid #c62828;"
+        "  border-radius: 4px;"
+        "  padding: 3px 10px;"
+        "}"
+        "QPushButton#disconnectButton:disabled {"
+        "  border-color: #9e9e9e;"
+        "}"
+    );
+}
+
+void QtVideoMainWindow::startConnectBlink()
+{
+    if (m_connectEstablished)
+        return;
+
+    if (m_connectBlinkActive)
+        return;
+
+    m_connectBlinkActive = true;
+    m_connectBlinkOn = true;
+
+    if (m_connectBlinkTimer && !m_connectBlinkTimer->isActive())
+        m_connectBlinkTimer->start();
+
+    updateConnectButtonStyle();
+}
+
+void QtVideoMainWindow::stopConnectBlink()
+{
+    m_connectBlinkActive = false;
+    m_connectBlinkOn = false;
+
+    if (m_connectBlinkTimer && m_connectBlinkTimer->isActive())
+        m_connectBlinkTimer->stop();
+
+    updateConnectButtonStyle();
 }
 
 void QtVideoMainWindow::setupUI()
@@ -1427,6 +1544,8 @@ void QtVideoMainWindow::setupUI()
     m_connectButton->setObjectName("connectButton");
     m_disconnectButton = new QPushButton("Disconnect", this);
     m_disconnectButton->setObjectName("disconnectButton");
+    updateConnectButtonStyle();
+    updateDisconnectButtonStyle();
     m_disconnectButton->setEnabled(false);
 
     controlLayout->addWidget(addressLabel);
@@ -1660,16 +1779,40 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
                 QT_TRACE(1, "H323Connection set - UI controls enabled (via invokeMethod)");
                 safeThis->m_disconnectButton->setEnabled(true);
                 safeThis->m_connectButton->setEnabled(false);
+                safeThis->m_connectEstablished = true;
+                safeThis->stopConnectBlink();
                 safeThis->m_muteCheckbox->setEnabled(true);
                 safeThis->m_cameraCheckbox->setEnabled(true);
+                if (safeThis->m_micCombo)
+                    safeThis->m_micCombo->setEnabled(false);
+                if (safeThis->m_speakerCombo)
+                    safeThis->m_speakerCombo->setEnabled(false);
+                if (safeThis->m_addMicButton)
+                    safeThis->m_addMicButton->setEnabled(false);
+                if (safeThis->m_addSpeakerButton)
+                    safeThis->m_addSpeakerButton->setEnabled(false);
+                safeThis->updateDeviceRowControls(safeThis->m_micRows);
+                safeThis->updateDeviceRowControls(safeThis->m_speakerRows);
                 if (safeThis->m_contentSendButton)
                     safeThis->m_contentSendButton->setEnabled(true);
             } else {
                 QT_TRACE(1, "H323Connection cleared - UI controls reset (via invokeMethod)");
                 safeThis->m_disconnectButton->setEnabled(false);
                 safeThis->m_connectButton->setEnabled(true);
+                safeThis->m_connectEstablished = false;
+                safeThis->stopConnectBlink();
                 safeThis->m_muteCheckbox->setEnabled(false);
                 safeThis->m_cameraCheckbox->setEnabled(false);
+                if (safeThis->m_micCombo)
+                    safeThis->m_micCombo->setEnabled(true);
+                if (safeThis->m_speakerCombo)
+                    safeThis->m_speakerCombo->setEnabled(true);
+                if (safeThis->m_addMicButton)
+                    safeThis->m_addMicButton->setEnabled(true);
+                if (safeThis->m_addSpeakerButton)
+                    safeThis->m_addSpeakerButton->setEnabled(true);
+                safeThis->updateDeviceRowControls(safeThis->m_micRows);
+                safeThis->updateDeviceRowControls(safeThis->m_speakerRows);
                 safeThis->m_muteCheckbox->setChecked(false);
                 safeThis->m_cameraCheckbox->setChecked(false);
                 if (safeThis->m_contentSendButton)
@@ -1682,16 +1825,40 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
             QT_TRACE(1, "H323Connection set - UI controls enabled (direct call)");
             m_disconnectButton->setEnabled(true);
             m_connectButton->setEnabled(false);
+            m_connectEstablished = true;
+            stopConnectBlink();
             m_muteCheckbox->setEnabled(true);
             m_cameraCheckbox->setEnabled(true);
+            if (m_micCombo)
+                m_micCombo->setEnabled(false);
+            if (m_speakerCombo)
+                m_speakerCombo->setEnabled(false);
+            if (m_addMicButton)
+                m_addMicButton->setEnabled(false);
+            if (m_addSpeakerButton)
+                m_addSpeakerButton->setEnabled(false);
+            updateDeviceRowControls(m_micRows);
+            updateDeviceRowControls(m_speakerRows);
             if (m_contentSendButton)
                 m_contentSendButton->setEnabled(true);
         } else {
             QT_TRACE(1, "H323Connection cleared - UI controls reset (direct call)");
             m_disconnectButton->setEnabled(false);
             m_connectButton->setEnabled(true);
+            m_connectEstablished = false;
+            stopConnectBlink();
             m_muteCheckbox->setEnabled(false);
             m_cameraCheckbox->setEnabled(false);
+            if (m_micCombo)
+                m_micCombo->setEnabled(true);
+            if (m_speakerCombo)
+                m_speakerCombo->setEnabled(true);
+            if (m_addMicButton)
+                m_addMicButton->setEnabled(true);
+            if (m_addSpeakerButton)
+                m_addSpeakerButton->setEnabled(true);
+            updateDeviceRowControls(m_micRows);
+            updateDeviceRowControls(m_speakerRows);
             m_muteCheckbox->setChecked(false);
             m_cameraCheckbox->setChecked(false);
             if (m_contentSendButton)
@@ -1765,6 +1932,14 @@ void QtVideoMainWindow::onRemoteFrameReady(const QByteArray& yuvData, unsigned w
 
 void QtVideoMainWindow::setConnectionStatus(const QString& status)
 {
+    if (status.startsWith("Calling ") || status.startsWith("Connecting ")) {
+        m_connectEstablished = false;
+        startConnectBlink();
+    } else if (status.startsWith("Call failed") || status.startsWith("Disconnected") || status.startsWith("Disconnecting")) {
+        m_connectEstablished = false;
+        stopConnectBlink();
+    }
+
     if (m_statusLabel) {
         m_statusLabel->setText(status);
     }
@@ -1870,6 +2045,8 @@ void QtVideoMainWindow::onConnectClicked()
         
         // 通話アクティブフラグを設定（接続確立前に設定）
         m_isCallActive.store(true, std::memory_order_release);
+        m_connectEstablished = false;
+        startConnectBlink();
         
         emit connectRequested(address);
         
@@ -1887,6 +2064,8 @@ void QtVideoMainWindow::onDisconnectClicked()
     
     // 通話アクティブフラグを最初にクリア（タイマーコールバック停止）
     m_isCallActive.store(false, std::memory_order_release);
+    m_connectEstablished = false;
+    stopConnectBlink();
     
     setConnectionStatus("Disconnecting...");
     emit disconnectRequested();
@@ -3849,6 +4028,8 @@ void QtVideoMainWindow::stopAudioVisualizerTimer()
     
     // 通話アクティブフラグを最初にクリア（dangling pointer 防止）
     m_isCallActive.store(false, std::memory_order_release);
+    m_connectEstablished = false;
+    stopConnectBlink();
     
     // タイマーを停止
     if (m_audioVisualizerTimer && m_audioVisualizerTimer->isActive()) {
@@ -4017,6 +4198,7 @@ void QtVideoMainWindow::removeDeviceRow(AudioDeviceRowWidget* widget,
 
 void QtVideoMainWindow::updateDeviceRowControls(QVector<AudioDeviceRowWidget*>& rows)
 {
+    const bool selectionEnabled = (m_h323Connection == nullptr);
     for (int i = 0; i < rows.size(); i++) {
         AudioDeviceRowWidget* row = rows[i];
         if (!row) {
@@ -4026,6 +4208,7 @@ void QtVideoMainWindow::updateDeviceRowControls(QVector<AudioDeviceRowWidget*>& 
         row->setMuteButtonVisible(false);
         // 先頭行は削除不可、追加行のみ削除可
         row->setRemoveButtonVisible(i > 0);
+        row->setDeviceSelectionEnabled(selectionEnabled);
     }
 }
 

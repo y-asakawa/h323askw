@@ -387,6 +387,12 @@ public:
     void setMuteButtonVisible(bool show);
 
     /**
+     * @brief デバイス選択の有効/無効を切り替え
+     * @param enabled true=選択可能, false=選択不可
+     */
+    void setDeviceSelectionEnabled(bool enabled);
+
+    /**
      * @brief 音声レベルメーターを更新
      * @param pcmData PCMデータ
      * @param sampleCount サンプル数
@@ -634,6 +640,11 @@ public slots:
     // ==================== End of Phase 1 Audio UI Slots ====================
 
 private:
+    void updateConnectButtonStyle();
+    void updateDisconnectButtonStyle();
+    void startConnectBlink();
+    void stopConnectBlink();
+
     /**
      * @brief 通話がアクティブかどうかのフラグ（スレッドセーフ）
      * タイマーコールバックで dangling pointer アクセスを防ぐために使用
@@ -777,6 +788,10 @@ private:
     QPushButton* m_addMicButton;                   // マイク追加ボタン
     QPushButton* m_addSpeakerButton;               // スピーカー追加ボタン
     QTimer* m_audioVisualizerTimer;                // ビジュアライザー更新タイマー (75ms間隔)
+    QTimer* m_connectBlinkTimer;                   // Connect点滅タイマー
+    bool m_connectBlinkOn;                         // 点滅表示ON/OFF
+    bool m_connectBlinkActive;                     // 点滅有効状態
+    bool m_connectEstablished;                     // 接続完了状態（Connect反転表示）
     QScrollArea* m_multiDeviceScrollArea;          // マルチデバイススクロール領域
     QDialog* m_multiDeviceWindow;                  // マルチデバイス設定ウィンドウ
     
