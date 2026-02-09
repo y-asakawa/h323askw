@@ -126,6 +126,12 @@ major_dylib_basename() {
     done
 }
 
+# major_dylib_basename() の先頭要素のみを返す
+primary_dylib_basename() {
+    local path="$1"
+    major_dylib_basename "$path" | head -1
+}
+
 # otoolで見える既存パスをパターン検索し、見つかれば置換
 change_dep_if_present() {
     local binary="$1"
@@ -136,6 +142,57 @@ change_dep_if_present() {
     if [ -n "$oldpath" ]; then
         install_name_tool -change "$oldpath" "$newpath" "$binary" 2>/dev/null || true
     fi
+}
+
+# まず希望パスへ置換し、失敗時は短いパスへフォールバックする
+change_dep_with_fallback() {
+    local binary="$1"
+    local pattern="$2"
+    local preferred="$3"
+    local fallback="$4"
+    local oldpath
+    local oldbase
+    local shorttarget
+
+    oldpath=$(otool -L "$binary" 2>/dev/null | awk 'NR>1 {print $1}' | grep -E "$pattern" | head -1 || true)
+    [ -n "$oldpath" ] || return 0
+
+    if install_name_tool -change "$oldpath" "$preferred" "$binary" 2>/dev/null; then
+        return 0
+    fi
+
+    [ -n "$fallback" ] || return 1
+
+    if install_name_tool -change "$oldpath" "$fallback" "$binary" 2>/dev/null; then
+        return 0
+    fi
+
+    oldbase=$(basename "$oldpath")
+    if install_name_tool -change "$oldbase" "$fallback" "$binary" 2>/dev/null; then
+        return 0
+    fi
+
+    shorttarget=$(basename "$fallback")
+    if [ -n "$shorttarget" ] && [ "$shorttarget" != "$fallback" ]; then
+        if install_name_tool -change "$oldpath" "$shorttarget" "$binary" 2>/dev/null; then
+            return 0
+        fi
+        if install_name_tool -change "$oldbase" "$shorttarget" "$binary" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    shorttarget=$(basename "$preferred")
+    if [ -n "$shorttarget" ] && [ "$shorttarget" != "$preferred" ]; then
+        if install_name_tool -change "$oldpath" "$shorttarget" "$binary" 2>/dev/null; then
+            return 0
+        fi
+        if install_name_tool -change "$oldbase" "$shorttarget" "$binary" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    return 1
 }
 
 # ===== 必要なファイルの存在確認 =====
@@ -355,11 +412,11 @@ copy_libraries() {
     OPENSSL_SSL_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/openssl@3/lib" "libssl")
     OPENSSL_CRYPTO_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/openssl@3/lib" "libcrypto")
     if [ -n "$OPENSSL_SSL_LIB" ]; then
-        OPENSSL_SSL_NAME=$(major_dylib_basename "$OPENSSL_SSL_LIB")
+        OPENSSL_SSL_NAME=$(primary_dylib_basename "$OPENSSL_SSL_LIB")
         cp "$OPENSSL_SSL_LIB" "${FRAMEWORKS}/${OPENSSL_SSL_NAME}"
     fi
     if [ -n "$OPENSSL_CRYPTO_LIB" ]; then
-        OPENSSL_CRYPTO_NAME=$(major_dylib_basename "$OPENSSL_CRYPTO_LIB")
+        OPENSSL_CRYPTO_NAME=$(primary_dylib_basename "$OPENSSL_CRYPTO_LIB")
         cp "$OPENSSL_CRYPTO_LIB" "${FRAMEWORKS}/${OPENSSL_CRYPTO_NAME}"
     fi
     
@@ -400,26 +457,26 @@ copy_libraries() {
     SWRESAMPLE_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/ffmpeg/lib" "libswresample")
     SWSCALE_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/ffmpeg/lib" "libswscale")
     if [ -n "$AVCODEC_LIB" ]; then
-        AVCODEC_NAME=$(major_dylib_basename "$AVCODEC_LIB")
+        AVCODEC_NAME=$(primary_dylib_basename "$AVCODEC_LIB")
         cp "$AVCODEC_LIB" "${FRAMEWORKS}/${AVCODEC_NAME}"
     fi
     if [ -n "$AVUTIL_LIB" ]; then
-        AVUTIL_NAME=$(major_dylib_basename "$AVUTIL_LIB")
+        AVUTIL_NAME=$(primary_dylib_basename "$AVUTIL_LIB")
         cp "$AVUTIL_LIB" "${FRAMEWORKS}/${AVUTIL_NAME}"
     fi
     if [ -n "$SWRESAMPLE_LIB" ]; then
-        SWRESAMPLE_NAME=$(major_dylib_basename "$SWRESAMPLE_LIB")
+        SWRESAMPLE_NAME=$(primary_dylib_basename "$SWRESAMPLE_LIB")
         cp "$SWRESAMPLE_LIB" "${FRAMEWORKS}/${SWRESAMPLE_NAME}"
     fi
     if [ -n "$SWSCALE_LIB" ]; then
-        SWSCALE_NAME=$(major_dylib_basename "$SWSCALE_LIB")
+        SWSCALE_NAME=$(primary_dylib_basename "$SWSCALE_LIB")
         cp "$SWSCALE_LIB" "${FRAMEWORKS}/${SWSCALE_NAME}"
     fi
     
     # SpeexDSP (AEC/NS用)
     SPEEXDSP_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/speexdsp/lib" "libspeexdsp")
     if [ -n "$SPEEXDSP_LIB" ]; then
-        SPEEXDSP_NAME=$(major_dylib_basename "$SPEEXDSP_LIB")
+        SPEEXDSP_NAME=$(primary_dylib_basename "$SPEEXDSP_LIB")
         cp "$SPEEXDSP_LIB" "${FRAMEWORKS}/${SPEEXDSP_NAME}"
     else
         log_warn "SpeexDSP (libspeexdsp) が見つかりませんでした。AEC/NS を使う場合は Homebrew でインストールしてください。"
@@ -428,7 +485,7 @@ copy_libraries() {
     # x264
     X264_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/x264/lib" "libx264")
     if [ -n "$X264_LIB" ]; then
-        X264_NAME=$(major_dylib_basename "$X264_LIB")
+        X264_NAME=$(primary_dylib_basename "$X264_LIB")
         cp "$X264_LIB" "${FRAMEWORKS}/${X264_NAME}"
         # Provide an @executable_path alias so plugins can resolve x264 without absolute Homebrew paths
         ln -sf "../Frameworks/${X264_NAME}" "${APP_BUNDLE}/Contents/MacOS/${X264_NAME}"
@@ -437,7 +494,7 @@ copy_libraries() {
     # PortAudio
     PORTAUDIO_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/portaudio/lib" "libportaudio")
     if [ -n "$PORTAUDIO_LIB" ]; then
-        PORTAUDIO_NAME=$(major_dylib_basename "$PORTAUDIO_LIB")
+        PORTAUDIO_NAME=$(primary_dylib_basename "$PORTAUDIO_LIB")
         cp "$PORTAUDIO_LIB" "${FRAMEWORKS}/${PORTAUDIO_NAME}"
     fi
     
@@ -769,10 +826,11 @@ fix_library_paths() {
         "${H264_PLUGIN}" 2>/dev/null || log_warn "  H.264プラグインID設定をスキップ"
     
     # @loader_path を使って Frameworks へ解決（rpath追加不要でヘッダ不足に強い）
-    [ -n "$AVCODEC_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libavcodec.*\\.dylib" "@loader_path/../../../../Frameworks/${AVCODEC_NAME}"
-    [ -n "$AVUTIL_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libavutil.*\\.dylib" "@loader_path/../../../../Frameworks/${AVUTIL_NAME}"
-    [ -n "$SWRESAMPLE_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libswresample.*\\.dylib" "@loader_path/../../../../Frameworks/${SWRESAMPLE_NAME}"
-    [ -n "$SWSCALE_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libswscale.*\\.dylib" "@loader_path/../../../../Frameworks/${SWSCALE_NAME}"
+    [ -n "$AVCODEC_NAME" ] && change_dep_with_fallback "${H264_PLUGIN}" "libavcodec.*\\.dylib" "@loader_path/../../../../Frameworks/${AVCODEC_NAME}" "@executable_path/../Frameworks/${AVCODEC_NAME}" || log_warn "  H.264: libavcodec の依存書き換えに失敗"
+    [ -n "$AVUTIL_NAME" ] && change_dep_with_fallback "${H264_PLUGIN}" "libavutil.*\\.dylib" "@loader_path/../../../../Frameworks/${AVUTIL_NAME}" "@executable_path/../Frameworks/${AVUTIL_NAME}" || log_warn "  H.264: libavutil の依存書き換えに失敗"
+    [ -n "$SWRESAMPLE_NAME" ] && change_dep_with_fallback "${H264_PLUGIN}" "libswresample.*\\.dylib" "@loader_path/../../../../Frameworks/${SWRESAMPLE_NAME}" "@executable_path/../Frameworks/${SWRESAMPLE_NAME}" || log_warn "  H.264: libswresample の依存書き換えに失敗"
+    [ -n "$SWSCALE_NAME" ] && change_dep_with_fallback "${H264_PLUGIN}" "libswscale.*\\.dylib" "@loader_path/../../../../Frameworks/${SWSCALE_NAME}" "@executable_path/../Frameworks/${SWSCALE_NAME}" || log_warn "  H.264: libswscale の依存書き換えに失敗"
+    [ -n "$SWSCALE_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libswscale.*\\.dylib" "${SWSCALE_NAME}"
     [ -n "$X264_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libx264.*\.dylib" "@executable_path/${X264_NAME}"
 
     # libvorbisenc.2.dylibのlibogg依存をlibogg.0.dylibに強制書き換え
@@ -790,8 +848,8 @@ fix_library_paths() {
         install_name_tool -id "@executable_path/../Resources/plugins/video/H.263-ffmpeg/h263-ffmpeg_video_pwplugin.dylib" \
             "${H263_PLUGIN}" 2>/dev/null || log_warn "  H.263プラグインID設定をスキップ"
         
-        [ -n "$AVCODEC_NAME" ] && change_dep_if_present "${H263_PLUGIN}" "libavcodec.*\\.dylib" "@loader_path/../../../../Frameworks/${AVCODEC_NAME}"
-        [ -n "$AVUTIL_NAME" ] && change_dep_if_present "${H263_PLUGIN}" "libavutil.*\\.dylib" "@loader_path/../../../../Frameworks/${AVUTIL_NAME}"
+        [ -n "$AVCODEC_NAME" ] && change_dep_with_fallback "${H263_PLUGIN}" "libavcodec.*\\.dylib" "@loader_path/../../../../Frameworks/${AVCODEC_NAME}" "@executable_path/../Frameworks/${AVCODEC_NAME}" || log_warn "  H.263: libavcodec の依存書き換えに失敗"
+        [ -n "$AVUTIL_NAME" ] && change_dep_with_fallback "${H263_PLUGIN}" "libavutil.*\\.dylib" "@loader_path/../../../../Frameworks/${AVUTIL_NAME}" "@executable_path/../Frameworks/${AVUTIL_NAME}" || log_warn "  H.263: libavutil の依存書き換えに失敗"
     fi
     
     # --- H.261-vic プラグインの依存関係を修正 ---
@@ -890,6 +948,21 @@ fix_library_paths() {
             "@executable_path/../Frameworks/QtGui.framework/Versions/A/QtGui" \
             "${QT_PLUGINS}/platforms/libqcocoa.dylib"
     fi
+
+    # --- Qt6 スタイルプラグインの修正 ---
+    if [ -f "${QT_PLUGINS}/styles/libqmacstyle.dylib" ]; then
+        install_name_tool -id "@executable_path/../PlugIns/styles/libqmacstyle.dylib" \
+            "${QT_PLUGINS}/styles/libqmacstyle.dylib" 2>/dev/null || true
+        install_name_tool -change "@rpath/QtWidgets.framework/Versions/A/QtWidgets" \
+            "@executable_path/../Frameworks/QtWidgets.framework/Versions/A/QtWidgets" \
+            "${QT_PLUGINS}/styles/libqmacstyle.dylib" 2>/dev/null || true
+        install_name_tool -change "@rpath/QtGui.framework/Versions/A/QtGui" \
+            "@executable_path/../Frameworks/QtGui.framework/Versions/A/QtGui" \
+            "${QT_PLUGINS}/styles/libqmacstyle.dylib" 2>/dev/null || true
+        install_name_tool -change "@rpath/QtCore.framework/Versions/A/QtCore" \
+            "@executable_path/../Frameworks/QtCore.framework/Versions/A/QtCore" \
+            "${QT_PLUGINS}/styles/libqmacstyle.dylib" 2>/dev/null || true
+    fi
     
     # --- qt.conf の作成 ---
     log_info "  qt.conf を作成中..."
@@ -972,6 +1045,16 @@ verify_bundle() {
             has_error=1
         fi
     done
+
+    # プラグイン依存もチェック (Resources/plugins と Qt PlugIns)
+    log_info "  プラグインの依存関係を確認..."
+    while IFS= read -r -d '' plugin; do
+        if otool -L "$plugin" | tail -n +2 | grep -q "/Users/example\|/opt/homebrew"; then
+            log_warn "  $(basename "$plugin") に外部パス依存があります"
+            otool -L "$plugin" | tail -n +2 | grep "/Users/example\|/opt/homebrew" || true
+            has_error=1
+        fi
+    done < <(find "${APP_BUNDLE}/Contents/Resources/plugins" "${APP_BUNDLE}/Contents/PlugIns" -name "*.dylib" -print0 2>/dev/null || true)
     
     if [ $has_error -eq 0 ]; then
         log_success "App Bundle の検証が完了しました (問題なし)"
