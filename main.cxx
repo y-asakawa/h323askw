@@ -63,9 +63,13 @@
 #include <cstdlib>
 #include <cmath>
 #include <cstdio>
+#include <cerrno>
+#include <cstring>
 #include <sstream>
 #include <dlfcn.h>  // 🎬 For dlsym (preview callback workaround)
 #ifndef _WIN32
+#include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #else
 #include <process.h>
@@ -229,8 +233,9 @@ public:
       return true;
     }
 
+    const PString ffmpegExecutable = ResolveFfmpegExecutable();
     std::ostringstream cmd;
-    cmd << "ffmpeg -y -loglevel error ";
+    cmd << ShellQuote((const char*)ffmpegExecutable) << " -y -loglevel error ";
 
     if (hasVideo) {
       cmd << "-f rawvideo -pix_fmt yuv420p "
@@ -255,8 +260,9 @@ public:
     }
     cmd << "-movflags +faststart " << ShellQuote((const char*)outputFile);
 
-    PTRACE(1, "H323ASKW\tRECORDING: finalizing MP4 via ffmpeg");
-    int rc = std::system(cmd.str().c_str());
+    PTRACE(1, "H323ASKW\tRECORDING: finalizing MP4 via ffmpeg path=" << ffmpegExecutable);
+    int commandErrno = 0;
+    int rc = RunShellCommand(cmd.str(), commandErrno);
 
     if (rc == 0) {
       std::remove((const char*)videoRawFile);
@@ -268,7 +274,22 @@ public:
       return true;
     }
 
+    int exitCode = -1;
+#ifndef _WIN32
+    if (rc >= 0 && WIFEXITED(rc)) {
+      exitCode = WEXITSTATUS(rc);
+    } else if (rc >= 0 && WIFSIGNALED(rc)) {
+      exitCode = 128 + WTERMSIG(rc);
+    }
+#else
+    exitCode = rc;
+#endif
+
     PTRACE(1, "H323ASKW\tRECORDING: ffmpeg failed rc=" << rc
+           << " exitCode=" << exitCode
+           << " errno=" << commandErrno
+           << " errstr=" << std::strerror(commandErrno)
+           << " ffmpegPath=" << ffmpegExecutable
            << " output=" << outputFile
            << " raw files kept for debugging");
     return false;
@@ -393,6 +414,75 @@ private:
     }
     out.push_back('\'');
     return out;
+  }
+
+  static bool IsExecutableFile(const PString& path)
+  {
+    if (path.IsEmpty() || !PFile::Exists(path)) {
+      return false;
+    }
+#ifndef _WIN32
+    return ::access((const char*)path, X_OK) == 0;
+#else
+    return true;
+#endif
+  }
+
+  static PString ResolveFfmpegExecutable()
+  {
+    const char* forced = std::getenv("H323ASKW_FFMPEG");
+    if (forced != NULL && forced[0] != '\0' && IsExecutableFile(forced)) {
+      return forced;
+    }
+
+    PString execDir = PProcess::Current().GetFile().GetDirectory();
+    PStringArray candidates;
+    candidates.AppendString(execDir + "/ffmpeg");
+    candidates.AppendString(execDir + "/../Resources/tools/ffmpeg");
+    candidates.AppendString("/opt/homebrew/bin/ffmpeg");
+    candidates.AppendString("/usr/local/bin/ffmpeg");
+
+    for (PINDEX i = 0; i < candidates.GetSize(); ++i) {
+      if (IsExecutableFile(candidates[i])) {
+        return candidates[i];
+      }
+    }
+
+    return "ffmpeg";
+  }
+
+  static int RunShellCommand(const std::string& command, int& systemErrno)
+  {
+    systemErrno = 0;
+    static std::mutex shellExecMutex;
+    std::lock_guard<std::mutex> lock(shellExecMutex);
+
+#ifndef _WIN32
+    struct sigaction oldSigchldAction;
+    bool restoreSigchld = false;
+    if (::sigaction(SIGCHLD, NULL, &oldSigchldAction) == 0 &&
+        oldSigchldAction.sa_handler == SIG_IGN) {
+      struct sigaction defaultSigchldAction;
+      std::memset(&defaultSigchldAction, 0, sizeof(defaultSigchldAction));
+      defaultSigchldAction.sa_handler = SIG_DFL;
+      sigemptyset(&defaultSigchldAction.sa_mask);
+      if (::sigaction(SIGCHLD, &defaultSigchldAction, NULL) == 0) {
+        restoreSigchld = true;
+      }
+    }
+#endif
+
+    errno = 0;
+    const int rc = std::system(command.c_str());
+    systemErrno = errno;
+
+#ifndef _WIN32
+    if (restoreSigchld) {
+      ::sigaction(SIGCHLD, &oldSigchldAction, NULL);
+    }
+#endif
+
+    return rc;
   }
 
   bool ShouldCaptureVideo(bool isLocal) const

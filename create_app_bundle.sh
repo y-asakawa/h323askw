@@ -999,6 +999,9 @@ FRAMEWORKS_DIR="${APP_DIR}/Frameworks"
 export DYLD_LIBRARY_PATH="${FRAMEWORKS_DIR}:${DYLD_LIBRARY_PATH}"
 export DYLD_FALLBACK_LIBRARY_PATH="${FRAMEWORKS_DIR}:/usr/lib"
 
+# Finder 起動時は PATH が最小化されるため Homebrew の ffmpeg を明示的に探索可能にする
+export PATH="${SCRIPT_DIR}:/opt/homebrew/bin:/usr/local/bin:${PATH}"
+
 # プラグインパスを環境変数に設定
 # PTLib用（vidinput, sound）
 export PTLIB_PLUGIN_DIR="${RESOURCES_DIR}/plugins/vidinput:${RESOURCES_DIR}/plugins/sound"
