@@ -2786,8 +2786,8 @@ void H323ASKW::Main()
             "  --rtp-base port      Specific the base RTP/RTCP pair of UDP port to use\n"
             "  --rtp-max port       Specific the maximum RTP/RTCP pair of UDP port to use\n"
             "  --tmaxest  secs      Maximum time to wait for \"Established\" [0]\n"
-            "  --tmincall secs      Minimum call duration in seconds [28800 = 8 hours]\n"
-            "  --tmaxcall secs      Maximum call duration in seconds [28800 = 8 hours]\n"
+            "  --tmincall secs      Minimum call duration in seconds [2592000 = 30 days]\n"
+            "  --tmaxcall secs      Maximum call duration in seconds [2592000 = 30 days]\n"
             "  --tminwait secs      Minimum interval between calls in seconds [10]\n"
             "  --tmaxwait secs      Maximum interval between calls in seconds [30]\n"
             "  --record file        Record call media to MP4 file\n"
@@ -3412,8 +3412,8 @@ void H323ASKW::Main()
   else {
     CallParams params(*this);
     params.tmax_est .SetInterval(0, args.GetOptionString("tmaxest",  "0" ).AsUnsigned());
-    params.tmin_call.SetInterval(0, args.GetOptionString("tmincall", "28800").AsUnsigned());  // 8 hours default
-    params.tmax_call.SetInterval(0, args.GetOptionString("tmaxcall", "28800").AsUnsigned());  // 8 hours default
+    params.tmin_call.SetInterval(0, args.GetOptionString("tmincall", "2592000").AsUnsigned());  // 30 days default
+    params.tmax_call.SetInterval(0, args.GetOptionString("tmaxcall", "2592000").AsUnsigned());  // 30 days default
     params.tmin_wait.SetInterval(0, args.GetOptionString("tminwait", "10").AsUnsigned());
     params.tmax_wait.SetInterval(0, args.GetOptionString("tmaxwait", "30").AsUnsigned());
 
