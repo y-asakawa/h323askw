@@ -427,17 +427,17 @@ copy_libraries() {
         # 優先順位1: /opt/homebrew/lib/
         if [ -d "${HOMEBREW_DIR}/lib/${fw}.framework" ]; then
             log_info "    ${fw}.framework をコピー (from ${HOMEBREW_DIR}/lib/)..."
-            cp -RL "${HOMEBREW_DIR}/lib/${fw}.framework" "${FRAMEWORKS}/"
+            ditto "${HOMEBREW_DIR}/lib/${fw}.framework" "${FRAMEWORKS}/${fw}.framework"
             fw_found=true
         # 優先順位2: /opt/homebrew/opt/qt6/lib/
         elif [ -d "${HOMEBREW_DIR}/opt/qt6/lib/${fw}.framework" ]; then
             log_info "    ${fw}.framework をコピー (from ${HOMEBREW_DIR}/opt/qt6/lib/)..."
-            cp -RL "${HOMEBREW_DIR}/opt/qt6/lib/${fw}.framework" "${FRAMEWORKS}/"
+            ditto "${HOMEBREW_DIR}/opt/qt6/lib/${fw}.framework" "${FRAMEWORKS}/${fw}.framework"
             fw_found=true
         # 優先順位3: /opt/homebrew/opt/qtbase/lib/ (古い配置)
         elif [ -d "${HOMEBREW_DIR}/opt/qtbase/lib/${fw}.framework" ]; then
             log_info "    ${fw}.framework をコピー (from ${HOMEBREW_DIR}/opt/qtbase/lib/)..."
-            cp -RL "${HOMEBREW_DIR}/opt/qtbase/lib/${fw}.framework" "${FRAMEWORKS}/"
+            ditto "${HOMEBREW_DIR}/opt/qtbase/lib/${fw}.framework" "${FRAMEWORKS}/${fw}.framework"
             fw_found=true
         fi
         
@@ -1080,6 +1080,7 @@ show_bundle_size() {
 # ===== コード署名 =====
 sign_bundle() {
     log_info "App Bundle にコード署名中..."
+    local has_sign_error=0
     
     # まず、すべてのdylibに署名
     log_info "  Frameworksのライブラリに署名中..."
@@ -1087,6 +1088,7 @@ sign_bundle() {
         if [ -f "$lib" ]; then
             codesign --force --sign - --timestamp=none "$lib" 2>/dev/null || {
                 log_warn "  署名スキップ: $(basename $lib)"
+                has_sign_error=1
             }
         fi
     done
@@ -1096,19 +1098,23 @@ sign_bundle() {
     for fw in QtCore QtDBus QtGui QtWidgets; do
         local fw_path="${APP_BUNDLE}/Contents/Frameworks/${fw}.framework"
         if [ -d "$fw_path" ]; then
-            # まずバイナリに署名
-            if [ -f "${fw_path}/Versions/A/${fw}" ]; then
-                codesign --force --sign - --timestamp=none "${fw_path}/Versions/A/${fw}" 2>/dev/null || true
+            # フレームワーク全体に署名（内部バイナリを含む）
+            if ! codesign --force --sign - --timestamp=none "${fw_path}" 2>/dev/null; then
+                log_warn "  Qt framework 署名失敗: ${fw}.framework"
+                has_sign_error=1
             fi
-            # フレームワーク全体に署名
-            codesign --force --sign - --timestamp=none "${fw_path}" 2>/dev/null || true
         fi
     done
     
     # プラグインに署名
     log_info "  プラグインに署名中..."
     if [ -d "${APP_BUNDLE}/Contents/Resources/plugins" ]; then
-        find "${APP_BUNDLE}/Contents/Resources/plugins" -name "*.dylib" -exec codesign --force --sign - --timestamp=none {} \; 2>/dev/null || true
+        while IFS= read -r -d '' dylib; do
+            if ! codesign --force --sign - --timestamp=none "$dylib" 2>/dev/null; then
+                log_warn "  プラグイン署名失敗: $(basename "$dylib")"
+                has_sign_error=1
+            fi
+        done < <(find "${APP_BUNDLE}/Contents/Resources/plugins" -name "*.dylib" -print0)
     fi
     
     # Qt6 プラットフォームプラグインに署名
@@ -1116,7 +1122,10 @@ sign_bundle() {
     if [ -d "${APP_BUNDLE}/Contents/PlugIns/platforms" ]; then
         for plugin in "${APP_BUNDLE}/Contents/PlugIns/platforms/"*.dylib; do
             if [ -f "$plugin" ]; then
-                codesign --force --sign - --timestamp=none "$plugin" 2>/dev/null || true
+                if ! codesign --force --sign - --timestamp=none "$plugin" 2>/dev/null; then
+                    log_warn "  Qt platform plugin 署名失敗: $(basename "$plugin")"
+                    has_sign_error=1
+                fi
             fi
         done
     fi
@@ -1125,25 +1134,44 @@ sign_bundle() {
     log_info "  実行ファイルに署名中..."
     codesign --force --sign - --timestamp=none "${APP_BUNDLE}/Contents/MacOS/h323askw_bin" 2>/dev/null || {
         log_warn "  実行ファイル署名に問題がありました"
+        has_sign_error=1
     }
     
     # 起動スクリプトに署名（必要に応じて）
     if [ -f "${APP_BUNDLE}/Contents/MacOS/h323askw" ]; then
-        codesign --force --sign - --timestamp=none "${APP_BUNDLE}/Contents/MacOS/h323askw" 2>/dev/null || true
+        if ! codesign --force --sign - --timestamp=none "${APP_BUNDLE}/Contents/MacOS/h323askw" 2>/dev/null; then
+            log_warn "  起動スクリプト署名に問題がありました"
+            has_sign_error=1
+        fi
     fi
     
     # アプリバンドル全体に署名
     log_info "  App Bundle 全体に署名中..."
     codesign --force --deep --sign - --timestamp=none "${APP_BUNDLE}" 2>/dev/null || {
         log_warn "  App Bundle署名に問題がありました"
+        has_sign_error=1
     }
     
     # 署名を検証
     log_info "  署名を検証中..."
-    if codesign --verify --verbose=2 "${APP_BUNDLE}" 2>&1; then
-        log_success "コード署名が完了しました"
+    if codesign --verify --deep --strict --verbose=2 "${APP_BUNDLE}" 2>&1; then
+        log_success "コード署名が完了しました (strict verify OK)"
     else
-        log_warn "署名検証で警告がありましたが、ad-hoc署名は正常です"
+        log_error "署名検証に失敗しました"
+        has_sign_error=1
+    fi
+
+    # Gatekeeper 判定（他PC配布時の可否）
+    if spctl --assess --type execute --verbose=2 "${APP_BUNDLE}" >/dev/null 2>&1; then
+        log_success "Gatekeeper 検証: 通過"
+    else
+        log_warn "Gatekeeper 検証: 拒否されました"
+        log_warn "  他PCで配布するには Developer ID 署名 + notarization が必要です"
+    fi
+
+    if [ $has_sign_error -ne 0 ]; then
+        log_error "コード署名に失敗したため中断します"
+        exit 1
     fi
 }
 
