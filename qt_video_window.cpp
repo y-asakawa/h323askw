@@ -2364,21 +2364,12 @@ QtVideoManager::QtVideoManager()
 
 QtVideoManager::~QtVideoManager()
 {
-    if (!m_initialized) {
-        return;
-    }
-
-    // static デストラクタ順序で QApplication が先に破棄された場合、
-    // ここで QWidget を触るとクラッシュするため触らない。
-    if (!QCoreApplication::instance() || QCoreApplication::closingDown()) {
-        m_mainWindow = nullptr;
-        m_contentWindow = nullptr;
-        m_localContentWindow = nullptr;
-        m_initialized = false;
-        return;
-    }
-
-    shutdown();
+    // Shutdown is performed explicitly in main() before QApplication destruction.
+    // Avoid touching QWidget objects from static-destructor context.
+    m_mainWindow = nullptr;
+    m_contentWindow = nullptr;
+    m_localContentWindow = nullptr;
+    m_initialized = false;
 }
 
 bool QtVideoManager::initialize()
@@ -2409,6 +2400,8 @@ void QtVideoManager::shutdown()
     setContentAvailable(false);
 
     if (m_mainWindow) {
+        // Programmatic shutdown must not re-enter exit flow via closeEvent().
+        QObject::disconnect(m_mainWindow, &QtVideoMainWindow::exitRequested, nullptr, nullptr);
         m_mainWindow->close();
         delete m_mainWindow;
         m_mainWindow = nullptr;

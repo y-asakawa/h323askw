@@ -48,6 +48,7 @@
 #include <QProgressBar>  // Phase 1: Audio Visualizer
 #include <atomic>
 #include <QSlider>
+#include <QPointer>
 
 #ifdef Q_OS_MAC
 #ifndef __MAC_OS_X_DISABLE_AVAILABILITY
@@ -1054,9 +1055,9 @@ private:
     
     void setupSignalConnections();
 
-    QtVideoMainWindow* m_mainWindow;
-    QtContentWindow* m_contentWindow;  // リモートコンテンツ受信用
-    QtContentWindow* m_localContentWindow;  // ローカルコンテンツ送信プレビュー用
+    QPointer<QtVideoMainWindow> m_mainWindow;
+    QPointer<QtContentWindow> m_contentWindow;  // リモートコンテンツ受信用
+    QPointer<QtContentWindow> m_localContentWindow;  // ローカルコンテンツ送信プレビュー用
     class MyH323EndPoint* m_endpoint;
     bool m_initialized;
     int m_lastContentWidth;

@@ -199,12 +199,8 @@ void USBHIDImpl_Stop(USBHIDImplRef impl) {
     pthread_join(impl->thread, NULL);
     
     pthread_mutex_lock(&impl->mutex);
-    
-    if (impl->hidManager != NULL) {
-        CFRelease(impl->hidManager);
-        impl->hidManager = NULL;
-    }
-    
+    impl->hidManager = NULL;
+    impl->runLoop = NULL;
     impl->threadRunning = false;
     impl->currentDevice = NULL;
     impl->hasDevice = false;
@@ -263,34 +259,53 @@ static void* ThreadMain(void* arg) {
     fprintf(stderr, "HIDController: Thread started\n");
     
     // Store the run loop for this thread
+    pthread_mutex_lock(&impl->mutex);
     impl->runLoop = CFRunLoopGetCurrent();
+    pthread_mutex_unlock(&impl->mutex);
     
     // Schedule the HID manager with this run loop
     IOHIDManagerScheduleWithRunLoop(impl->hidManager, impl->runLoop, kCFRunLoopDefaultMode);
     
     // Open the HID manager
+    bool managerOpened = false;
     IOReturn result = IOHIDManagerOpen(impl->hidManager, kIOHIDOptionsTypeNone);
     if (result != kIOReturnSuccess) {
         fprintf(stderr, "HIDController: Failed to open HID manager: %d\n", result);
-        impl->runLoop = NULL;
-        return NULL;
+    } else {
+        managerOpened = true;
+        fprintf(stderr, "HIDController: HID manager opened, starting run loop\n");
     }
     
-    fprintf(stderr, "HIDController: HID manager opened, starting run loop\n");
-    
     // Run until stopped
-    while (!impl->stopRequested) {
-        CFRunLoopRunResult runResult = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.5, true);
-        if (runResult == kCFRunLoopRunFinished) {
-            break;
+    if (managerOpened) {
+        while (!impl->stopRequested) {
+            CFRunLoopRunResult runResult = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.5, true);
+            if (runResult == kCFRunLoopRunFinished) {
+                break;
+            }
         }
     }
     
-    // Cleanup
-    IOHIDManagerUnscheduleFromRunLoop(impl->hidManager, impl->runLoop, kCFRunLoopDefaultMode);
-    IOHIDManagerClose(impl->hidManager, kIOHIDOptionsTypeNone);
-    
+    // Cleanup on the HID thread. Releasing manager from another thread can
+    // trigger IOKit assertions inside unschedule/close paths.
+    IOHIDManagerRef manager = NULL;
+    CFRunLoopRef runLoop = NULL;
+    pthread_mutex_lock(&impl->mutex);
+    manager = impl->hidManager;
+    runLoop = impl->runLoop;
+    impl->hidManager = NULL;
     impl->runLoop = NULL;
+    pthread_mutex_unlock(&impl->mutex);
+
+    if (manager != NULL) {
+        if (runLoop != NULL) {
+            IOHIDManagerUnscheduleFromRunLoop(manager, runLoop, kCFRunLoopDefaultMode);
+        }
+        if (managerOpened) {
+            IOHIDManagerClose(manager, kIOHIDOptionsTypeNone);
+        }
+        CFRelease(manager);
+    }
     
     fprintf(stderr, "HIDController: Thread ended\n");
     return NULL;

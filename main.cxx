@@ -2321,14 +2321,12 @@ H323ASKW::H323ASKW()
 
 #ifdef __APPLE__
 // Signal handler for debugging trace trap crashes
-void handle_sigtrap(int signal) {
+void handle_sigtrap(int sig) {
   PTRACE(1, "H323ASKW\t*** TRACE TRAP SIGNAL RECEIVED ***");
-  PTRACE(1, "H323ASKW\tSignal number: " << signal);
-  PTRACE(1, "H323ASKW\tThis may be due to macOS threading restrictions");
+  PTRACE(1, "H323ASKW\tSignal number: " << sig);
+  PTRACE(1, "H323ASKW\tSIGTRAP handler invoked");
   fprintf(stderr, "\n*** TRACE TRAP DETECTED ***\n");
-  fprintf(stderr, "Signal: %d (likely related to macOS threading)\n", signal);
-  fprintf(stderr, "Check that video operations are on main thread\n");
-  exit(1);
+  fprintf(stderr, "Signal: %d\n", sig);
 }
 #endif
 
@@ -2378,8 +2376,11 @@ void H323ASKW::Main()
 #ifndef _WIN32
   signal(SIGCHLD, SIG_IGN);	// avoid zombies from H.264 plugin helper
 #ifdef __APPLE__
-  signal(SIGTRAP, handle_sigtrap);  // Handle trace trap for debugging
-  PTRACE(3, "H323ASKW\tInstalled SIGTRAP handler for macOS debugging");
+  // Keep SIGTRAP handling opt-in. Always-on overrides can affect normal call flow.
+  if (std::getenv("H323ASKW_ENABLE_SIGTRAP_HANDLER") != nullptr) {
+    signal(SIGTRAP, handle_sigtrap);
+    PTRACE(3, "H323ASKW\tInstalled optional SIGTRAP handler for macOS");
+  }
 #endif
 #endif
 
