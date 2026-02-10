@@ -166,7 +166,7 @@ endif
 ifeq ($(OSTYPE),Darwin)
   STDCCFLAGS += -D_REENTRANT
   # Add macOS framework support
-  ENDLDLIBS += -framework CoreFoundation -framework CoreVideo -framework CoreMedia -framework CoreGraphics
+  ENDLDLIBS += -framework CoreFoundation -framework CoreVideo -framework CoreMedia -framework CoreGraphics -framework CoreAudio
   # IOKit for USB HID Controller (mute button support)
   ENDLDLIBS += -framework IOKit
   # AVFoundation/Foundation for permission bootstrap (camera/mic + Bonjour trigger)

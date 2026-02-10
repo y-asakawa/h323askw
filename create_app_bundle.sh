@@ -450,6 +450,39 @@ copy_libraries() {
             log_warn "  ${fw}.framework not found - skipping"
         fi
     done
+
+    # Qt Framework が参照する Homebrew dylib を再帰的に収集
+    # (配布先での ICU/GLib 等の欠落を防ぐ)
+    log_info "  Qt6 追加依存ライブラリを収集中..."
+    for pass in 1 2 3 4; do
+        local copied_this_pass=0
+
+        # Qt binaries + 既にコピー済みdylib を走査対象にする
+        for target in "${FRAMEWORKS}"/Qt*.framework/Versions/A/Qt* "${FRAMEWORKS}"/*.dylib; do
+            [ -f "$target" ] || continue
+
+            while IFS= read -r dep; do
+                [ -n "$dep" ] || continue
+                case "$dep" in
+                    ${HOMEBREW_DIR}/*)
+                        if [[ "$dep" == *.dylib ]]; then
+                            local dep_base
+                            dep_base="$(basename "$dep")"
+                            if [ ! -f "${FRAMEWORKS}/${dep_base}" ] && [ -f "$dep" ]; then
+                                cp "$dep" "${FRAMEWORKS}/${dep_base}"
+                                copied_this_pass=1
+                                log_info "    copied Qt dep: ${dep_base}"
+                            fi
+                        fi
+                        ;;
+                esac
+            done < <(otool -L "$target" 2>/dev/null | awk 'NR>1 {print $1}')
+        done
+
+        if [ "$copied_this_pass" -eq 0 ]; then
+            break
+        fi
+    done
     
     # FFmpeg (実体ファイルをコピー・バージョン自動検出)
     AVCODEC_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/ffmpeg/lib" "libavcodec")
@@ -830,7 +863,14 @@ fix_library_paths() {
     [ -n "$AVUTIL_NAME" ] && change_dep_with_fallback "${H264_PLUGIN}" "libavutil.*\\.dylib" "@loader_path/../../../../Frameworks/${AVUTIL_NAME}" "@executable_path/../Frameworks/${AVUTIL_NAME}" || log_warn "  H.264: libavutil の依存書き換えに失敗"
     [ -n "$SWRESAMPLE_NAME" ] && change_dep_with_fallback "${H264_PLUGIN}" "libswresample.*\\.dylib" "@loader_path/../../../../Frameworks/${SWRESAMPLE_NAME}" "@executable_path/../Frameworks/${SWRESAMPLE_NAME}" || log_warn "  H.264: libswresample の依存書き換えに失敗"
     [ -n "$SWSCALE_NAME" ] && change_dep_with_fallback "${H264_PLUGIN}" "libswscale.*\\.dylib" "@loader_path/../../../../Frameworks/${SWSCALE_NAME}" "@executable_path/../Frameworks/${SWSCALE_NAME}" || log_warn "  H.264: libswscale の依存書き換えに失敗"
+    # h264プラグインはheaderpad不足で長い置換先にできないことがあるため、
+    # swscaleは短い名前参照を許容（ランチャーのDYLD_LIBRARY_PATHで解決）
     [ -n "$SWSCALE_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libswscale.*\\.dylib" "${SWSCALE_NAME}"
+    # fallbackで短いファイル名参照に落ちるケースを正規化
+    [ -n "$AVCODEC_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "^libavcodec.*\\.dylib$" "@executable_path/../Frameworks/${AVCODEC_NAME}"
+    [ -n "$AVUTIL_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "^libavutil.*\\.dylib$" "@executable_path/../Frameworks/${AVUTIL_NAME}"
+    [ -n "$SWRESAMPLE_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "^libswresample.*\\.dylib$" "@executable_path/../Frameworks/${SWRESAMPLE_NAME}"
+    [ -n "$SWSCALE_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "^libswscale.*\\.dylib$" "@executable_path/../Frameworks/${SWSCALE_NAME}"
     [ -n "$X264_NAME" ] && change_dep_if_present "${H264_PLUGIN}" "libx264.*\.dylib" "@executable_path/${X264_NAME}"
 
     # libvorbisenc.2.dylibのlibogg依存をlibogg.0.dylibに強制書き換え
@@ -1003,13 +1043,17 @@ export DYLD_FALLBACK_LIBRARY_PATH="${FRAMEWORKS_DIR}:/usr/lib"
 export PATH="${SCRIPT_DIR}:/opt/homebrew/bin:/usr/local/bin:${PATH}"
 
 # プラグインパスを環境変数に設定
-# PTLib用（vidinput, sound）
-export PTLIB_PLUGIN_DIR="${RESOURCES_DIR}/plugins/vidinput:${RESOURCES_DIR}/plugins/sound"
-export PWLIB_PLUGIN_DIR="${RESOURCES_DIR}/plugins/vidinput:${RESOURCES_DIR}/plugins/sound"
+PLUGIN_ROOT="${RESOURCES_DIR}/plugins"
+PLUGIN_PATHS="${PLUGIN_ROOT}:${PLUGIN_ROOT}/vidinput:${PLUGIN_ROOT}/sound:${PLUGIN_ROOT}/video:${PLUGIN_ROOT}/audio:${PLUGIN_ROOT}/video/H.264:${PLUGIN_ROOT}/video/H.263-ffmpeg:${PLUGIN_ROOT}/video/H.261-vic"
+
+# PTLib系（新旧両方の変数名を設定）
+export PTLIBPLUGINDIR="${PLUGIN_PATHS}"
+export PWLIBPLUGINDIR="${PLUGIN_PATHS}"
+export PTLIB_PLUGIN_DIR="${PLUGIN_PATHS}"
+export PWLIB_PLUGIN_DIR="${PLUGIN_PATHS}"
 
 # H323Plus用（video, audio コーデック）
-export H323_PLUGIN_DIR="${RESOURCES_DIR}/plugins"
-export PTLIBPLUGINDIR="${RESOURCES_DIR}/plugins"
+export H323_PLUGIN_DIR="${PLUGIN_ROOT}"
 
 # 実行
 exec "./h323askw_bin" "$@"
@@ -1025,6 +1069,63 @@ verify_bundle() {
     log_info "App Bundle を検証中..."
     
     local has_error=0
+
+    check_dep_integrity() {
+        local target="$1"
+        local dep=""
+        local dep_lines=""
+
+        dep_lines="$(otool -L "$target" 2>/dev/null | tail -n +2)"
+        # dylib/framework binary では先頭に install name (self id) が来るので除外
+        if otool -D "$target" >/dev/null 2>&1; then
+            dep_lines="$(printf "%s\n" "$dep_lines" | tail -n +2)"
+        fi
+
+        while IFS= read -r dep; do
+            [ -n "$dep" ] || continue
+
+            local resolved=""
+            case "$dep" in
+                /System/*|/usr/lib/*)
+                    continue
+                    ;;
+                /*)
+                    log_warn "  $(basename "$target") に外部絶対パス依存があります: ${dep}"
+                    has_error=1
+                    continue
+                    ;;
+                @executable_path/*)
+                    resolved="${APP_BUNDLE}/Contents/MacOS/${dep#@executable_path/}"
+                    ;;
+                @loader_path/*)
+                    local target_dir
+                    target_dir="$(dirname "$target")"
+                    resolved="${target_dir}/${dep#@loader_path/}"
+                    ;;
+                @rpath/*|@*)
+                    continue
+                    ;;
+                *.dylib)
+                    # 一部プラグインはheaderpad制約で短い名前参照のみ可能
+                    # (ランチャーのDYLD_LIBRARY_PATHでFrameworksから解決)
+                    if [ -e "${APP_BUNDLE}/Contents/Frameworks/${dep}" ]; then
+                        continue
+                    fi
+                    log_warn "  $(basename "$target") に裸の dylib 参照があります: ${dep}"
+                    has_error=1
+                    continue
+                    ;;
+                *)
+                    continue
+                    ;;
+            esac
+
+            if [ -n "$resolved" ] && [ ! -e "$resolved" ]; then
+                log_warn "  依存解決不可: $(basename "$target") -> ${dep} (${resolved})"
+                has_error=1
+            fi
+        done < <(printf "%s\n" "$dep_lines" | awk '{print $1}')
+    }
     
     # 実行ファイルの依存関係をチェック (最初の行はファイル名なのでスキップ)
     log_info "  実行ファイルの依存関係を確認..."
@@ -1057,6 +1158,21 @@ verify_bundle() {
             otool -L "$plugin" | tail -n +2 | grep "/Users/example\|/opt/homebrew" || true
             has_error=1
         fi
+    done < <(find "${APP_BUNDLE}/Contents/Resources/plugins" "${APP_BUNDLE}/Contents/PlugIns" -name "*.dylib" -print0 2>/dev/null || true)
+
+    # 裸dylib参照/解決不能参照を追加チェック
+    log_info "  dylib 解決整合性を確認..."
+    check_dep_integrity "${APP_BUNDLE}/Contents/MacOS/h323askw_bin"
+    for lib in "${APP_BUNDLE}/Contents/Frameworks/"*.dylib; do
+        [ -f "$lib" ] || continue
+        check_dep_integrity "$lib"
+    done
+    for fwbin in "${APP_BUNDLE}/Contents/Frameworks/Qt"*.framework/Versions/A/Qt*; do
+        [ -f "$fwbin" ] || continue
+        check_dep_integrity "$fwbin"
+    done
+    while IFS= read -r -d '' plugin; do
+        check_dep_integrity "$plugin"
     done < <(find "${APP_BUNDLE}/Contents/Resources/plugins" "${APP_BUNDLE}/Contents/PlugIns" -name "*.dylib" -print0 2>/dev/null || true)
     
     if [ $has_error -eq 0 ]; then

@@ -34,6 +34,14 @@ namespace HIDUsage {
     const uint32_t JabraVendor2 = 0xFF20;  // Jabra specific (65312)
 }
 
+namespace {
+    const size_t kMaxTrackedDevices = 16;
+    const int kJabraVendorId = 0x0B0E;
+    const int kPolyVendorId = 0x047F;
+    const int kLenovoVendorId = 0x17EF;
+    const int kLogitechVendorId = 0x046D;
+}
+
 // Implementation structure
 struct USBHIDImpl {
     IOHIDManagerRef hidManager;
@@ -41,6 +49,9 @@ struct USBHIDImpl {
     IOHIDDeviceRef currentDevice;     // Primary device (Jabra/Plantronics preferred)
     IOHIDDeviceRef jabraDevice;       // Specifically track Jabra device
     int jabraVid;                     // Jabra device VID for verification
+    IOHIDDeviceRef connectedDevices[kMaxTrackedDevices];
+    char connectedNames[kMaxTrackedDevices][256];
+    size_t connectedCount;
     
     pthread_t thread;
     bool threadRunning;
@@ -66,7 +77,15 @@ static void DeviceRemovedCallback(void* context, IOReturn result, void* sender, 
 static void InputValueCallback(void* context, IOReturn result, void* sender, IOHIDValueRef value);
 static IOHIDElementRef FindLEDElement(IOHIDDeviceRef device, uint32_t usage);
 static bool SetDeviceLED(USBHIDImpl* impl, bool isMuted);
-static bool SetOffHookLED(USBHIDImpl* impl, bool offHook);
+static bool SetDeviceLEDOnTarget(IOHIDDeviceRef targetDevice, bool isMuted);
+static bool SetOffHookLEDOnTarget(IOHIDDeviceRef targetDevice, bool offHook);
+static bool IsPreferredHeadsetVendor(int vid);
+static int GetVendorID(IOHIDDeviceRef device);
+static void GetProductName(IOHIDDeviceRef device, char* buffer, size_t bufferSize);
+static int FindConnectedDeviceIndex(const USBHIDImpl* impl, IOHIDDeviceRef device);
+static bool AddConnectedDevice(USBHIDImpl* impl, IOHIDDeviceRef device, const char* deviceName);
+static bool RemoveConnectedDevice(USBHIDImpl* impl, IOHIDDeviceRef device, char* removedName, size_t removedNameSize);
+static void SelectPrimaryDevice(USBHIDImpl* impl);
 
 // ============================================================================
 // Public C interface
@@ -105,53 +124,28 @@ int USBHIDImpl_Start(USBHIDImplRef impl) {
         return 0;
     }
     
-    // Create matching dictionaries for Consumer and Telephony devices
+    // NOTE:
+    // Broad Consumer/Telephony matching can include internal keyboards and
+    // trigger kIOReturnNotPermitted on Finder launch (TCC/Input Monitoring).
+    // To keep distribution builds working without extra permission prompts,
+    // default to headset-vendor matching only.
     CFMutableArrayRef matchingArray = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
-    
-    // Match Consumer devices (page 0x0C)
-    CFMutableDictionaryRef consumerDict = CFDictionaryCreateMutable(
-        kCFAllocatorDefault, 0,
-        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    int consumerPage = HIDUsage::Consumer;
-    CFNumberRef consumerPageNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &consumerPage);
-    CFDictionarySetValue(consumerDict, CFSTR(kIOHIDDeviceUsagePageKey), consumerPageNum);
-    CFRelease(consumerPageNum);
-    CFArrayAppendValue(matchingArray, consumerDict);
-    CFRelease(consumerDict);
-    
-    // Match Telephony devices (page 0x0B)
-    CFMutableDictionaryRef telephonyDict = CFDictionaryCreateMutable(
-        kCFAllocatorDefault, 0,
-        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    int telephonyPage = HIDUsage::Telephony;
-    CFNumberRef telephonyPageNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &telephonyPage);
-    CFDictionarySetValue(telephonyDict, CFSTR(kIOHIDDeviceUsagePageKey), telephonyPageNum);
-    CFRelease(telephonyPageNum);
-    CFArrayAppendValue(matchingArray, telephonyDict);
-    CFRelease(telephonyDict);
-    
-    // Match Jabra devices by Vendor ID (0x0B0E) - catches all Jabra HID interfaces
-    CFMutableDictionaryRef jabraVidDict = CFDictionaryCreateMutable(
-        kCFAllocatorDefault, 0,
-        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    int jabraVid = 0x0B0E;  // Jabra/GN Audio Vendor ID
-    CFNumberRef jabraVidNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &jabraVid);
-    CFDictionarySetValue(jabraVidDict, CFSTR(kIOHIDVendorIDKey), jabraVidNum);
-    CFRelease(jabraVidNum);
-    CFArrayAppendValue(matchingArray, jabraVidDict);
-    CFRelease(jabraVidDict);
-    
-    // Match Plantronics/Poly devices by Vendor ID (0x047F)
-    CFMutableDictionaryRef polyVidDict = CFDictionaryCreateMutable(
-        kCFAllocatorDefault, 0,
-        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    int polyVid = 0x047F;  // Plantronics/Poly Vendor ID
-    CFNumberRef polyVidNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &polyVid);
-    CFDictionarySetValue(polyVidDict, CFSTR(kIOHIDVendorIDKey), polyVidNum);
-    CFRelease(polyVidNum);
-    CFArrayAppendValue(matchingArray, polyVidDict);
-    CFRelease(polyVidDict);
-    
+    auto appendVendorMatch = [&](int vendorId) {
+        CFMutableDictionaryRef dict = CFDictionaryCreateMutable(
+            kCFAllocatorDefault, 0,
+            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFNumberRef vidNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &vendorId);
+        CFDictionarySetValue(dict, CFSTR(kIOHIDVendorIDKey), vidNum);
+        CFRelease(vidNum);
+        CFArrayAppendValue(matchingArray, dict);
+        CFRelease(dict);
+    };
+
+    appendVendorMatch(kJabraVendorId);    // Jabra/GN Audio
+    appendVendorMatch(kPolyVendorId);     // Poly/Plantronics
+    appendVendorMatch(kLenovoVendorId);   // Lenovo headsets/speakerphones
+    appendVendorMatch(kLogitechVendorId); // Logitech headsets
+
     IOHIDManagerSetDeviceMatchingMultiple(impl->hidManager, matchingArray);
     CFRelease(matchingArray);
     
@@ -203,6 +197,11 @@ void USBHIDImpl_Stop(USBHIDImplRef impl) {
     impl->runLoop = NULL;
     impl->threadRunning = false;
     impl->currentDevice = NULL;
+    impl->jabraDevice = NULL;
+    impl->jabraVid = 0;
+    impl->connectedCount = 0;
+    memset(impl->connectedDevices, 0, sizeof(impl->connectedDevices));
+    memset(impl->connectedNames, 0, sizeof(impl->connectedNames));
     impl->hasDevice = false;
     impl->deviceName[0] = '\0';
     
@@ -315,53 +314,29 @@ static void DeviceMatchedCallback(void* context, IOReturn result, void* sender, 
     USBHIDImpl* impl = (USBHIDImpl*)context;
     if (impl == NULL) return;
     
-    // Get device info
-    CFStringRef productName = (CFStringRef)IOHIDDeviceGetProperty(device, CFSTR(kIOHIDProductKey));
-    CFNumberRef vendorId = (CFNumberRef)IOHIDDeviceGetProperty(device, CFSTR(kIOHIDVendorIDKey));
-    CFNumberRef productId = (CFNumberRef)IOHIDDeviceGetProperty(device, CFSTR(kIOHIDProductIDKey));
-    
-    int vid = 0, pid = 0;
-    if (vendorId) CFNumberGetValue(vendorId, kCFNumberIntType, &vid);
-    if (productId) CFNumberGetValue(productId, kCFNumberIntType, &pid);
-    
-    pthread_mutex_lock(&impl->mutex);
-    
-    impl->deviceName[0] = '\0';
-    if (productName) {
-        CFStringGetCString(productName, impl->deviceName, sizeof(impl->deviceName), kCFStringEncodingUTF8);
-    } else {
-        snprintf(impl->deviceName, sizeof(impl->deviceName), "Unknown Device");
-    }
-    
-    fprintf(stderr, "HIDController: Device matched: %s (VID: 0x%04X, PID: 0x%04X)\n",
-            impl->deviceName, vid, pid);
-    
+    (void)result;
+    (void)sender;
+
     // Register input value callback for this specific device
     IOHIDDeviceRegisterInputValueCallback(device, InputValueCallback, impl);
-    fprintf(stderr, "HIDController: Registered InputValueCallback for device: %s\n", impl->deviceName);
-    
-    // Prioritize Jabra/Plantronics devices over generic keyboards/mice
-    bool isHeadset = (vid == 0x0B0E) ||  // Jabra/GN Audio
-                     (vid == 0x047F) ||  // Plantronics/Poly
-                     (vid == 0x17EF) ||  // Lenovo (ThinkPad docks with headsets)
-                     (vid == 0x046D);    // Logitech headsets
-    
-    // Only update currentDevice if this is a headset or we don't have one yet
-    if (isHeadset || impl->currentDevice == NULL) {
-        impl->currentDevice = device;
-        impl->hasDevice = true;
+
+    int vid = GetVendorID(device);
+    int pid = 0;
+    CFNumberRef productId = (CFNumberRef)IOHIDDeviceGetProperty(device, CFSTR(kIOHIDProductIDKey));
+    if (productId) {
+        CFNumberGetValue(productId, kCFNumberIntType, &pid);
     }
-    
-    // Specifically track Jabra device
-    if (vid == 0x0B0E) {
-        impl->jabraDevice = device;
-        impl->jabraVid = vid;
-    }
+
+    char matchedName[256];
+    GetProductName(device, matchedName, sizeof(matchedName));
+    fprintf(stderr, "HIDController: Device matched: %s (VID: 0x%04X, PID: 0x%04X)\n",
+            matchedName, vid, pid);
+    fprintf(stderr, "HIDController: Registered InputValueCallback for device: %s\n", matchedName);
     
     // Debug: List all LED elements available on this device
     CFArrayRef elements = IOHIDDeviceCopyMatchingElements(device, NULL, kIOHIDOptionsTypeNone);
     if (elements) {
-        fprintf(stderr, "HIDController: Available LED/Output elements for %s:\n", impl->deviceName);
+        fprintf(stderr, "HIDController: Available LED/Output elements for %s:\n", matchedName);
         CFIndex count = CFArrayGetCount(elements);
         for (CFIndex i = 0; i < count; i++) {
             IOHIDElementRef element = (IOHIDElementRef)CFArrayGetValueAtIndex(elements, i);
@@ -378,62 +353,42 @@ static void DeviceMatchedCallback(void* context, IOReturn result, void* sender, 
         CFRelease(elements);
     }
     
-    // IMPORTANT: For Jabra devices, set Off-Hook LED first to enable software control mode
-    // This tells the headset that we are managing it, enabling mute button HID events
-    if (vid == 0x0B0E) {  // Jabra/GN Audio
+    pthread_mutex_lock(&impl->mutex);
+    bool wasAvailable = impl->hasDevice;
+    char previousPrimary[256];
+    strncpy(previousPrimary, impl->deviceName, sizeof(previousPrimary) - 1);
+    previousPrimary[sizeof(previousPrimary) - 1] = '\0';
+
+    bool added = AddConnectedDevice(impl, device, matchedName);
+    SelectPrimaryDevice(impl);
+
+    if (vid == kJabraVendorId) {
         fprintf(stderr, "HIDController: Jabra device detected - enabling software control mode\n");
-        // Use jabraDevice directly for LED control
-        IOHIDDeviceRef targetDevice = impl->jabraDevice;
-        if (targetDevice) {
-            // Set Off-Hook LED
-            IOHIDElementRef offHookLed = FindLEDElement(targetDevice, HIDUsage::OffHookLED);
-            if (offHookLed) {
-                uint64_t timestamp = mach_absolute_time();
-                IOHIDValueRef value = IOHIDValueCreateWithIntegerValue(
-                    kCFAllocatorDefault, offHookLed, timestamp, 1);
-                if (value) {
-                    IOReturn result = IOHIDDeviceSetValue(targetDevice, offHookLed, value);
-                    CFRelease(value);
-                    if (result == kIOReturnSuccess) {
-                        fprintf(stderr, "HIDController: Off-Hook LED set to: ON (software control mode ENABLED)\n");
-                    } else {
-                        fprintf(stderr, "HIDController: Failed to set Off-Hook LED: %d\n", result);
-                    }
-                }
-            } else {
-                fprintf(stderr, "HIDController: Off-Hook LED not found on Jabra device\n");
-            }
-            
-            // Set Mute LED
-            IOHIDElementRef muteLed = FindLEDElement(targetDevice, HIDUsage::MuteLED);
-            if (muteLed) {
-                uint64_t timestamp = mach_absolute_time();
-                IOHIDValueRef value = IOHIDValueCreateWithIntegerValue(
-                    kCFAllocatorDefault, muteLed, timestamp, impl->isMuted ? 1 : 0);
-                if (value) {
-                    IOReturn result = IOHIDDeviceSetValue(targetDevice, muteLed, value);
-                    CFRelease(value);
-                    if (result == kIOReturnSuccess) {
-                        fprintf(stderr, "HIDController: Mute LED set to: %s\n", impl->isMuted ? "ON" : "OFF");
-                    }
-                }
-            } else {
-                fprintf(stderr, "HIDController: Mute LED not found on Jabra device\n");
-            }
-        }
+        SetOffHookLEDOnTarget(device, true);
     }
-    
-    // Copy callback info before releasing lock
+
+    // New device joins centralized mute immediately.
+    SetDeviceLEDOnTarget(device, impl->isMuted);
+
     USBHIDDeviceCallback callback = impl->deviceCallback;
     void* callbackContext = impl->deviceContext;
+    bool shouldNotifyConnected = false;
+    if (!wasAvailable && impl->hasDevice) {
+        shouldNotifyConnected = true;
+    } else if (strcmp(previousPrimary, impl->deviceName) != 0) {
+        shouldNotifyConnected = true;
+    } else if (added) {
+        shouldNotifyConnected = true;
+    }
     char nameCopy[256];
     strncpy(nameCopy, impl->deviceName, sizeof(nameCopy) - 1);
     nameCopy[sizeof(nameCopy) - 1] = '\0';
-    
+    bool hasDeviceNow = impl->hasDevice;
+
     pthread_mutex_unlock(&impl->mutex);
     
     // Call callback outside of lock
-    if (callback != NULL) {
+    if (callback != NULL && shouldNotifyConnected && hasDeviceNow) {
         callback(callbackContext, nameCopy, 1);
     }
 }
@@ -441,36 +396,61 @@ static void DeviceMatchedCallback(void* context, IOReturn result, void* sender, 
 static void DeviceRemovedCallback(void* context, IOReturn result, void* sender, IOHIDDeviceRef device) {
     USBHIDImpl* impl = (USBHIDImpl*)context;
     if (impl == NULL) return;
-    
+
+    (void)result;
+    (void)sender;
+
     pthread_mutex_lock(&impl->mutex);
-    
-    if (impl->currentDevice == device) {
-        fprintf(stderr, "HIDController: Device removed: %s\n", impl->deviceName);
-        
-        char nameCopy[256];
-        strncpy(nameCopy, impl->deviceName, sizeof(nameCopy) - 1);
-        nameCopy[sizeof(nameCopy) - 1] = '\0';
-        
-        impl->currentDevice = NULL;
-        impl->hasDevice = false;
-        impl->deviceName[0] = '\0';
-        
-        USBHIDDeviceCallback callback = impl->deviceCallback;
-        void* callbackContext = impl->deviceContext;
-        
+    bool wasAvailable = impl->hasDevice;
+    char previousPrimary[256];
+    strncpy(previousPrimary, impl->deviceName, sizeof(previousPrimary) - 1);
+    previousPrimary[sizeof(previousPrimary) - 1] = '\0';
+
+    char removedName[256];
+    bool removed = RemoveConnectedDevice(impl, device, removedName, sizeof(removedName));
+    if (!removed) {
         pthread_mutex_unlock(&impl->mutex);
-        
-        if (callback != NULL) {
-            callback(callbackContext, nameCopy, 0);
-        }
+        return;
+    }
+
+    fprintf(stderr, "HIDController: Device removed: %s\n", removedName);
+
+    SelectPrimaryDevice(impl);
+
+    USBHIDDeviceCallback callback = impl->deviceCallback;
+    void* callbackContext = impl->deviceContext;
+
+    bool notifyDisconnected = (wasAvailable && !impl->hasDevice);
+    bool notifyConnected = false;
+    if (impl->hasDevice && strcmp(previousPrimary, impl->deviceName) != 0) {
+        notifyConnected = true;
+    }
+
+    char nameCopy[256];
+    if (notifyDisconnected) {
+        strncpy(nameCopy, removedName, sizeof(nameCopy) - 1);
     } else {
-        pthread_mutex_unlock(&impl->mutex);
+        strncpy(nameCopy, impl->deviceName, sizeof(nameCopy) - 1);
+    }
+    nameCopy[sizeof(nameCopy) - 1] = '\0';
+
+    pthread_mutex_unlock(&impl->mutex);
+
+    if (callback != NULL) {
+        if (notifyDisconnected) {
+            callback(callbackContext, nameCopy, 0);
+        } else if (notifyConnected) {
+            callback(callbackContext, nameCopy, 1);
+        }
     }
 }
 
 static void InputValueCallback(void* context, IOReturn result, void* sender, IOHIDValueRef value) {
     USBHIDImpl* impl = (USBHIDImpl*)context;
     if (impl == NULL) return;
+
+    (void)result;
+    (void)sender;
     
     IOHIDElementRef element = IOHIDValueGetElement(value);
     if (element == NULL) return;
@@ -581,82 +561,250 @@ static IOHIDElementRef FindLEDElement(IOHIDDeviceRef device, uint32_t targetUsag
     return foundElement;
 }
 
-static bool SetDeviceLED(USBHIDImpl* impl, bool isMuted) {
-    // Note: This function is called with mutex already locked
-    // Prefer Jabra device if available, otherwise fall back to currentDevice
-    IOHIDDeviceRef targetDevice = impl->jabraDevice ? impl->jabraDevice : impl->currentDevice;
-    if (targetDevice == NULL) {
+static bool IsPreferredHeadsetVendor(int vid)
+{
+    return vid == kJabraVendorId
+        || vid == kPolyVendorId
+        || vid == kLenovoVendorId
+        || vid == kLogitechVendorId;
+}
+
+static int GetVendorID(IOHIDDeviceRef device)
+{
+    if (device == NULL) {
+        return 0;
+    }
+
+    int vid = 0;
+    CFNumberRef vendorId = (CFNumberRef)IOHIDDeviceGetProperty(device, CFSTR(kIOHIDVendorIDKey));
+    if (vendorId) {
+        CFNumberGetValue(vendorId, kCFNumberIntType, &vid);
+    }
+    return vid;
+}
+
+static void GetProductName(IOHIDDeviceRef device, char* buffer, size_t bufferSize)
+{
+    if (bufferSize == 0) {
+        return;
+    }
+
+    buffer[0] = '\0';
+    if (device == NULL) {
+        snprintf(buffer, bufferSize, "Unknown Device");
+        return;
+    }
+
+    CFStringRef productName = (CFStringRef)IOHIDDeviceGetProperty(device, CFSTR(kIOHIDProductKey));
+    if (productName != NULL &&
+        CFStringGetCString(productName, buffer, (CFIndex)bufferSize, kCFStringEncodingUTF8)) {
+        return;
+    }
+
+    snprintf(buffer, bufferSize, "Unknown Device");
+}
+
+static int FindConnectedDeviceIndex(const USBHIDImpl* impl, IOHIDDeviceRef device)
+{
+    if (impl == NULL || device == NULL) {
+        return -1;
+    }
+
+    for (size_t i = 0; i < impl->connectedCount; ++i) {
+        if (impl->connectedDevices[i] == device) {
+            return (int)i;
+        }
+    }
+
+    return -1;
+}
+
+static bool AddConnectedDevice(USBHIDImpl* impl, IOHIDDeviceRef device, const char* deviceName)
+{
+    if (impl == NULL || device == NULL) {
         return false;
     }
-    
-    IOHIDElementRef ledElement = FindLEDElement(targetDevice, HIDUsage::MuteLED);
-    if (ledElement == NULL) {
-        fprintf(stderr, "HIDController: Mute LED element not found on target device\n");
+
+    int index = FindConnectedDeviceIndex(impl, device);
+    if (index >= 0) {
+        strncpy(impl->connectedNames[index], deviceName ? deviceName : "Unknown Device",
+                sizeof(impl->connectedNames[index]) - 1);
+        impl->connectedNames[index][sizeof(impl->connectedNames[index]) - 1] = '\0';
         return false;
     }
-    
-    uint64_t timestamp = mach_absolute_time();
-    IOHIDValueRef value = IOHIDValueCreateWithIntegerValue(
-        kCFAllocatorDefault, ledElement, timestamp, isMuted ? 1 : 0);
-    
-    if (value == NULL) {
+
+    if (impl->connectedCount >= kMaxTrackedDevices) {
+        fprintf(stderr, "HIDController: Device list full (%zu), skipping additional device\n", kMaxTrackedDevices);
         return false;
     }
-    
-    IOReturn result = IOHIDDeviceSetValue(targetDevice, ledElement, value);
-    CFRelease(value);
-    
-    if (result != kIOReturnSuccess) {
-        fprintf(stderr, "HIDController: Failed to set Mute LED: %d\n", result);
-        return false;
-    }
-    
-    fprintf(stderr, "HIDController: Mute LED set to: %s\n", isMuted ? "ON" : "OFF");
+
+    size_t newIndex = impl->connectedCount++;
+    impl->connectedDevices[newIndex] = device;
+    strncpy(impl->connectedNames[newIndex], deviceName ? deviceName : "Unknown Device",
+            sizeof(impl->connectedNames[newIndex]) - 1);
+    impl->connectedNames[newIndex][sizeof(impl->connectedNames[newIndex]) - 1] = '\0';
     return true;
 }
 
-static bool SetOffHookLED(USBHIDImpl* impl, bool offHook) {
-    // Note: This function is called with mutex already locked
-    // Prefer Jabra device if available
-    IOHIDDeviceRef targetDevice = impl->jabraDevice ? impl->jabraDevice : impl->currentDevice;
+static bool RemoveConnectedDevice(USBHIDImpl* impl, IOHIDDeviceRef device, char* removedName, size_t removedNameSize)
+{
+    if (removedNameSize > 0) {
+        removedName[0] = '\0';
+    }
+
+    if (impl == NULL || device == NULL) {
+        return false;
+    }
+
+    int index = FindConnectedDeviceIndex(impl, device);
+    if (index < 0) {
+        return false;
+    }
+
+    if (removedNameSize > 0) {
+        strncpy(removedName, impl->connectedNames[index], removedNameSize - 1);
+        removedName[removedNameSize - 1] = '\0';
+    }
+
+    for (size_t i = (size_t)index; i + 1 < impl->connectedCount; ++i) {
+        impl->connectedDevices[i] = impl->connectedDevices[i + 1];
+        strncpy(impl->connectedNames[i], impl->connectedNames[i + 1], sizeof(impl->connectedNames[i]) - 1);
+        impl->connectedNames[i][sizeof(impl->connectedNames[i]) - 1] = '\0';
+    }
+
+    if (impl->connectedCount > 0) {
+        impl->connectedCount--;
+        impl->connectedDevices[impl->connectedCount] = NULL;
+        impl->connectedNames[impl->connectedCount][0] = '\0';
+    }
+
+    return true;
+}
+
+static void SelectPrimaryDevice(USBHIDImpl* impl)
+{
+    if (impl == NULL) {
+        return;
+    }
+
+    impl->jabraDevice = NULL;
+    impl->jabraVid = 0;
+
+    IOHIDDeviceRef preferredDevice = NULL;
+    IOHIDDeviceRef fallbackDevice = NULL;
+    for (size_t i = 0; i < impl->connectedCount; ++i) {
+        IOHIDDeviceRef candidate = impl->connectedDevices[i];
+        if (candidate == NULL) {
+            continue;
+        }
+
+        if (fallbackDevice == NULL) {
+            fallbackDevice = candidate;
+        }
+
+        int vid = GetVendorID(candidate);
+        if (vid == kJabraVendorId && impl->jabraDevice == NULL) {
+            impl->jabraDevice = candidate;
+            impl->jabraVid = vid;
+        }
+
+        if (preferredDevice == NULL && IsPreferredHeadsetVendor(vid)) {
+            preferredDevice = candidate;
+        }
+    }
+
+    if (impl->jabraDevice != NULL) {
+        impl->currentDevice = impl->jabraDevice;
+    } else if (preferredDevice != NULL) {
+        impl->currentDevice = preferredDevice;
+    } else {
+        impl->currentDevice = fallbackDevice;
+    }
+
+    impl->hasDevice = (impl->currentDevice != NULL);
+    if (impl->hasDevice) {
+        GetProductName(impl->currentDevice, impl->deviceName, sizeof(impl->deviceName));
+    } else {
+        impl->deviceName[0] = '\0';
+    }
+}
+
+static bool SetDeviceLEDOnTarget(IOHIDDeviceRef targetDevice, bool isMuted)
+{
     if (targetDevice == NULL) {
         return false;
     }
-    
-    IOHIDElementRef ledElement = FindLEDElement(targetDevice, HIDUsage::OffHookLED);
+
+    IOHIDElementRef ledElement = FindLEDElement(targetDevice, HIDUsage::MuteLED);
     if (ledElement == NULL) {
-        fprintf(stderr, "HIDController: Off-Hook LED element not found, trying alternative LEDs\n");
-        
-        // Try Ring LED (0x18) or Line LED (0x19) as fallback
-        ledElement = FindLEDElement(targetDevice, 0x18);  // Ring
-        if (ledElement == NULL) {
-            ledElement = FindLEDElement(targetDevice, 0x19);  // Line
-        }
-        
-        if (ledElement == NULL) {
-            fprintf(stderr, "HIDController: No telephony LED elements found\n");
-            return false;
-        }
+        return false;
     }
-    
+
     uint64_t timestamp = mach_absolute_time();
     IOHIDValueRef value = IOHIDValueCreateWithIntegerValue(
-        kCFAllocatorDefault, ledElement, timestamp, offHook ? 1 : 0);
-    
+        kCFAllocatorDefault, ledElement, timestamp, isMuted ? 1 : 0);
     if (value == NULL) {
         return false;
     }
-    
+
     IOReturn result = IOHIDDeviceSetValue(targetDevice, ledElement, value);
     CFRelease(value);
-    
-    if (result != kIOReturnSuccess) {
-        fprintf(stderr, "HIDController: Failed to set Off-Hook LED: %d\n", result);
+
+    return result == kIOReturnSuccess;
+}
+
+static bool SetOffHookLEDOnTarget(IOHIDDeviceRef targetDevice, bool offHook)
+{
+    if (targetDevice == NULL) {
         return false;
     }
-    
-    fprintf(stderr, "HIDController: Off-Hook LED set to: %s (software control mode %s)\n", 
-            offHook ? "ON" : "OFF",
-            offHook ? "ENABLED" : "disabled");
+
+    IOHIDElementRef ledElement = FindLEDElement(targetDevice, HIDUsage::OffHookLED);
+    if (ledElement == NULL) {
+        // Try Ring LED (0x18) or Line LED (0x19) as fallback
+        ledElement = FindLEDElement(targetDevice, 0x18);
+        if (ledElement == NULL) {
+            ledElement = FindLEDElement(targetDevice, 0x19);
+        }
+        if (ledElement == NULL) {
+            return false;
+        }
+    }
+
+    uint64_t timestamp = mach_absolute_time();
+    IOHIDValueRef value = IOHIDValueCreateWithIntegerValue(
+        kCFAllocatorDefault, ledElement, timestamp, offHook ? 1 : 0);
+    if (value == NULL) {
+        return false;
+    }
+
+    IOReturn result = IOHIDDeviceSetValue(targetDevice, ledElement, value);
+    CFRelease(value);
+
+    return result == kIOReturnSuccess;
+}
+
+static bool SetDeviceLED(USBHIDImpl* impl, bool isMuted)
+{
+    // Note: This function is called with mutex already locked
+    if (impl == NULL || impl->connectedCount == 0) {
+        return false;
+    }
+
+    bool anySuccess = false;
+    for (size_t i = 0; i < impl->connectedCount; ++i) {
+        IOHIDDeviceRef device = impl->connectedDevices[i];
+        if (SetDeviceLEDOnTarget(device, isMuted)) {
+            anySuccess = true;
+        }
+    }
+
+    if (!anySuccess) {
+        fprintf(stderr, "HIDController: Mute LED element not found on connected devices\n");
+        return false;
+    }
+
+    fprintf(stderr, "HIDController: Mute LED set to: %s on %zu device(s)\n",
+            isMuted ? "ON" : "OFF", impl->connectedCount);
     return true;
 }

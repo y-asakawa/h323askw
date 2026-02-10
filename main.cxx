@@ -60,6 +60,7 @@
 #include <thread>
 #include <vector>  // For Polycom TCS fix
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cmath>
 #include <cstdio>
@@ -67,6 +68,9 @@
 #include <cstring>
 #include <sstream>
 #include <dlfcn.h>  // 🎬 For dlsym (preview callback workaround)
+#ifdef __APPLE__
+#include <CoreAudio/CoreAudio.h>
+#endif
 #ifndef _WIN32
 #include <signal.h>
 #include <sys/wait.h>
@@ -104,6 +108,466 @@ void UpdateSpectrumHistory(std::vector<int16_t>& history, const int16_t* data, s
   std::copy(data, data + count, history.end() - count);
 }
 }  // namespace
+
+#if defined(__APPLE__)
+using CoreAudioMuteCallback = void (*)(bool isMuted, void* context);
+
+class CoreAudioMuteMonitor
+{
+  public:
+    CoreAudioMuteMonitor()
+      : m_callback(nullptr)
+      , m_callbackContext(nullptr)
+      , m_started(false)
+      , m_hasAggregateState(false)
+      , m_lastAggregateMuted(false)
+    {
+    }
+
+    ~CoreAudioMuteMonitor()
+    {
+      Stop();
+    }
+
+    void SetMuteStateCallback(CoreAudioMuteCallback callback, void* context)
+    {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      m_callback = callback;
+      m_callbackContext = context;
+    }
+
+    bool Start()
+    {
+      {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_started) {
+          return true;
+        }
+
+        m_started = true;
+        RebuildTrackedDevicesLocked();
+      }
+
+      DispatchAggregateState(true);
+      return true;
+    }
+
+    void Stop()
+    {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      if (!m_started) {
+        return;
+      }
+
+      ClearTrackedDevicesLocked();
+      m_targets.clear();
+      m_started = false;
+      m_hasAggregateState = false;
+      m_lastAggregateMuted = false;
+    }
+
+    void UpdateTrackedInputNames(const std::vector<PString>& inputNames)
+    {
+      bool shouldDispatch = false;
+      {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_targets.clear();
+
+        std::set<std::string> uniqueTargets;
+        for (const PString& name : inputNames) {
+          std::string normalized = NormalizeDeviceName((const char*)name);
+          if (normalized.empty()) {
+            continue;
+          }
+
+          if (uniqueTargets.insert(normalized).second) {
+            m_targets.push_back(normalized);
+          }
+        }
+
+        if (m_started) {
+          RebuildTrackedDevicesLocked();
+          shouldDispatch = true;
+        }
+      }
+
+      if (shouldDispatch) {
+        DispatchAggregateState(true);
+      }
+    }
+
+  private:
+    struct TrackedDevice {
+      AudioDeviceID id;
+      std::string name;
+      bool muted;
+    };
+
+    static AudioObjectPropertyAddress MutePropertyAddress()
+    {
+      AudioObjectPropertyAddress address;
+      address.mSelector = kAudioDevicePropertyMute;
+      address.mScope = kAudioDevicePropertyScopeInput;
+      address.mElement = kAudioObjectPropertyElementMain;
+      return address;
+    }
+
+    static AudioObjectPropertyAddress DeviceListAddress()
+    {
+      AudioObjectPropertyAddress address;
+      address.mSelector = kAudioHardwarePropertyDevices;
+      address.mScope = kAudioObjectPropertyScopeGlobal;
+      address.mElement = kAudioObjectPropertyElementMain;
+      return address;
+    }
+
+    static AudioObjectPropertyAddress DeviceNameAddress()
+    {
+      AudioObjectPropertyAddress address;
+      address.mSelector = kAudioObjectPropertyName;
+      address.mScope = kAudioObjectPropertyScopeGlobal;
+      address.mElement = kAudioObjectPropertyElementMain;
+      return address;
+    }
+
+    static AudioObjectPropertyAddress StreamConfigAddress()
+    {
+      AudioObjectPropertyAddress address;
+      address.mSelector = kAudioDevicePropertyStreamConfiguration;
+      address.mScope = kAudioDevicePropertyScopeInput;
+      address.mElement = kAudioObjectPropertyElementMain;
+      return address;
+    }
+
+    static std::string NormalizeDeviceName(const std::string& raw)
+    {
+      std::string out;
+      out.reserve(raw.size());
+
+      bool prevSpace = true;
+      for (unsigned char ch : raw) {
+        if (std::isalnum(ch)) {
+          out.push_back(static_cast<char>(std::tolower(ch)));
+          prevSpace = false;
+        } else if (!prevSpace) {
+          out.push_back(' ');
+          prevSpace = true;
+        }
+      }
+
+      while (!out.empty() && out.back() == ' ') {
+        out.pop_back();
+      }
+      while (!out.empty() && out.front() == ' ') {
+        out.erase(out.begin());
+      }
+
+      const std::string kPortAudioPrefix = "portaudio";
+      if (out.size() > kPortAudioPrefix.size() &&
+          out.compare(0, kPortAudioPrefix.size(), kPortAudioPrefix) == 0 &&
+          out[kPortAudioPrefix.size()] == ' ') {
+        out.erase(0, kPortAudioPrefix.size() + 1);
+      }
+
+      return out;
+    }
+
+    static std::vector<AudioDeviceID> EnumerateAllDevices()
+    {
+      std::vector<AudioDeviceID> devices;
+      AudioObjectPropertyAddress listAddress = DeviceListAddress();
+
+      UInt32 dataSize = 0;
+      if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject,
+                                         &listAddress,
+                                         0,
+                                         nullptr,
+                                         &dataSize) != noErr ||
+          dataSize == 0) {
+        return devices;
+      }
+
+      devices.resize(dataSize / sizeof(AudioDeviceID));
+      if (AudioObjectGetPropertyData(kAudioObjectSystemObject,
+                                     &listAddress,
+                                     0,
+                                     nullptr,
+                                     &dataSize,
+                                     devices.data()) != noErr) {
+        devices.clear();
+      }
+
+      return devices;
+    }
+
+    static bool IsInputDevice(AudioDeviceID deviceId)
+    {
+      AudioObjectPropertyAddress streamAddress = StreamConfigAddress();
+      if (!AudioObjectHasProperty(deviceId, &streamAddress)) {
+        return false;
+      }
+
+      UInt32 dataSize = 0;
+      if (AudioObjectGetPropertyDataSize(deviceId, &streamAddress, 0, nullptr, &dataSize) != noErr ||
+          dataSize < sizeof(AudioBufferList)) {
+        return false;
+      }
+
+      std::vector<char> storage(dataSize);
+      AudioBufferList* bufferList = reinterpret_cast<AudioBufferList*>(storage.data());
+      if (AudioObjectGetPropertyData(deviceId,
+                                     &streamAddress,
+                                     0,
+                                     nullptr,
+                                     &dataSize,
+                                     bufferList) != noErr) {
+        return false;
+      }
+
+      UInt32 channels = 0;
+      for (UInt32 i = 0; i < bufferList->mNumberBuffers; ++i) {
+        channels += bufferList->mBuffers[i].mNumberChannels;
+      }
+      return channels > 0;
+    }
+
+    static std::string GetDeviceName(AudioDeviceID deviceId)
+    {
+      AudioObjectPropertyAddress nameAddress = DeviceNameAddress();
+      if (!AudioObjectHasProperty(deviceId, &nameAddress)) {
+        return std::string();
+      }
+
+      CFStringRef cfName = nullptr;
+      UInt32 dataSize = sizeof(cfName);
+      if (AudioObjectGetPropertyData(deviceId,
+                                     &nameAddress,
+                                     0,
+                                     nullptr,
+                                     &dataSize,
+                                     &cfName) != noErr ||
+          cfName == nullptr) {
+        return std::string();
+      }
+
+      char nameBuffer[256];
+      std::string result;
+      if (CFStringGetCString(cfName, nameBuffer, sizeof(nameBuffer), kCFStringEncodingUTF8)) {
+        result = nameBuffer;
+      }
+
+      CFRelease(cfName);
+      return result;
+    }
+
+    bool QueryMuteState(AudioDeviceID deviceId, bool& isMuted) const
+    {
+      AudioObjectPropertyAddress inputAddress = MutePropertyAddress();
+      UInt32 muted = 0;
+      UInt32 dataSize = sizeof(muted);
+
+      if (AudioObjectHasProperty(deviceId, &inputAddress) &&
+          AudioObjectGetPropertyData(deviceId, &inputAddress, 0, nullptr, &dataSize, &muted) == noErr) {
+        isMuted = (muted != 0);
+        return true;
+      }
+
+      AudioObjectPropertyAddress globalAddress = inputAddress;
+      globalAddress.mScope = kAudioObjectPropertyScopeGlobal;
+      muted = 0;
+      dataSize = sizeof(muted);
+      if (AudioObjectHasProperty(deviceId, &globalAddress) &&
+          AudioObjectGetPropertyData(deviceId, &globalAddress, 0, nullptr, &dataSize, &muted) == noErr) {
+        isMuted = (muted != 0);
+        return true;
+      }
+
+      return false;
+    }
+
+    bool MatchesTrackedName(const std::string& normalizedName) const
+    {
+      if (m_targets.empty()) {
+        return true;
+      }
+
+      for (const std::string& target : m_targets) {
+        if (target == normalizedName) {
+          return true;
+        }
+
+        if (target.size() >= 4 && normalizedName.find(target) != std::string::npos) {
+          return true;
+        }
+
+        if (normalizedName.size() >= 4 && target.find(normalizedName) != std::string::npos) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    void RebuildTrackedDevicesLocked()
+    {
+      ClearTrackedDevicesLocked();
+
+      const std::vector<AudioDeviceID> devices = EnumerateAllDevices();
+      AudioObjectPropertyAddress muteAddress = MutePropertyAddress();
+
+      auto trackDevices = [&](bool requireTargetMatch) {
+        for (AudioDeviceID deviceId : devices) {
+          if (!IsInputDevice(deviceId)) {
+            continue;
+          }
+
+          std::string rawName = GetDeviceName(deviceId);
+          std::string normalizedName = NormalizeDeviceName(rawName);
+          if (requireTargetMatch && !MatchesTrackedName(normalizedName)) {
+            continue;
+          }
+
+          bool isMuted = false;
+          if (!QueryMuteState(deviceId, isMuted)) {
+            continue;
+          }
+
+          if (!AudioObjectHasProperty(deviceId, &muteAddress)) {
+            continue;
+          }
+
+          OSStatus status = AudioObjectAddPropertyListener(deviceId,
+                                                           &muteAddress,
+                                                           &CoreAudioMuteMonitor::DeviceMuteListener,
+                                                           this);
+          if (status != noErr) {
+            PTRACE(2, "CoreAudioMute\tFailed to add mute listener for " << rawName
+                   << " (deviceId=" << deviceId << ", status=" << status << ")");
+            continue;
+          }
+
+          TrackedDevice tracked;
+          tracked.id = deviceId;
+          tracked.name = rawName;
+          tracked.muted = isMuted;
+          m_devices[deviceId] = tracked;
+
+          PTRACE(2, "CoreAudioMute\tTracking input device: " << rawName
+                 << " (muted=" << (isMuted ? "yes" : "no") << ")");
+        }
+      };
+
+      const bool hasTargets = !m_targets.empty();
+      trackDevices(hasTargets);
+      if (hasTargets && m_devices.empty()) {
+        PTRACE(2, "CoreAudioMute\tNo device matched configured input names; fallback to all input devices");
+        trackDevices(false);
+      }
+
+      PTRACE(1, "CoreAudioMute\tTracking " << m_devices.size() << " input device(s) for mute sync");
+    }
+
+    void ClearTrackedDevicesLocked()
+    {
+      AudioObjectPropertyAddress muteAddress = MutePropertyAddress();
+      for (const auto& kv : m_devices) {
+        AudioObjectRemovePropertyListener(kv.first,
+                                          &muteAddress,
+                                          &CoreAudioMuteMonitor::DeviceMuteListener,
+                                          this);
+      }
+      m_devices.clear();
+    }
+
+    bool UpdateAggregateStateLocked(bool forceNotify, bool& aggregateMuted)
+    {
+      aggregateMuted = false;
+      for (const auto& kv : m_devices) {
+        aggregateMuted = aggregateMuted || kv.second.muted;
+      }
+
+      bool changed = forceNotify || !m_hasAggregateState || (aggregateMuted != m_lastAggregateMuted);
+      m_hasAggregateState = true;
+      m_lastAggregateMuted = aggregateMuted;
+      return changed;
+    }
+
+    void DispatchAggregateState(bool forceNotify)
+    {
+      CoreAudioMuteCallback callback = nullptr;
+      void* context = nullptr;
+      bool aggregateMuted = false;
+      bool shouldNotify = false;
+
+      {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        shouldNotify = UpdateAggregateStateLocked(forceNotify, aggregateMuted);
+        callback = m_callback;
+        context = m_callbackContext;
+      }
+
+      if (shouldNotify && callback != nullptr) {
+        PTRACE(2, "CoreAudioMute\tAggregate mute state: " << (aggregateMuted ? "MUTED" : "UNMUTED"));
+        callback(aggregateMuted, context);
+      }
+    }
+
+    void HandleMuteEvent(AudioDeviceID deviceId)
+    {
+      CoreAudioMuteCallback callback = nullptr;
+      void* context = nullptr;
+      bool aggregateMuted = false;
+      bool shouldNotify = false;
+
+      {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_devices.find(deviceId);
+        if (it == m_devices.end()) {
+          return;
+        }
+
+        bool isMuted = false;
+        if (!QueryMuteState(deviceId, isMuted)) {
+          return;
+        }
+
+        it->second.muted = isMuted;
+        shouldNotify = UpdateAggregateStateLocked(false, aggregateMuted);
+        callback = m_callback;
+        context = m_callbackContext;
+
+        PTRACE(3, "CoreAudioMute\tDevice mute changed: " << it->second.name
+               << " -> " << (isMuted ? "MUTED" : "UNMUTED"));
+      }
+
+      if (shouldNotify && callback != nullptr) {
+        callback(aggregateMuted, context);
+      }
+    }
+
+    static OSStatus DeviceMuteListener(AudioObjectID objectId,
+                                       UInt32 numberAddresses,
+                                       const AudioObjectPropertyAddress[],
+                                       void* clientData)
+    {
+      (void)numberAddresses;
+      CoreAudioMuteMonitor* self = reinterpret_cast<CoreAudioMuteMonitor*>(clientData);
+      if (self != nullptr) {
+        self->HandleMuteEvent(static_cast<AudioDeviceID>(objectId));
+      }
+      return noErr;
+    }
+
+    std::mutex m_mutex;
+    std::map<AudioDeviceID, TrackedDevice> m_devices;
+    std::vector<std::string> m_targets;
+    CoreAudioMuteCallback m_callback;
+    void* m_callbackContext;
+    bool m_started;
+    bool m_hasAggregateState;
+    bool m_lastAggregateMuted;
+};
+#endif // defined(__APPLE__)
 
 class H323RecordingManager
 {
@@ -1849,6 +2313,8 @@ static QApplication* g_qApp = nullptr;
 // グローバルエンドポイントポインタ（コールバックから使用）
 static MyH323EndPoint* g_h323Endpoint = nullptr;
 static MyH323Connection* g_currentConnection = nullptr;
+// 接続確立前に物理ボタンが押された場合の保留ミュート状態 (-1=未設定)
+static std::atomic<int> g_pendingHidMuteState{-1};
 
 // Phase 1: グローバルエンドポイントへのアクセサ（Qt UIから使用）
 MyH323EndPoint* GetGlobalH323Endpoint()
@@ -1858,18 +2324,24 @@ MyH323EndPoint* GetGlobalH323Endpoint()
 
 // USB HID Controller for physical mute button (Jabra, Plantronics, etc.)
 static USBHIDController* g_hidController = nullptr;
+#if defined(__APPLE__)
+static CoreAudioMuteMonitor* g_coreAudioMuteMonitor = nullptr;
+#endif
 
-// USB HID ミュートコールバック（物理ボタン押下時に呼ばれる）
-static void OnUSBHIDMuteChanged(bool isMuted)
+static void ApplyCentralizedMuteState(bool isMuted, const char* sourceTag)
 {
-    PTRACE(2, "USBHID\t🎧 Physical mute button: " << (isMuted ? "MUTED" : "UNMUTED"));
-    
+    PTRACE(2, sourceTag << "\t🎧 Physical mute state: " << (isMuted ? "MUTED" : "UNMUTED"));
+    g_pendingHidMuteState.store(isMuted ? 1 : 0, std::memory_order_relaxed);
+
     // 現在の接続がある場合、ミュート状態を同期
     if (g_currentConnection) {
         // アプリの状態を物理ボタンに合わせる
         if (g_currentConnection->IsLocalMicMuted() != isMuted) {
             g_currentConnection->ToggleMicMute();
         }
+    } else {
+        PTRACE(3, sourceTag << "\tNo active connection yet - queued mute state: "
+               << (isMuted ? "MUTED" : "UNMUTED"));
     }
     
     // Qt6 UI のミュート状態を更新
@@ -1877,6 +2349,53 @@ static void OnUSBHIDMuteChanged(bool isMuted)
     QtVideoManager::instance().updateMuteState(isMuted, true);
 #endif
 }
+
+// USB HID ミュートコールバック（物理ボタン押下時に呼ばれる）
+static void OnUSBHIDMuteChanged(bool isMuted)
+{
+    ApplyCentralizedMuteState(isMuted, "USBHID");
+}
+
+#if defined(__APPLE__)
+static std::vector<PString> CollectTrackedInputDevices(const MyH323EndPoint& ep)
+{
+    std::vector<PString> names;
+
+    CoreAudioDeviceConfig cfg = ep.GetAudioDeviceConfig();
+    for (const auto& input : cfg.inputs) {
+        if (!input.name.IsEmpty()) {
+            names.push_back(input.name);
+        }
+    }
+
+    if (names.empty()) {
+        PString fallback = ep.GetAudioInputDevice();
+        if (fallback.IsEmpty()) {
+            fallback = PSoundChannel::GetDefaultDevice(PSoundChannel::Recorder);
+        }
+        if (!fallback.IsEmpty() && fallback != "PortAudio") {
+            names.push_back(fallback);
+        }
+    }
+
+    return names;
+}
+
+static void RefreshCoreAudioMuteTrackingFromEndpoint(const MyH323EndPoint& ep)
+{
+    if (g_coreAudioMuteMonitor == nullptr) {
+        return;
+    }
+
+    std::vector<PString> names = CollectTrackedInputDevices(ep);
+    g_coreAudioMuteMonitor->UpdateTrackedInputNames(names);
+}
+
+static void OnCoreAudioMuteChanged(bool isMuted, void*)
+{
+    ApplyCentralizedMuteState(isMuted, "CoreAudioMute");
+}
+#endif
 
 // 非同期でMakeCallを実行するためのスレッドクラス
 class MakeCallThread : public PThread
@@ -2114,6 +2633,9 @@ static void Qt6ApplyDeviceSelectionCallback(const QString& mic, const QString& s
     PString spkName = (const char*)speaker.toUtf8();
     ep->SetAudioDevices(micName, spkName, ep->IsAudioDisabled());
     PTRACE(1, "Qt6Callback\tUpdated audio devices (Mic=" << micName << ", Spk=" << spkName << ")");
+#if defined(__APPLE__)
+    RefreshCoreAudioMuteTrackingFromEndpoint(*ep);
+#endif
 
 #ifdef H323_VIDEO
     if (!camera.isEmpty()) {
@@ -2171,6 +2693,9 @@ static void Qt6ApplyAudioDeviceSelectionCallback(const AudioDeviceSelection& sel
     // エンドポイントに設定を保存（次回の接続時に使用）
     ep->UpdateAudioDeviceConfig(config);
     ep->UpdateVideoDeviceConfig(videoConfig);
+#if defined(__APPLE__)
+    RefreshCoreAudioMuteTrackingFromEndpoint(*ep);
+#endif
     
 #ifdef H323_VIDEO
     if (!videoConfig.cameras.empty()) {
@@ -3334,6 +3859,19 @@ void H323ASKW::Main()
     PTRACE(2, "H323ASKW\t⚠️ USB HID Controller not started (no compatible device or not supported)");
   }
 
+#if defined(__APPLE__)
+  // CoreAudio Mute property fallback (for devices that do not emit HID mute usage)
+  PTRACE(1, "H323ASKW\t🎚️ Initializing CoreAudio mute monitor for selected microphones");
+  g_coreAudioMuteMonitor = new CoreAudioMuteMonitor();
+  g_coreAudioMuteMonitor->SetMuteStateCallback(OnCoreAudioMuteChanged, nullptr);
+  g_coreAudioMuteMonitor->UpdateTrackedInputNames(CollectTrackedInputDevices(*h323));
+  if (g_coreAudioMuteMonitor->Start()) {
+    PTRACE(1, "H323ASKW\t✅ CoreAudio mute monitor started");
+  } else {
+    PTRACE(2, "H323ASKW\t⚠️ CoreAudio mute monitor failed to start");
+  }
+#endif
+
   if (args.HasOption('R')) {
     h323->SetFrameRate(args.GetOptionString('R').AsUnsigned());
   }
@@ -3500,6 +4038,15 @@ void H323ASKW::Main()
     delete g_hidController;
     g_hidController = nullptr;
   }
+
+#if defined(__APPLE__)
+  if (g_coreAudioMuteMonitor != nullptr) {
+    PTRACE(1, "H323ASKW\t🎚️ Stopping CoreAudio mute monitor");
+    g_coreAudioMuteMonitor->Stop();
+    delete g_coreAudioMuteMonitor;
+    g_coreAudioMuteMonitor = nullptr;
+  }
+#endif
 
   // delete endpoint object so we unregister cleanly
   delete h323;
@@ -9128,14 +9675,14 @@ void MyH323Connection::OnCleared()
         StopRecording();
     }
 
-#ifdef USE_QT6
     // コールバック用グローバルポインタをクリア
     if (g_currentConnection == this) {
         g_currentConnection = nullptr;
+#ifdef USE_QT6
         QtVideoManager::instance().setH323Connection(nullptr);
+#endif
         PTRACE(1, "H323ASKW\t🎤 H323Connection unregistered from QtVideoManager");
     }
-#endif
     
     // *** GRACEFUL SHUTDOWN: Allow RTP receive threads to complete ***
     // This prevents "Write failed: Bad file descriptor" warnings
@@ -10868,13 +11415,24 @@ void MyH323Connection::OnEstablished()
     InitTracingOnce();
     PTRACE(1, "H323ASKW\t*** CALL ESTABLISHED ***");
     
-    // 🎤 Qt6ミュート機能: 接続確立時にH323Connectionを設定
-    // これによりビデオチャンネルが開く前でもSキーでミュート操作可能
+    // 接続確立時にコールバック用グローバルポインタを設定
+    g_currentConnection = this;
 #ifdef USE_QT6
+    // Qt6ミュート機能: ビデオチャンネルが開く前でもSキーでミュート操作可能
     QtVideoManager::instance().setH323Connection(this);
-    g_currentConnection = this;  // コールバック用グローバルポインタ
-    PTRACE(1, "H323ASKW\t🎤 H323Connection registered with QtVideoManager for mute control");
 #endif
+    PTRACE(1, "H323ASKW\t🎤 H323Connection registered with QtVideoManager for mute control");
+
+    // 接続確立前に押された物理MUTE状態を反映
+    int pendingMuteState = g_pendingHidMuteState.load(std::memory_order_relaxed);
+    if (pendingMuteState == 0 || pendingMuteState == 1) {
+        bool desiredMuted = (pendingMuteState == 1);
+        if (IsLocalMicMuted() != desiredMuted) {
+            PTRACE(2, "USBHID\tApplying queued mute state on call establishment: "
+                   << (desiredMuted ? "MUTED" : "UNMUTED"));
+            ToggleMicMute();
+        }
+    }
 
     PArgList & args = PProcess::Current().GetArguments();
     if (!IsRecording() && args.HasOption("record")) {
