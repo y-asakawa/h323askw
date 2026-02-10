@@ -34,7 +34,6 @@
 #endif
 #include <atomic>
 #include <cmath>
-#include <cstdlib>  // for _exit()
 #include <algorithm>
 #include <vector>
 #include "main.h"
@@ -1230,6 +1229,7 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_addressCombo(nullptr)
     , m_connectButton(nullptr)
     , m_disconnectButton(nullptr)
+    , m_exitButton(nullptr)
     , m_recordButton(nullptr)
     , m_muteCheckbox(nullptr)
     , m_cameraCheckbox(nullptr)
@@ -1598,6 +1598,8 @@ void QtVideoMainWindow::setupUI()
     m_connectButton->setObjectName("connectButton");
     m_disconnectButton = new QPushButton("Disconnect", this);
     m_disconnectButton->setObjectName("disconnectButton");
+    m_exitButton = new QPushButton("EXIT", this);
+    m_exitButton->setObjectName("exitButton");
     m_recordButton = new QPushButton("● REC", this);
     m_recordButton->setObjectName("recordButton");
     updateConnectButtonStyle();
@@ -1610,6 +1612,7 @@ void QtVideoMainWindow::setupUI()
     controlLayout->addWidget(m_addressCombo);
     controlLayout->addWidget(m_connectButton);
     controlLayout->addWidget(m_disconnectButton);
+    controlLayout->addWidget(m_exitButton);
     controlLayout->addWidget(m_recordButton);
     controlLayout->addStretch();
 
@@ -1700,6 +1703,7 @@ void QtVideoMainWindow::setupConnections()
     // ボタン接続
     connect(m_connectButton, &QPushButton::clicked, this, &QtVideoMainWindow::onConnectClicked);
     connect(m_disconnectButton, &QPushButton::clicked, this, &QtVideoMainWindow::onDisconnectClicked);
+    connect(m_exitButton, &QPushButton::clicked, this, &QtVideoMainWindow::onExitClicked);
     connect(m_recordButton, &QPushButton::clicked, this, &QtVideoMainWindow::onRecordClicked);
     connect(m_addressCombo, QOverload<int>::of(&QComboBox::activated),
             this, &QtVideoMainWindow::onAddressActivated);
@@ -2080,7 +2084,7 @@ void QtVideoMainWindow::closeEvent(QCloseEvent* event)
 {
     QT_TRACE(1, "Window close event received");
     m_running = false;
-    emit disconnectRequested();
+    emit exitRequested();
     event->accept();
 }
 
@@ -2163,6 +2167,13 @@ void QtVideoMainWindow::onDisconnectClicked()
             }
         }
     }
+}
+
+void QtVideoMainWindow::onExitClicked()
+{
+    QT_TRACE(1, "Exit requested");
+    setConnectionStatus("Exiting...");
+    emit exitRequested();
 }
 
 void QtVideoMainWindow::onRecordClicked()
@@ -2353,6 +2364,20 @@ QtVideoManager::QtVideoManager()
 
 QtVideoManager::~QtVideoManager()
 {
+    if (!m_initialized) {
+        return;
+    }
+
+    // static デストラクタ順序で QApplication が先に破棄された場合、
+    // ここで QWidget を触るとクラッシュするため触らない。
+    if (!QCoreApplication::instance() || QCoreApplication::closingDown()) {
+        m_mainWindow = nullptr;
+        m_contentWindow = nullptr;
+        m_localContentWindow = nullptr;
+        m_initialized = false;
+        return;
+    }
+
     shutdown();
 }
 
@@ -3092,6 +3117,11 @@ void QtVideoManager::setupSignalConnections()
         [this]() {
             hangupCall();
         });
+
+    QObject::connect(m_mainWindow, &QtVideoMainWindow::exitRequested,
+        [this]() {
+            requestProgramExit();
+        });
     
     // ミュートトグル
     QObject::connect(m_mainWindow, &QtVideoMainWindow::muteToggleRequested,
@@ -3301,7 +3331,7 @@ void QtVideoManager::hangupCall()
         m_hangupCallCb(m_hangupCallUserData);
     }
     
-    setConnectionStatus("Disconnected - Exiting...");
+    setConnectionStatus("Disconnected - Listening for incoming calls");
     
     // UIを更新
     if (m_mainWindow) {
@@ -3317,18 +3347,25 @@ void QtVideoManager::hangupCall()
             m_mainWindow->setH323Connection(nullptr);
         }
     }
-    
-    // 🎯 切断後、短い遅延を挟んでアプリケーションを終了
-    // H.323の終了処理が完了するのを待ってから終了
-    QTimer::singleShot(1500, []() {
-        QT_TRACE(1, "Initiating application shutdown after disconnect");
+}
+
+void QtVideoManager::requestProgramExit()
+{
+    QT_TRACE(1, "Program exit requested from UI");
+
+    if (m_endpoint) {
+        // Endpoint側で終了フラグを立てた上で全通話を切断する
+        m_endpoint->RequestProgramExit();
+    } else {
+        // Endpointが無い場合のみ、UI側で切断処理して終了を試みる
+        hangupCall();
         auto app = QCoreApplication::instance();
         if (app) {
-            // 強制終了（H.323スレッドがブロックする可能性があるため）
-            QT_TRACE(1, "Calling _exit(0) to force clean shutdown");
-            _exit(0);
+            app->quit();
         }
-    });
+    }
+
+    setConnectionStatus("Exiting...");
 }
 
 void QtVideoManager::toggleMute()

@@ -1903,6 +1903,7 @@ public:
     bool IsListeningMode() const { return m_listeningMode; }
     void SetExitAfterCall(bool enable) { m_exitAfterCall = enable; }  // Exit program after call ends
     bool IsExitAfterCall() const { return m_exitAfterCall; }
+    bool IsProgramExitRequested() const { return m_programExitRequested.load(std::memory_order_acquire); }
     void NotifyDisconnectedByRemote();  // Called when remote party disconnects
     void RequestProgramExit();  // Request clean program exit
     
@@ -1910,6 +1911,7 @@ protected:
     bool m_autoListenOnDisconnect = false;  // Disabled: H.264 plugin has memory issues on reconnect
     std::atomic<bool> m_listeningMode{false};  // Currently in listening mode
     bool m_exitAfterCall = false;  // Exit program after call ends (for -l mode)
+    std::atomic<bool> m_programExitRequested{false};  // Clean shutdown requested by UI/CLI
 };
 
 ///////////////////////////////////////////////////////////////////////////////

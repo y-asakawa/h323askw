@@ -579,6 +579,11 @@ signals:
     void disconnectRequested();
 
     /**
+     * @brief プログラム終了要求シグナル
+     */
+    void exitRequested();
+
+    /**
      * @brief ミュートトグル要求シグナル
      */
     void muteToggleRequested();
@@ -660,6 +665,7 @@ protected:
 private slots:
     void onConnectClicked();
     void onDisconnectClicked();
+    void onExitClicked();
     void onRecordClicked();
     void onMuteToggled(bool checked);
     void onCameraToggled(bool checked);
@@ -750,6 +756,7 @@ private:
     QComboBox* m_addressCombo;  // 履歴付きアドレス入力
     QPushButton* m_connectButton;
     QPushButton* m_disconnectButton;
+    QPushButton* m_exitButton;
     QPushButton* m_recordButton;
     QCheckBox* m_muteCheckbox;
     QCheckBox* m_cameraCheckbox;
@@ -952,6 +959,11 @@ public:
      * @brief UIから切断
      */
     void hangupCall();
+
+    /**
+     * @brief UIからプログラム終了
+     */
+    void requestProgramExit();
     
     /**
      * @brief マイクミュートをトグル

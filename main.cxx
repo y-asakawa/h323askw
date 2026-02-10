@@ -2289,6 +2289,11 @@ int main(int argc, char* argv[])
     int result = instance.InternalMain();
     
     // 後片付け
+#ifdef USE_QT6
+    // Qtアプリ終了前に、QtVideoManagerが保持するウィンドウを破棄する。
+    // これをしないと static デストラクタで QApplication 後に QWidget を破棄してクラッシュしうる。
+    QtVideoManager::instance().shutdown();
+#endif
     delete g_qApp;
     g_qApp = nullptr;
     
@@ -3369,32 +3374,39 @@ void H323ASKW::Main()
   }
 
   if (listenMode) {
-    // Set exit-after-call mode for listen mode
-    h323->SetExitAfterCall(true);
-    PTRACE(1, "H323ASKW\t📞 Listen mode enabled - will exit after call ends");
+    // Listen mode should survive call clear and return to waiting state.
+    h323->SetAutoListenOnDisconnect(true);
+    h323->SetExitAfterCall(false);
+    h323->SetListeningMode(true);
+    PTRACE(1, "H323ASKW\t📞 Listen mode enabled - will return to listen state after disconnect");
     
-    cout << "Endpoint is listening for incoming calls, press ENTER to exit.\n";
+    cout << "Endpoint is listening for incoming calls.\n";
     
 #ifdef USE_QT6
     if (g_enableQt6Display && QCoreApplication::instance()) {
       // Qt6 event loop for listen mode
       PTRACE(1, "H323ASKW\t🖥️  Running Qt6 event loop for listen mode");
-      cout << "Qt6 video display active. Press Ctrl+C to exit." << endl;
+      cout << "Qt6 video display active. Use EXIT button (or Ctrl+C) to exit." << endl;
       
-      while (true) {
+      while (!h323->IsProgramExitRequested()) {
         // Qt6イベントを処理
         QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
         
         PThread::Sleep(10);
       }
+
+      PTRACE(1, "H323ASKW\t🛑 Exit requested - leaving listen mode event loop");
     } else {
       // Qt6無効時は従来の方法
+      cout << "Press ENTER to exit." << endl;
       console.ReadChar();
     }
 #else
+    cout << "Press ENTER to exit." << endl;
     console.ReadChar();
 #endif
     
+    h323->SetListeningMode(false);
     h323->ClearAllCalls();
   }
   else {
@@ -5024,7 +5036,7 @@ void MyH323EndPoint::OnConnectionCleared(H323Connection & connection, const PStr
   // (to avoid crash during cleanup)
   H323Connection::CallEndReason reason = connection.GetCallEndReason();
   bool switchToListening = false;
-  if (m_autoListenOnDisconnect) {
+  if (m_autoListenOnDisconnect && !IsProgramExitRequested()) {
     if (reason == H323Connection::EndedByRemoteUser ||
         reason == H323Connection::EndedByRemoteBusy ||
         reason == H323Connection::EndedByRemoteCongestion ||
@@ -5040,9 +5052,9 @@ void MyH323EndPoint::OnConnectionCleared(H323Connection & connection, const PStr
   // Instead, we'll manually handle the transition
   if (switchToListening) {
     PTRACE(1, "H323ASKW\t⚠️ Skipping parent OnConnectionCleared to avoid FFmpeg double-free crash");
-    PTRACE(1, "H323ASKW\t📞 Remote party disconnected (reason=" << reason << ") - switching to LISTENING mode");
-    cout << "\n📞 Remote party disconnected - switching to LISTENING mode" << endl;
-    cout << "   Waiting for incoming calls... (Press 'q' to quit)" << endl;
+    PTRACE(1, "H323ASKW\t📞 Call disconnected (reason=" << reason << ") - switching to LISTENING mode");
+    cout << "\n📞 Call disconnected - switching to LISTENING mode" << endl;
+    cout << "   Waiting for incoming calls..." << endl;
     
     // Output for backward compatibility
     OUTPUT("", token, "Cleared \"" << TidyRemotePartyName(connection) << "\""
@@ -5110,14 +5122,19 @@ void MyH323EndPoint::NotifyDisconnectedByRemote()
 // *** REQUEST PROGRAM EXIT: Clean shutdown after call ends ***
 void MyH323EndPoint::RequestProgramExit()
 {
-  PTRACE(1, "H323ASKW\t🛑 RequestProgramExit() - Requesting clean program exit");
-  
-  // Clean up and exit
-  cout << "\n✅ Program exiting normally" << endl;
-  
-  // Use _exit to avoid cleanup issues with H.264 plugin
-  // (standard exit() can cause double-free in FFmpeg during cleanup)
-  _exit(0);
+  bool expected = false;
+  if (!m_programExitRequested.compare_exchange_strong(expected, true)) {
+    return;  // already requested
+  }
+
+  PTRACE(1, "H323ASKW\t🛑 RequestProgramExit() - clean shutdown requested");
+  cout << "\n🛑 Program exit requested" << endl;
+
+  // Prevent re-listen transition during shutdown and close active calls.
+  m_autoListenOnDisconnect = false;
+  m_listeningMode = false;
+  m_exitAfterCall = false;
+  ClearAllCalls();
 }
 
 PBoolean MyH323EndPoint::OnStartLogicalChannel(H323Connection & connection, H323Channel & channel)
