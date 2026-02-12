@@ -53,11 +53,6 @@ ICON_ASSETS_DIR="${SCRIPT_DIR}/H323CRT_transparent_iconset_and_png"
 ICONSET_PATH="${ICON_ASSETS_DIR}/H323CRT.iconset"
 ICON_PNG_PATH="${ICON_ASSETS_DIR}/H323CRT_app_icon_1024.png"
 
-# Audio codec plugin packaging policy
-# 既定では G.722 プラグインを同梱しない（同梱時に無音化する環境向けの回避策）
-# 必要な場合のみ: INCLUDE_G722_PLUGIN=1 ./create_app_bundle.sh
-INCLUDE_G722_PLUGIN="${INCLUDE_G722_PLUGIN:-0}"
-
 # 動的に検出したHomebrewライブラリのパスとファイル名（fix_library_pathsでも使う）
 OPENSSL_SSL_LIB=""
 OPENSSL_SSL_NAME=""
@@ -682,21 +677,13 @@ copy_plugins() {
     # Video input
     cp "${PTLIB_DIR}/plugins/vidinput_macos/vidinput_macos_pwplugin.dylib" "${PLUGINS}/vidinput/"
     
-    # Audio codecs (オプション)
-    case "${INCLUDE_G722_PLUGIN}" in
-        1|true|TRUE|yes|YES)
-            if [ -f "${H323PLUS_DIR}/plugins/audio/G722/g722_audio_pwplugin.dylib" ]; then
-                cp "${H323PLUS_DIR}/plugins/audio/G722/g722_audio_pwplugin.dylib" "${PLUGINS}/audio/"
-                log_info "  ✅ G.722 audio plugin を同梱しました (INCLUDE_G722_PLUGIN=${INCLUDE_G722_PLUGIN})"
-            else
-                log_warn "  G.722 audio plugin が見つかりません: ${H323PLUS_DIR}/plugins/audio/G722/g722_audio_pwplugin.dylib"
-            fi
-            ;;
-        *)
-            rm -f "${PLUGINS}/audio/g722_audio_pwplugin.dylib"
-            log_info "  ⛔ G.722 audio plugin は同梱しません (INCLUDE_G722_PLUGIN=${INCLUDE_G722_PLUGIN})"
-            ;;
-    esac
+    # Audio codecs
+    if [ -f "${H323PLUS_DIR}/plugins/audio/G722/g722_audio_pwplugin.dylib" ]; then
+        cp "${H323PLUS_DIR}/plugins/audio/G722/g722_audio_pwplugin.dylib" "${PLUGINS}/audio/"
+        log_info "  ✅ G.722 audio plugin を同梱しました"
+    else
+        log_warn "  G.722 audio plugin が見つかりません: ${H323PLUS_DIR}/plugins/audio/G722/g722_audio_pwplugin.dylib"
+    fi
     if [ -f "${H323PLUS_DIR}/plugins/audio/G.722.1/g7221_audio_pwplugin.dylib" ]; then
         cp "${H323PLUS_DIR}/plugins/audio/G.722.1/g7221_audio_pwplugin.dylib" "${PLUGINS}/audio/"
     fi

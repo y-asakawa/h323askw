@@ -495,3 +495,46 @@ A: いいえ、1対1の通話のみ対応しています。
 - 相手側で映像が固まる、または表示されない
 - H.264エンコーダーが全てI-Frameを出力する
 - カメラFPSが著しく低下する
+
+### G.722 接続で「相手にこちらの音声が届かない」場合の修正
+
+G.722（64k）接続時、送信側のRTPパケット化が 1ms（1フレーム）になっている環境では、
+相手機器との組み合わせによっては受話側で実質無音になることがあります。
+
+ソースからビルドする場合は、`h323plus/src/channels.cxx` の `H323_RTPChannel::Transmit()` で
+**G.722送信時のみ 20ms 固定（1ms × 20フレーム）** にしてください。
+
+```cpp
+unsigned framesInPacket = capability->GetTxFramesInPacket();
+rtpPayloadType = GetRTPPayloadType();
+...
+if (isAudio && rtpPayloadType == RTP_DataFrame::G722) {
+  framesInPacket = 20;
+} else if (framesInPacket > 8) {
+  framesInPacket = 1;
+}
+```
+
+#### 反映手順
+
+1. `h323plus/src/channels.cxx` を修正
+2. `h323plus` を再ビルド
+   ```bash
+   cd h323plus
+   make clean
+   make
+   ```
+3. `h323askw` を再ビルド
+   ```bash
+   cd ../h323askw
+   make clean
+   make
+   ```
+
+#### ログ確認ポイント
+
+通話時ログに以下のように出れば、20msパケット化が有効です。
+
+- `Transmit G.722-64k thread started: ... size=20*8=160`
+
+`size=1*8=8` のままなら、修正済みライブラリがリンクされていない可能性があります。
