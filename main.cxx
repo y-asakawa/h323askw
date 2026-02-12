@@ -5251,7 +5251,8 @@ MyH323EndPoint::MyH323EndPoint()
   
   // P8: Set additional MCU-compatible parameters
   SetAudioJitterDelay(50, 250);    // Low latency jitter buffer for MCU
-  SetSilenceDetectionMode(H323AudioCodec::AdaptiveSilenceDetection);
+  // Keep RTP audio flowing even for low-level microphones (e.g., speakerphones).
+  SetSilenceDetectionMode(H323AudioCodec::NoSilenceDetection);
   
   // P8: Video-specific MCU optimizations
 #ifdef H323_VIDEO
@@ -5271,7 +5272,7 @@ MyH323EndPoint::MyH323EndPoint()
   PTRACE(1, "H323ASKW\tP8: 🎯 Resolution support: CIF to 720p");
   PTRACE(1, "H323ASKW\tP8: 🎯 Frame rate: 15-30 fps adaptive");
   PTRACE(1, "H323ASKW\tP8: 🎯 Audio jitter: Low latency (50-250ms)");
-  PTRACE(1, "H323ASKW\tP8: 🎯 Silence detection: Adaptive");
+  PTRACE(1, "H323ASKW\tP8: 🎯 Silence detection: Disabled (NoSilenceDetection)");
   PTRACE(1, "H323ASKW\tP8: ✅ MCU SHOULD PREFER SENDING VIDEO TO THIS ENDPOINT");
   
   SetFuzzing(false);
@@ -19407,6 +19408,20 @@ PBoolean MicMixerChannel::Read(void* buf, PINDEX len)
     m_speexProcessor->ProcessCapture(outBuf, samples);
   }
 #endif
+
+  // Apply the same global microphone gain used by single-device mode.
+  // This keeps behavior consistent when multi-device mode is active with one input.
+  const double globalGain = g_inputGainLinear.load(std::memory_order_relaxed);
+  for (PINDEX i = 0; i < samples; ++i) {
+    const int32_t val = static_cast<int32_t>(std::lround(static_cast<double>(outBuf[i]) * globalGain));
+    if (val > 32767) {
+      outBuf[i] = 32767;
+    } else if (val < -32768) {
+      outBuf[i] = -32768;
+    } else {
+      outBuf[i] = static_cast<int16_t>(val);
+    }
+  }
   
   // 6. スペクトラム表示用に送信
   // 旧式（トップ）のビジュアライザーはベースデバイスのみを表示する
