@@ -9801,9 +9801,15 @@ PBoolean MyH323Connection::OpenAudioChannel(PBoolean isEncoding, unsigned buffer
   
   unsigned channels = 1;    // Mono
   unsigned bits = 16;       // 16-bit PCM
-  const unsigned frameSamples = std::max(1u, rate / 100); // 10ms frames
+  const unsigned codecFrameSamples = bufferSize >= sizeof(int16_t)
+                                    ? std::max(1u, bufferSize / static_cast<unsigned>(sizeof(int16_t)))
+                                    : 0u;
+  const unsigned frameSamples = codecFrameSamples > 0 ? codecFrameSamples : std::max(1u, rate / kSpeexFrameDivisor);
 
-  PTRACE(2, "H323ASKW\t🎵 Audio config: codec=" << codecName << " rate=" << rate << "Hz");
+  PTRACE(2, "H323ASKW\t🎵 Audio config: codec=" << codecName
+         << " rate=" << rate << "Hz"
+         << " bufferSize=" << bufferSize
+         << " frameSamples=" << frameSamples);
   
   // ==================== Phase 1: Multi-Device Audio Integration ====================
   
