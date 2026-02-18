@@ -79,6 +79,33 @@ struct CoreAudioDeviceConfig {
     CoreAudioDeviceConfig() {}
 };
 
+/**
+ * @struct CoreAudioQualityProfileConfig
+ * @brief SpeexDSPとジッタの音声品質プロファイル設定
+ */
+struct CoreAudioQualityProfileConfig {
+    PString name;
+    unsigned tailMs;
+    unsigned delayMs;
+    int noiseSuppressDb;
+    int echoSuppressDb;
+    int echoSuppressActiveDb;
+    unsigned jitterMinMs;
+    unsigned jitterMaxMs;
+
+    CoreAudioQualityProfileConfig()
+      : name("Middle")
+      , tailMs(160)
+      , delayMs(40)
+      , noiseSuppressDb(-12)
+      , echoSuppressDb(-35)
+      , echoSuppressActiveDb(-10)
+      , jitterMinMs(35)
+      , jitterMaxMs(140)
+    {
+    }
+};
+
 // ============================================================================
 // Phase 2: Multi-Device Video Support - Core Data Structures
 // ============================================================================
@@ -1607,6 +1634,9 @@ public:
     std::shared_ptr<SpeexAudioProcessor> m_speexProcessor;
     // Playback->mic delay (ms) fed to Speex echo canceller (tunable via env/UI)
     unsigned m_aecDelayMs = 0;
+    bool m_hasEnvAecDelay = false;
+    unsigned m_speexSampleRate = 0;
+    unsigned m_speexFrameSamples = 0;
 #endif
     std::unique_ptr<H323RecordingManager> m_recordingManager;
     
@@ -1673,6 +1703,12 @@ public:
      * @param cfg ゲイン設定を含む音声デバイス設定
      */
     void UpdateAudioGainSettings(const CoreAudioDeviceConfig& cfg);
+
+    /**
+     * @brief 音声品質プロファイルを適用（通話中の即時反映）
+     * @param profile 音声品質プロファイル
+     */
+    void ApplyAudioQualityProfile(const CoreAudioQualityProfileConfig& profile);
     
 private:
 };
@@ -1808,6 +1844,28 @@ class MyH323EndPoint : public H323EndPoint
                    << " (gain=" << cfg.inputs[i].gain << ", muted=" << (cfg.inputs[i].muted ? "yes" : "no") << ")");
         }
     }
+
+    /**
+     * @brief 音声品質プロファイルを更新（UIからのコールバック経由）
+     * @param index プロファイルインデックス
+     */
+    void SetAudioQualityProfile(int index);
+
+    /**
+     * @brief 現在の音声品質プロファイルを取得
+     */
+    CoreAudioQualityProfileConfig GetAudioQualityProfile() const {
+        PWaitAndSignal lock(m_audioProfileMutex);
+        return m_audioQualityProfile;
+    }
+
+    /**
+     * @brief 現在選択中の音声品質プロファイルインデックスを取得
+     */
+    int GetAudioQualityProfileIndex() const {
+        PWaitAndSignal lock(m_audioProfileMutex);
+        return m_audioQualityProfileIndex;
+    }
     
     // ============================================================
     // Phase 2: Multi-Device Video Configuration
@@ -1878,6 +1936,9 @@ class MyH323EndPoint : public H323EndPoint
     // Phase 1: Multi-Device Audio Configuration
     mutable PMutex m_audioConfigMutex;
     CoreAudioDeviceConfig m_audioDeviceConfig;
+    mutable PMutex m_audioProfileMutex;
+    CoreAudioQualityProfileConfig m_audioQualityProfile;
+    int m_audioQualityProfileIndex = 2;
     
     // Phase 2: Multi-Device Video Configuration
     mutable PMutex m_videoConfigMutex;

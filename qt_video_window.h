@@ -123,6 +123,7 @@ typedef void (*ApplyDeviceSelectionCallback)(const QString& mic, const QString& 
 
 // Phase 1: マルチデバイス音声コールバック
 typedef void (*ApplyAudioDeviceSelectionCallback)(const AudioDeviceSelection& selection, void* userData);
+typedef void (*ApplyAudioProfileCallback)(int index, void* userData);
 
 // デバイスタイプ定数
 #define QT_DEVICE_TYPE_MIC 0
@@ -594,6 +595,11 @@ signals:
      */
     void cameraToggleRequested();
 
+    /**
+     * @brief 音声品質プロファイル変更要求シグナル
+     */
+    void audioProfileChanged(int index);
+
 public slots:
     /**
      * @brief ローカルフレームを処理（Qtメインスレッド）
@@ -681,6 +687,7 @@ private slots:
     void onContentSendClicked();
     void onRemoteWindowClosed();
     void onAddressActivated(int index);
+    void onAudioProfileSliderChanged(int value);
 
 private:
     void setupUI();
@@ -761,6 +768,9 @@ private:
     QPushButton* m_recordButton;
     QCheckBox* m_muteCheckbox;
     QCheckBox* m_cameraCheckbox;
+    QSlider* m_audioProfileSlider;
+    QLabel* m_audioProfileNameLabel;
+    int m_audioProfileIndex;
     QPushButton* m_contentButton;  // コンテンツ再表示ボタン
     QPushButton* m_contentSendButton; // コンテンツ送信ボタン
     QWidget* m_gainRowWidget;          // 旧来の全体ゲインUI
@@ -948,6 +958,12 @@ public:
      * @brief オーディオゲイン設定のみを適用（接続中も可能）
      */
     void applyAudioGainSettings(const AudioDeviceSelection& selection);
+
+    /**
+     * @brief 音声品質プロファイルを適用
+     */
+    void setApplyAudioProfileCallback(ApplyAudioProfileCallback cb, void* userData);
+    void applyAudioProfile(int index);
     
     // ==================== End of Phase 1 Audio API ====================
     
@@ -1100,6 +1116,8 @@ private:
     // ==================== Phase 1: Multi-Device Audio Callback ====================
     ApplyAudioDeviceSelectionCallback m_applyAudioDeviceSelectionCb;
     void* m_applyAudioDeviceSelectionUserData;
+    ApplyAudioProfileCallback m_applyAudioProfileCb;
+    void* m_applyAudioProfileUserData;
     // ==================== End of Phase 1 Audio Callback ====================
 };
 

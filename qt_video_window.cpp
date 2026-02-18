@@ -42,6 +42,42 @@ namespace {
 constexpr int kGainSteps = 10;
 const int kDbTable[kGainSteps]   = {-12, -6, -3, 0, 3, 6, 9, 12, 15, 18};
 const double kLinTable[kGainSteps] = {0.25, 0.50, 0.71, 1.00, 1.41, 2.00, 2.82, 4.00, 5.62, 7.94};
+constexpr int kAudioProfileMin = 0;
+constexpr int kAudioProfileMax = 3;
+constexpr int kAudioProfileDefault = 2;
+
+int NormalizeAudioProfileIndex(int index)
+{
+    if (index < kAudioProfileMin) {
+        return kAudioProfileMin;
+    }
+    if (index > kAudioProfileMax) {
+        return kAudioProfileMax;
+    }
+    return index;
+}
+
+const char* AudioProfileNameFromIndex(int index)
+{
+    switch (NormalizeAudioProfileIndex(index)) {
+        case 0: return "Low";
+        case 1: return "High";
+        case 2: return "Middle";
+        case 3: return "MAX";
+        default: return "Middle";
+    }
+}
+
+const char* AudioProfileShortNameFromIndex(int index)
+{
+    switch (NormalizeAudioProfileIndex(index)) {
+        case 0: return "Low";
+        case 1: return "High";
+        case 2: return "Middle";
+        case 3: return "MAX";
+        default: return "Middle";
+    }
+}
 
 [[maybe_unused]] double DbToLinear(double db)
 {
@@ -1233,6 +1269,9 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_recordButton(nullptr)
     , m_muteCheckbox(nullptr)
     , m_cameraCheckbox(nullptr)
+    , m_audioProfileSlider(nullptr)
+    , m_audioProfileNameLabel(nullptr)
+    , m_audioProfileIndex(kAudioProfileDefault)
     , m_contentButton(nullptr)
     , m_contentSendButton(nullptr)
     , m_gainRowWidget(nullptr)
@@ -1588,8 +1627,9 @@ void QtVideoMainWindow::setupUI()
     m_addressCombo->setEditable(true);
     m_addressCombo->setInsertPolicy(QComboBox::NoInsert);  // 自動挿入しない（手動管理）
     m_addressCombo->lineEdit()->setPlaceholderText("IP or H.323 alias");
-    m_addressCombo->setMinimumWidth(250);
-    m_addressCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_addressCombo->setMinimumWidth(180);
+    m_addressCombo->setMaximumWidth(240);
+    m_addressCombo->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     
     // 履歴を読み込み
     loadAddressHistory();
@@ -1614,7 +1654,29 @@ void QtVideoMainWindow::setupUI()
     controlLayout->addWidget(m_disconnectButton);
     controlLayout->addWidget(m_exitButton);
     controlLayout->addWidget(m_recordButton);
-    controlLayout->addStretch();
+
+    // 音声品質プロファイル（Mute Micの左隣に縦スライダー）
+    QWidget* audioProfileWidget = new QWidget(this);
+    QVBoxLayout* audioProfileLayout = new QVBoxLayout(audioProfileWidget);
+    audioProfileLayout->setContentsMargins(0, 0, 0, 0);
+    audioProfileLayout->setSpacing(1);
+
+    m_audioProfileNameLabel = new QLabel(AudioProfileShortNameFromIndex(m_audioProfileIndex), this);
+    m_audioProfileNameLabel->setStyleSheet("font-size: 8px; color: #444; font-weight: 600;");
+    m_audioProfileNameLabel->setAlignment(Qt::AlignHCenter | Qt::AlignBottom);
+    audioProfileLayout->addWidget(m_audioProfileNameLabel, 0, Qt::AlignHCenter);
+
+    m_audioProfileSlider = new QSlider(Qt::Vertical, this);
+    m_audioProfileSlider->setRange(kAudioProfileMin, kAudioProfileMax);
+    m_audioProfileSlider->setTickInterval(1);
+    m_audioProfileSlider->setTickPosition(QSlider::TicksRight);
+    m_audioProfileSlider->setSingleStep(1);
+    m_audioProfileSlider->setPageStep(1);
+    m_audioProfileSlider->setValue(m_audioProfileIndex);
+    m_audioProfileSlider->setFixedSize(12, 32);
+    audioProfileLayout->addWidget(m_audioProfileSlider, 0, Qt::AlignHCenter);
+    m_audioProfileNameLabel->setMinimumWidth(40);
+    audioProfileWidget->setFixedSize(42, 50);
 
     // ミュート/カメラ
     m_muteCheckbox = new QCheckBox("Mute Mic", this);
@@ -1622,6 +1684,7 @@ void QtVideoMainWindow::setupUI()
     m_muteCheckbox->setEnabled(false);
     m_cameraCheckbox->setEnabled(false);
     
+    controlLayout->addWidget(audioProfileWidget);
     controlLayout->addWidget(m_muteCheckbox);
     controlLayout->addWidget(m_cameraCheckbox);
 
@@ -1646,6 +1709,7 @@ void QtVideoMainWindow::setupUI()
     m_contentSendButton->setToolTip("Select a window to share via H.239");
     m_contentSendButton->setEnabled(false); // 接続後に有効化
     controlLayout->addWidget(m_contentSendButton);
+    controlLayout->addStretch();
 
     mainLayout->addLayout(controlLayout);
 
@@ -1711,6 +1775,9 @@ void QtVideoMainWindow::setupConnections()
     // チェックボックス
     connect(m_muteCheckbox, &QCheckBox::toggled, this, &QtVideoMainWindow::onMuteToggled);
     connect(m_cameraCheckbox, &QCheckBox::toggled, this, &QtVideoMainWindow::onCameraToggled);
+    if (m_audioProfileSlider) {
+        connect(m_audioProfileSlider, &QSlider::valueChanged, this, &QtVideoMainWindow::onAudioProfileSliderChanged);
+    }
 
     // ウィンドウ分離ボタン
     connect(m_separateButton, &QPushButton::clicked, this, &QtVideoMainWindow::onSeparateWindowsClicked);
@@ -1758,6 +1825,7 @@ void QtVideoMainWindow::setupConnections()
     connect(m_spkGainSlider, &QSlider::valueChanged, this, applySpeakerGainIndex);
     applyGainIndex(m_gainSlider->value());  // 初期値反映
     applySpeakerGainIndex(m_spkGainSlider->value());
+    onAudioProfileSliderChanged(m_audioProfileIndex);
 
     // ==================== Phase 1: Multi-Device Audio UI Connections ====================
     PTRACE(0, "QtVideo\t🟦 Connecting m_addMicButton signal...");
@@ -2227,6 +2295,25 @@ void QtVideoMainWindow::onRecordClicked()
     setConnectionStatus("Recording: " + QFileInfo(selectedPath).fileName());
 }
 
+void QtVideoMainWindow::onAudioProfileSliderChanged(int value)
+{
+    const int index = NormalizeAudioProfileIndex(value);
+    if (m_audioProfileSlider && m_audioProfileSlider->value() != index) {
+        QSignalBlocker blocker(m_audioProfileSlider);
+        m_audioProfileSlider->setValue(index);
+    }
+
+    m_audioProfileIndex = index;
+    const QString name = QString::fromUtf8(AudioProfileNameFromIndex(index));
+    const QString shortName = QString::fromUtf8(AudioProfileShortNameFromIndex(index));
+    if (m_audioProfileNameLabel) {
+        m_audioProfileNameLabel->setText(shortName);
+    }
+
+    PTRACE(1, "QtVideo\tAudio profile changed: index=" << index << " name=" << name.toStdString());
+    emit audioProfileChanged(index);
+}
+
 void QtVideoMainWindow::onMuteToggled(bool checked)
 {
     if (m_h323Connection == nullptr) {
@@ -2359,6 +2446,8 @@ QtVideoManager::QtVideoManager()
     , m_applyDeviceSelectionUserData(nullptr)
     , m_applyAudioDeviceSelectionCb(nullptr)  // Phase 1
     , m_applyAudioDeviceSelectionUserData(nullptr)  // Phase 1
+    , m_applyAudioProfileCb(nullptr)
+    , m_applyAudioProfileUserData(nullptr)
 {
 }
 
@@ -3127,6 +3216,11 @@ void QtVideoManager::setupSignalConnections()
         [this]() {
             toggleCamera();
         });
+
+    QObject::connect(m_mainWindow, &QtVideoMainWindow::audioProfileChanged,
+        [this](int index) {
+            applyAudioProfile(index);
+        });
     
     QT_TRACE(1, "Signal connections established between Qt UI and H.323");
 }
@@ -3254,6 +3348,24 @@ void QtVideoManager::applyAudioGainSettings(const AudioDeviceSelection& selectio
     } else {
         QT_TRACE(3, "No active connection - gain will be applied on next call");
     }
+}
+
+void QtVideoManager::setApplyAudioProfileCallback(ApplyAudioProfileCallback cb, void* userData)
+{
+    m_applyAudioProfileCb = cb;
+    m_applyAudioProfileUserData = userData;
+    QT_TRACE(2, "ApplyAudioProfileCallback set: cb=" << (void*)cb << " userData=" << userData);
+}
+
+void QtVideoManager::applyAudioProfile(int index)
+{
+    if (!m_applyAudioProfileCb) {
+        QT_TRACE(1, "WARNING: ApplyAudioProfileCallback not set");
+        return;
+    }
+
+    const int normalized = NormalizeAudioProfileIndex(index);
+    m_applyAudioProfileCb(normalized, m_applyAudioProfileUserData);
 }
 
 // ==================== End of Phase 1 Audio Implementation ====================

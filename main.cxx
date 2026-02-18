@@ -1180,9 +1180,13 @@ public:
                       unsigned frameSamples,
                       unsigned tailMs,
                       unsigned playbackDelayMs,
-                      bool enableAgc = false)
+                      bool enableAgc = false,
+                      int noiseSuppressDb = kDefaultNoiseSuppress,
+                      int echoSuppressDb = kDefaultEchoSuppress,
+                      int echoSuppressActiveDb = kDefaultEchoSuppressActive)
   {
-    init(sampleRate, frameSamples, tailMs, playbackDelayMs, enableAgc);
+    init(sampleRate, frameSamples, tailMs, playbackDelayMs, enableAgc,
+         noiseSuppressDb, echoSuppressDb, echoSuppressActiveDb);
   }
 
   ~SpeexAudioProcessor()
@@ -1194,10 +1198,14 @@ public:
                    unsigned frameSamples,
                    unsigned tailMs,
                    unsigned playbackDelayMs,
-                   bool enableAgc)
+                   bool enableAgc,
+                   int noiseSuppressDb,
+                   int echoSuppressDb,
+                   int echoSuppressActiveDb)
   {
     std::lock_guard<std::mutex> lk(m_mutex);
-    init(sampleRate, frameSamples, tailMs, playbackDelayMs, enableAgc);
+    init(sampleRate, frameSamples, tailMs, playbackDelayMs, enableAgc,
+         noiseSuppressDb, echoSuppressDb, echoSuppressActiveDb);
   }
 
   unsigned SampleRate() const { return m_rate; }
@@ -1381,7 +1389,10 @@ private:
             unsigned frameSamples,
             unsigned tailMs,
             unsigned playbackDelayMs,
-            bool enableAgc)
+            bool enableAgc,
+            int noiseSuppressDb,
+            int echoSuppressDb,
+            int echoSuppressActiveDb)
   {
     destroy();
 
@@ -1413,15 +1424,13 @@ private:
 #endif
     if (m_preprocess) {
       int denoise = 1;
-      int ns = kDefaultNoiseSuppress;
-      int vad = 0;  // conservative: keep VAD/DTX off initially
+      int ns = noiseSuppressDb;
       speex_preprocess_ctl(m_preprocess, SPEEX_PREPROCESS_SET_DENOISE, &denoise);
       speex_preprocess_ctl(m_preprocess, SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &ns);
-      speex_preprocess_ctl(m_preprocess, SPEEX_PREPROCESS_SET_VAD, &vad);
 
 #if defined(USE_SPEEXDSP_AEC)
-      int echoSuppress = kDefaultEchoSuppress;
-      int echoSuppressActive = kDefaultEchoSuppressActive;
+      int echoSuppress = echoSuppressDb;
+      int echoSuppressActive = echoSuppressActiveDb;
       speex_preprocess_ctl(m_preprocess, SPEEX_PREPROCESS_SET_ECHO_SUPPRESS, &echoSuppress);
       speex_preprocess_ctl(m_preprocess, SPEEX_PREPROCESS_SET_ECHO_SUPPRESS_ACTIVE, &echoSuppressActive);
 #endif
@@ -1473,14 +1482,74 @@ private:
 class SpeexAudioProcessor
 {
 public:
-  SpeexAudioProcessor(unsigned, unsigned, unsigned, unsigned, bool = false) {}
-  void Reconfigure(unsigned, unsigned, unsigned, unsigned, bool) {}
+  SpeexAudioProcessor(unsigned, unsigned, unsigned, unsigned, bool = false, int = 0, int = 0, int = 0) {}
+  void Reconfigure(unsigned, unsigned, unsigned, unsigned, bool, int, int, int) {}
   unsigned SampleRate() const { return 0; }
   unsigned FrameSamples() const { return 0; }
   void PushPlayback(const int16_t*, size_t) {}
   void ProcessCapture(int16_t*, size_t) {}
 };
 #endif // defined(USE_SPEEXDSP)
+
+namespace {
+int NormalizeAudioProfileIndex(int index)
+{
+  if (index < 0)
+    return 0;
+  if (index > 3)
+    return 3;
+  return index;
+}
+
+CoreAudioQualityProfileConfig BuildAudioQualityProfileFromIndex(int index)
+{
+  CoreAudioQualityProfileConfig profile;
+  switch (NormalizeAudioProfileIndex(index)) {
+    case 0:
+      profile.name = "Low";
+      profile.tailMs = 50;
+      profile.delayMs = 10;
+      profile.noiseSuppressDb = -5;
+      profile.echoSuppressDb = -20;
+      profile.echoSuppressActiveDb = -5;
+      profile.jitterMinMs = 30;
+      profile.jitterMaxMs = 80;
+      break;
+    case 1:
+      profile.name = "High";
+      profile.tailMs = 120;
+      profile.delayMs = 30;
+      profile.noiseSuppressDb = -10;
+      profile.echoSuppressDb = -30;
+      profile.echoSuppressActiveDb = -8;
+      profile.jitterMinMs = 30;
+      profile.jitterMaxMs = 120;
+      break;
+    case 2:
+      profile.name = "Middle";
+      profile.tailMs = 160;
+      profile.delayMs = 40;
+      profile.noiseSuppressDb = -12;
+      profile.echoSuppressDb = -35;
+      profile.echoSuppressActiveDb = -10;
+      profile.jitterMinMs = 35;
+      profile.jitterMaxMs = 140;
+      break;
+    case 3:
+    default:
+      profile.name = "MAX";
+      profile.tailMs = 200;
+      profile.delayMs = 60;
+      profile.noiseSuppressDb = -15;
+      profile.echoSuppressDb = -40;
+      profile.echoSuppressActiveDb = -12;
+      profile.jitterMinMs = 45;
+      profile.jitterMaxMs = 180;
+      break;
+  }
+  return profile;
+}
+} // namespace
 
 // ============================================================================
 // 🎯 CRITICAL FIX: FastStart ↔ H.245 Synchronization (Truth Table)
@@ -2720,6 +2789,30 @@ static void Qt6ApplyAudioDeviceSelectionCallback(const AudioDeviceSelection& sel
         PTRACE(2, "Qt6AudioCallback\t✅ Config saved - will be applied when connecting");
     }
 }
+
+static void Qt6ApplyAudioProfileCallback(int index, void* userData)
+{
+    MyH323EndPoint* ep = static_cast<MyH323EndPoint*>(userData);
+    if (!ep) {
+        PTRACE(1, "Qt6AudioProfile\tERROR: Endpoint is null");
+        return;
+    }
+
+    ep->SetAudioQualityProfile(index);
+    CoreAudioQualityProfileConfig profile = ep->GetAudioQualityProfile();
+    const int normalized = ep->GetAudioQualityProfileIndex();
+
+    MyH323Connection* conn = ep->GetCurrentConnection();
+    if (conn && conn->IsEstablished()) {
+        PTRACE(1, "Qt6AudioProfile\tApplying audio profile to active connection: "
+               << profile.name << " (index=" << normalized << ")");
+        conn->ApplyAudioQualityProfile(profile);
+    } else {
+        PTRACE(2, "Qt6AudioProfile\tNo active connection - profile stored for next call");
+    }
+
+    PTRACE(1, "Qt6AudioProfile\tApplied profile=" << profile.name << " index=" << normalized);
+}
 #endif // USE_QT6
 
 // ==================== End of Phase 1 Audio Callback ====================
@@ -3835,6 +3928,7 @@ void H323ASKW::Main()
         
         // Phase 1: Multi-Device Audio Callback
         qt6Manager.setApplyAudioDeviceSelectionCallback(Qt6ApplyAudioDeviceSelectionCallback, h323);
+        qt6Manager.setApplyAudioProfileCallback(Qt6ApplyAudioProfileCallback, h323);
         PTRACE(1, "H323ASKW\t🎵 Multi-device audio callback registered");
         
         qt6Manager.refreshDeviceLists();
@@ -4477,9 +4571,8 @@ MyH323EndPoint::MyH323EndPoint()
   DisableH245inSetup(false);    // Ensure H.245 address in Setup PDU (disable the disable)
   PTRACE(1, "H323ASKW\t  ✅ H.245 in Setup: ENABLED (fallback compatibility)");
   
-  // Set conservative connection parameters for MCU compatibility
-  SetAudioJitterDelay(50, 250);    // 50-250ms audio jitter buffer
-  PTRACE(1, "H323ASKW\t  ✅ Audio jitter buffer: 50-250ms");
+  // Set default audio quality profile (Balanced)
+  SetAudioQualityProfile(2);
   
   PTRACE(1, "H323ASKW\t🎯 SIGNALING STRATEGY: FastStart→H.245_Tunneling→Separate_H.245");
 
@@ -5250,7 +5343,10 @@ MyH323EndPoint::MyH323EndPoint()
   PTRACE(1, "H323ASKW\t*** P8: FINALIZING MCU-OPTIMIZED CAPABILITY ADVERTISEMENT ***");
   
   // P8: Set additional MCU-compatible parameters
-  SetAudioJitterDelay(50, 250);    // Low latency jitter buffer for MCU
+  {
+    CoreAudioQualityProfileConfig profile = GetAudioQualityProfile();
+    SetAudioJitterDelay(profile.jitterMinMs, profile.jitterMaxMs);
+  }
   // Keep RTP audio flowing even for low-level microphones (e.g., speakerphones).
   SetSilenceDetectionMode(H323AudioCodec::NoSilenceDetection);
   
@@ -5271,7 +5367,10 @@ MyH323EndPoint::MyH323EndPoint()
   PTRACE(1, "H323ASKW\tP8: 🎯 Packetization: Mode 0 (Single NAL)");
   PTRACE(1, "H323ASKW\tP8: 🎯 Resolution support: CIF to 720p");
   PTRACE(1, "H323ASKW\tP8: 🎯 Frame rate: 15-30 fps adaptive");
-  PTRACE(1, "H323ASKW\tP8: 🎯 Audio jitter: Low latency (50-250ms)");
+  {
+    CoreAudioQualityProfileConfig profile = GetAudioQualityProfile();
+    PTRACE(1, "H323ASKW\tP8: 🎯 Audio jitter: " << profile.jitterMinMs << "-" << profile.jitterMaxMs << "ms");
+  }
   PTRACE(1, "H323ASKW\tP8: 🎯 Silence detection: Disabled (NoSilenceDetection)");
   PTRACE(1, "H323ASKW\tP8: ✅ MCU SHOULD PREFER SENDING VIDEO TO THIS ENDPOINT");
   
@@ -5428,6 +5527,27 @@ void MyH323EndPoint::OnConnectionEstablished(H323Connection & connection, const 
 }
 
 // ==================== Phase 1: Multi-Device Audio - Get Current Connection ====================
+
+void MyH323EndPoint::SetAudioQualityProfile(int index)
+{
+    CoreAudioQualityProfileConfig profile = BuildAudioQualityProfileFromIndex(index);
+
+    {
+      PWaitAndSignal lock(m_audioProfileMutex);
+      m_audioQualityProfileIndex = NormalizeAudioProfileIndex(index);
+      m_audioQualityProfile = profile;
+    }
+
+    SetAudioJitterDelay(profile.jitterMinMs, profile.jitterMaxMs);
+    PTRACE(1, "H323ASKW\tAudio quality profile updated: tail=" << profile.tailMs
+           << " delay=" << profile.delayMs
+           << " ns=" << profile.noiseSuppressDb
+           << " echo=" << profile.echoSuppressDb
+           << " echoActive=" << profile.echoSuppressActiveDb
+           << " jitter=" << profile.jitterMinMs << "-" << profile.jitterMaxMs
+           << " profile=" << profile.name
+           << " index=" << NormalizeAudioProfileIndex(index));
+}
 
 MyH323Connection* MyH323EndPoint::GetCurrentConnection()
 {
@@ -6190,6 +6310,8 @@ MyH323Connection::MyH323Connection(MyH323EndPoint & ep, unsigned callRef)
     m_recordingManager.reset(new H323RecordingManager(this));
     
 #if defined(USE_SPEEXDSP)
+    const char* aecDelayEnv = ::getenv("H323ASKW_AEC_DELAY_MS");
+    m_hasEnvAecDelay = (aecDelayEnv != NULL && *aecDelayEnv != '\0');
     m_aecDelayMs = ReadEnvMs("H323ASKW_AEC_DELAY_MS", kDefaultPlaybackDelayMs);
     PTRACE(2, "H323ASKW\tSpeexDSP AEC delay = " << m_aecDelayMs << " ms (set H323ASKW_AEC_DELAY_MS to override)");
 #endif
@@ -6439,6 +6561,49 @@ void MyH323Connection::UpdateAudioGainSettings(const CoreAudioDeviceConfig& cfg)
   }
   
   PTRACE(2, "H323ASKW\t✅ Connection: Gain settings updated");
+}
+
+void MyH323Connection::ApplyAudioQualityProfile(const CoreAudioQualityProfileConfig& profile)
+{
+  PTRACE(1, "H323ASKW\tApplying audio quality profile to active connection: "
+         << profile.name
+         << " tail=" << profile.tailMs
+         << " delay=" << profile.delayMs
+         << " ns=" << profile.noiseSuppressDb
+         << " echo=" << profile.echoSuppressDb
+         << " echoActive=" << profile.echoSuppressActiveDb
+         << " jitter=" << profile.jitterMinMs << "-" << profile.jitterMaxMs);
+
+#if defined(USE_SPEEXDSP)
+  if (SpeexRuntimeDisabled()) {
+    PTRACE(1, "H323ASKW\tSpeexDSP runtime disabled - profile update deferred");
+    return;
+  }
+
+  if (!m_speexProcessor) {
+    PTRACE(2, "H323ASKW\tSpeexDSP processor not initialized yet - profile will apply on next audio channel open");
+    return;
+  }
+
+  if (m_speexSampleRate == 0 || m_speexFrameSamples == 0) {
+    PTRACE(2, "H323ASKW\tAudio format unknown - profile will apply on next audio channel open");
+    return;
+  }
+
+  const unsigned delayMs = m_hasEnvAecDelay ? m_aecDelayMs : profile.delayMs;
+  const bool enableAgc = false;
+  m_speexProcessor->Reconfigure(m_speexSampleRate,
+                                m_speexFrameSamples,
+                                profile.tailMs,
+                                delayMs,
+                                enableAgc,
+                                profile.noiseSuppressDb,
+                                profile.echoSuppressDb,
+                                profile.echoSuppressActiveDb);
+  PTRACE(1, "H323ASKW\t✅ Active connection SpeexDSP reconfigured (jitter applies on next channel/session)");
+#else
+  (void)profile;
+#endif
 }
 
 // ==== H.245受信PDU: A) const参照版 ====
@@ -9805,6 +9970,7 @@ PBoolean MyH323Connection::OpenAudioChannel(PBoolean isEncoding, unsigned buffer
                                     ? std::max(1u, bufferSize / static_cast<unsigned>(sizeof(int16_t)))
                                     : 0u;
   const unsigned frameSamples = codecFrameSamples > 0 ? codecFrameSamples : std::max(1u, rate / kSpeexFrameDivisor);
+  CoreAudioQualityProfileConfig qualityProfile = ep.GetAudioQualityProfile();
 
   PTRACE(2, "H323ASKW\t🎵 Audio config: codec=" << codecName
          << " rate=" << rate << "Hz"
@@ -9816,19 +9982,27 @@ PBoolean MyH323Connection::OpenAudioChannel(PBoolean isEncoding, unsigned buffer
   // Initialize SpeexDSP processor if not already done
 #if defined(USE_SPEEXDSP)
   if (!SpeexRuntimeDisabled()) {
-    const unsigned tailMs = kDefaultAecTailMs;
-    const unsigned delayMs = (m_aecDelayMs > 0) ? m_aecDelayMs : kDefaultPlaybackDelayMs;
+    const unsigned tailMs = qualityProfile.tailMs;
+    const unsigned delayMs = m_hasEnvAecDelay ? m_aecDelayMs : qualityProfile.delayMs;
+    const int noiseSuppressDb = qualityProfile.noiseSuppressDb;
+    const int echoSuppressDb = qualityProfile.echoSuppressDb;
+    const int echoSuppressActiveDb = qualityProfile.echoSuppressActiveDb;
     const bool enableAgc = false;
 
     if (!m_speexProcessor ||
         m_speexProcessor->SampleRate() != rate ||
         m_speexProcessor->FrameSamples() != frameSamples) {
-      m_speexProcessor = std::make_shared<SpeexAudioProcessor>(rate, frameSamples, tailMs, delayMs, enableAgc);
+      m_speexProcessor = std::make_shared<SpeexAudioProcessor>(rate, frameSamples, tailMs, delayMs,
+                                                               enableAgc, noiseSuppressDb,
+                                                               echoSuppressDb, echoSuppressActiveDb);
       PTRACE(2, "H323ASKW\tSpeexDSP initialized: rate=" << rate << "Hz, frameSamples=" << frameSamples);
     } else {
-      m_speexProcessor->Reconfigure(rate, frameSamples, tailMs, delayMs, enableAgc);
+      m_speexProcessor->Reconfigure(rate, frameSamples, tailMs, delayMs, enableAgc,
+                                    noiseSuppressDb, echoSuppressDb, echoSuppressActiveDb);
       PTRACE(2, "H323ASKW\tSpeexDSP reconfigured");
     }
+    m_speexSampleRate = rate;
+    m_speexFrameSamples = frameSamples;
   } else {
     PTRACE(1, "H323ASKW\tSpeexDSP runtime disabled via H323ASKW_DISABLE_SPEEXDSP");
   }
@@ -9963,17 +10137,25 @@ PBoolean MyH323Connection::OpenAudioChannel(PBoolean isEncoding, unsigned buffer
   std::shared_ptr<SpeexAudioProcessor> speexProc;
   if (!SpeexRuntimeDisabled()) {
     // Initialize or reconfigure shared Speex processor (AEC/NS)
-    const unsigned tailMs = kDefaultAecTailMs;
-    const unsigned delayMs = (m_aecDelayMs > 0) ? m_aecDelayMs : kDefaultPlaybackDelayMs;
+    const unsigned tailMs = qualityProfile.tailMs;
+    const unsigned delayMs = m_hasEnvAecDelay ? m_aecDelayMs : qualityProfile.delayMs;
+    const int noiseSuppressDb = qualityProfile.noiseSuppressDb;
+    const int echoSuppressDb = qualityProfile.echoSuppressDb;
+    const int echoSuppressActiveDb = qualityProfile.echoSuppressActiveDb;
     const bool enableAgc = false;
 
     if (!m_speexProcessor ||
         m_speexProcessor->SampleRate() != rate ||
         m_speexProcessor->FrameSamples() != frameSamples) {
-      m_speexProcessor = std::make_shared<SpeexAudioProcessor>(rate, frameSamples, tailMs, delayMs, enableAgc);
+      m_speexProcessor = std::make_shared<SpeexAudioProcessor>(rate, frameSamples, tailMs, delayMs,
+                                                               enableAgc, noiseSuppressDb,
+                                                               echoSuppressDb, echoSuppressActiveDb);
     } else {
-      m_speexProcessor->Reconfigure(rate, frameSamples, tailMs, delayMs, enableAgc);
+      m_speexProcessor->Reconfigure(rate, frameSamples, tailMs, delayMs, enableAgc,
+                                    noiseSuppressDb, echoSuppressDb, echoSuppressActiveDb);
     }
+    m_speexSampleRate = rate;
+    m_speexFrameSamples = frameSamples;
     speexProc = m_speexProcessor;
   } else {
     PTRACE(1, "H323ASKW\tSpeexDSP runtime disabled via H323ASKW_DISABLE_SPEEXDSP");
