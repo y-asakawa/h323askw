@@ -1655,7 +1655,7 @@ void QtVideoMainWindow::setupUI()
     controlLayout->addWidget(m_exitButton);
     controlLayout->addWidget(m_recordButton);
 
-    // 音声品質プロファイル（Mute Micの左隣に縦スライダー）
+    // 音声品質プロファイル（Mute Micの左隣に横スライダー）
     QWidget* audioProfileWidget = new QWidget(this);
     QVBoxLayout* audioProfileLayout = new QVBoxLayout(audioProfileWidget);
     audioProfileLayout->setContentsMargins(0, 0, 0, 0);
@@ -1666,17 +1666,17 @@ void QtVideoMainWindow::setupUI()
     m_audioProfileNameLabel->setAlignment(Qt::AlignHCenter | Qt::AlignBottom);
     audioProfileLayout->addWidget(m_audioProfileNameLabel, 0, Qt::AlignHCenter);
 
-    m_audioProfileSlider = new QSlider(Qt::Vertical, this);
+    m_audioProfileSlider = new QSlider(Qt::Horizontal, this);
     m_audioProfileSlider->setRange(kAudioProfileMin, kAudioProfileMax);
     m_audioProfileSlider->setTickInterval(1);
-    m_audioProfileSlider->setTickPosition(QSlider::TicksRight);
+    m_audioProfileSlider->setTickPosition(QSlider::NoTicks);
     m_audioProfileSlider->setSingleStep(1);
     m_audioProfileSlider->setPageStep(1);
     m_audioProfileSlider->setValue(m_audioProfileIndex);
-    m_audioProfileSlider->setFixedSize(12, 32);
+    m_audioProfileSlider->setFixedSize(44, 14);
     audioProfileLayout->addWidget(m_audioProfileSlider, 0, Qt::AlignHCenter);
-    m_audioProfileNameLabel->setMinimumWidth(40);
-    audioProfileWidget->setFixedSize(42, 50);
+    m_audioProfileNameLabel->setMinimumWidth(44);
+    audioProfileWidget->setFixedSize(48, 32);
 
     // ミュート/カメラ
     m_muteCheckbox = new QCheckBox("Mute Mic", this);
