@@ -124,6 +124,7 @@ typedef void (*ApplyDeviceSelectionCallback)(const QString& mic, const QString& 
 // Phase 1: マルチデバイス音声コールバック
 typedef void (*ApplyAudioDeviceSelectionCallback)(const AudioDeviceSelection& selection, void* userData);
 typedef void (*ApplyAudioProfileCallback)(int index, void* userData);
+typedef void (*SetOverlayTextCallback)(const QString& text, bool enabled, void* userData);
 
 // デバイスタイプ定数
 #define QT_DEVICE_TYPE_MIC 0
@@ -600,6 +601,11 @@ signals:
      */
     void audioProfileChanged(int index);
 
+    /**
+     * @brief ローカル映像の背景テキスト変更要求シグナル
+     */
+    void overlayTextChanged(const QString& text, bool enabled);
+
 public slots:
     /**
      * @brief ローカルフレームを処理（Qtメインスレッド）
@@ -679,6 +685,9 @@ private slots:
     void onMicDeviceChanged(int index);
     void onSpeakerDeviceChanged(int index);
     void onCameraDeviceChanged(int index);
+    void onOverlayTextClicked();
+    void onOverlayTextSendClicked();
+    void onOverlayTextClearClicked();
     void onAddCameraClicked();
     void onCameraRowRemoveRequested(VideoDeviceRowWidget* widget);
     void onSeparateWindowsClicked();
@@ -785,9 +794,16 @@ private:
     QComboBox* m_micCombo;
     QComboBox* m_speakerCombo;
     QComboBox* m_cameraCombo;
+    QPushButton* m_overlayTextButton;
 
     // ステータス
     QLabel* m_statusLabel;
+
+    // 背景テキスト入力ウィンドウ
+    QDialog* m_overlayTextDialog;
+    QLineEdit* m_overlayTextLineEdit;
+    QString m_overlayText;
+    bool m_overlayTextEnabled;
 
     // オーディオスペクトラム
     QtAudioSpectrumWidget* m_localSpectrum;   // ローカル（マイク）
@@ -964,6 +980,8 @@ public:
      */
     void setApplyAudioProfileCallback(ApplyAudioProfileCallback cb, void* userData);
     void applyAudioProfile(int index);
+    void setOverlayTextCallback(SetOverlayTextCallback cb, void* userData);
+    void applyOverlayText(const QString& text, bool enabled);
     
     // ==================== End of Phase 1 Audio API ====================
     
@@ -1118,6 +1136,8 @@ private:
     void* m_applyAudioDeviceSelectionUserData;
     ApplyAudioProfileCallback m_applyAudioProfileCb;
     void* m_applyAudioProfileUserData;
+    SetOverlayTextCallback m_setOverlayTextCb;
+    void* m_setOverlayTextUserData;
     // ==================== End of Phase 1 Audio Callback ====================
 };
 

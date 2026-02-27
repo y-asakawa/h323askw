@@ -1284,7 +1284,12 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_micCombo(nullptr)
     , m_speakerCombo(nullptr)
     , m_cameraCombo(nullptr)
+    , m_overlayTextButton(nullptr)
     , m_statusLabel(nullptr)
+    , m_overlayTextDialog(nullptr)
+    , m_overlayTextLineEdit(nullptr)
+    , m_overlayText()
+    , m_overlayTextEnabled(false)
     , m_localSpectrum(nullptr)
     , m_remoteSpectrum(nullptr)
     , m_h323Connection(nullptr)
@@ -1731,6 +1736,10 @@ void QtVideoMainWindow::setupUI()
     m_cameraCombo->setMinimumWidth(150);
     deviceLayout->addWidget(m_cameraCombo);
 
+    m_overlayTextButton = new QPushButton("BG Text", this);
+    m_overlayTextButton->setToolTip("Open background text input window");
+    deviceLayout->addWidget(m_overlayTextButton);
+
     deviceLayout->addStretch();
 
     mainLayout->addLayout(deviceLayout);
@@ -1794,6 +1803,10 @@ void QtVideoMainWindow::setupConnections()
             this, &QtVideoMainWindow::onSpeakerDeviceChanged);
     connect(m_cameraCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), 
             this, &QtVideoMainWindow::onCameraDeviceChanged);
+    if (m_overlayTextButton) {
+        connect(m_overlayTextButton, &QPushButton::clicked,
+                this, &QtVideoMainWindow::onOverlayTextClicked);
+    }
 
     // フレーム受信（スレッドセーフ）
     connect(this, &QtVideoMainWindow::localFrameReady, 
@@ -2367,6 +2380,74 @@ void QtVideoMainWindow::onCameraDeviceChanged(int index)
     onDeviceRowChanged();  // マルチカメラ設定も更新
 }
 
+void QtVideoMainWindow::onOverlayTextClicked()
+{
+    if (!m_overlayTextDialog) {
+        m_overlayTextDialog = new QDialog(this);
+        m_overlayTextDialog->setWindowFlags(Qt::Window);
+        m_overlayTextDialog->setWindowTitle("Background Text");
+        m_overlayTextDialog->setMinimumWidth(460);
+        m_overlayTextDialog->resize(520, 120);
+
+        QVBoxLayout* layout = new QVBoxLayout(m_overlayTextDialog);
+        layout->setContentsMargins(10, 10, 10, 10);
+        layout->setSpacing(8);
+
+        QLabel* hint = new QLabel("Enter text to overlay on local camera video background:", m_overlayTextDialog);
+        layout->addWidget(hint);
+
+        m_overlayTextLineEdit = new QLineEdit(m_overlayTextDialog);
+        m_overlayTextLineEdit->setPlaceholderText("Type text and click Send");
+        m_overlayTextLineEdit->setText(m_overlayText);
+        layout->addWidget(m_overlayTextLineEdit);
+
+        QHBoxLayout* buttonRow = new QHBoxLayout();
+        QPushButton* sendButton = new QPushButton("Send", m_overlayTextDialog);
+        QPushButton* clearButton = new QPushButton("Clear", m_overlayTextDialog);
+        QPushButton* closeButton = new QPushButton("Close", m_overlayTextDialog);
+        buttonRow->addWidget(sendButton);
+        buttonRow->addWidget(clearButton);
+        buttonRow->addStretch();
+        buttonRow->addWidget(closeButton);
+        layout->addLayout(buttonRow);
+
+        connect(sendButton, &QPushButton::clicked, this, &QtVideoMainWindow::onOverlayTextSendClicked);
+        connect(clearButton, &QPushButton::clicked, this, &QtVideoMainWindow::onOverlayTextClearClicked);
+        connect(closeButton, &QPushButton::clicked, m_overlayTextDialog, &QDialog::hide);
+        connect(m_overlayTextLineEdit, &QLineEdit::returnPressed, this, &QtVideoMainWindow::onOverlayTextSendClicked);
+    } else if (m_overlayTextLineEdit) {
+        m_overlayTextLineEdit->setText(m_overlayText);
+    }
+
+    m_overlayTextDialog->show();
+    m_overlayTextDialog->raise();
+    m_overlayTextDialog->activateWindow();
+}
+
+void QtVideoMainWindow::onOverlayTextSendClicked()
+{
+    if (!m_overlayTextLineEdit) {
+        return;
+    }
+
+    m_overlayText = m_overlayTextLineEdit->text();
+    m_overlayTextEnabled = !m_overlayText.trimmed().isEmpty();
+    emit overlayTextChanged(m_overlayText, m_overlayTextEnabled);
+    setConnectionStatus(m_overlayTextEnabled ? "Background text updated" : "Background text cleared");
+}
+
+void QtVideoMainWindow::onOverlayTextClearClicked()
+{
+    if (m_overlayTextLineEdit) {
+        m_overlayTextLineEdit->clear();
+    }
+
+    m_overlayText.clear();
+    m_overlayTextEnabled = false;
+    emit overlayTextChanged(QString(), false);
+    setConnectionStatus("Background text cleared");
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // QtContentWindow Implementation
 ///////////////////////////////////////////////////////////////////////////////
@@ -2448,6 +2529,8 @@ QtVideoManager::QtVideoManager()
     , m_applyAudioDeviceSelectionUserData(nullptr)  // Phase 1
     , m_applyAudioProfileCb(nullptr)
     , m_applyAudioProfileUserData(nullptr)
+    , m_setOverlayTextCb(nullptr)
+    , m_setOverlayTextUserData(nullptr)
 {
 }
 
@@ -3221,6 +3304,11 @@ void QtVideoManager::setupSignalConnections()
         [this](int index) {
             applyAudioProfile(index);
         });
+
+    QObject::connect(m_mainWindow, &QtVideoMainWindow::overlayTextChanged,
+        [this](const QString& text, bool enabled) {
+            applyOverlayText(text, enabled);
+        });
     
     QT_TRACE(1, "Signal connections established between Qt UI and H.323");
 }
@@ -3366,6 +3454,20 @@ void QtVideoManager::applyAudioProfile(int index)
 
     const int normalized = NormalizeAudioProfileIndex(index);
     m_applyAudioProfileCb(normalized, m_applyAudioProfileUserData);
+}
+
+void QtVideoManager::setOverlayTextCallback(SetOverlayTextCallback cb, void* userData)
+{
+    m_setOverlayTextCb = cb;
+    m_setOverlayTextUserData = userData;
+}
+
+void QtVideoManager::applyOverlayText(const QString& text, bool enabled)
+{
+    if (!m_setOverlayTextCb) {
+        return;
+    }
+    m_setOverlayTextCb(text, enabled, m_setOverlayTextUserData);
 }
 
 // ==================== End of Phase 1 Audio Implementation ====================

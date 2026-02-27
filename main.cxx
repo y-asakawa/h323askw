@@ -71,6 +71,13 @@
 #ifdef __APPLE__
 #include <CoreAudio/CoreAudio.h>
 #endif
+#ifdef USE_QT6
+#include <QImage>
+#include <QPainter>
+#include <QFont>
+#include <QTextOption>
+#include <QString>
+#endif
 #ifndef _WIN32
 #include <signal.h>
 #include <sys/wait.h>
@@ -107,6 +114,7 @@ void UpdateSpectrumHistory(std::vector<int16_t>& history, const int16_t* data, s
   std::rotate(history.begin(), history.begin() + count, history.end());
   std::copy(data, data + count, history.end() - count);
 }
+
 }  // namespace
 
 #if defined(__APPLE__)
@@ -2384,6 +2392,9 @@ static MyH323EndPoint* g_h323Endpoint = nullptr;
 static MyH323Connection* g_currentConnection = nullptr;
 // 接続確立前に物理ボタンが押された場合の保留ミュート状態 (-1=未設定)
 static std::atomic<int> g_pendingHidMuteState{-1};
+static std::mutex g_pendingOverlayTextMutex;
+static std::string g_pendingOverlayTextUtf8;
+static std::atomic<bool> g_pendingOverlayEnabled{false};
 
 // Phase 1: グローバルエンドポイントへのアクセサ（Qt UIから使用）
 MyH323EndPoint* GetGlobalH323Endpoint()
@@ -2603,6 +2614,24 @@ static void Qt6ToggleCameraCallback(void* userData)
         PTRACE(1, "Qt6Callback\tCamera toggled: " << (isMuted ? "OFF" : "ON"));
     } else {
         PTRACE(1, "Qt6Callback\tCamera toggle requested but no active connection");
+    }
+}
+
+static void Qt6SetOverlayTextCallback(const QString& text, bool enabled, void* userData)
+{
+    (void)userData;
+
+    const std::string textUtf8 = text.toUtf8().constData();
+    {
+        std::lock_guard<std::mutex> lock(g_pendingOverlayTextMutex);
+        g_pendingOverlayTextUtf8 = textUtf8;
+    }
+
+    const bool effectiveEnabled = enabled && !textUtf8.empty();
+    g_pendingOverlayEnabled.store(effectiveEnabled, std::memory_order_relaxed);
+
+    if (g_currentConnection) {
+        g_currentConnection->SetLocalVideoOverlayText(textUtf8, effectiveEnabled);
     }
 }
 
@@ -3925,6 +3954,7 @@ void H323ASKW::Main()
         qt6Manager.setToggleCameraCallback(Qt6ToggleCameraCallback, nullptr);
         qt6Manager.setGetDeviceListCallback(Qt6GetDeviceListCallback, h323);
         qt6Manager.setApplyDeviceSelectionCallback(Qt6ApplyDeviceSelectionCallback, h323);
+        qt6Manager.setOverlayTextCallback(Qt6SetOverlayTextCallback, nullptr);
         
         // Phase 1: Multi-Device Audio Callback
         qt6Manager.setApplyAudioDeviceSelectionCallback(Qt6ApplyAudioDeviceSelectionCallback, h323);
@@ -7088,6 +7118,10 @@ PBoolean MyVideoChannel::Read(void * buf, PINDEX len)
                 if (++blackFrameCount % 30 == 1) {
                     PTRACE(1, "H323ASKW\t📹🔇 Sending BLACK frame to remote (camera muted): " << width << "x" << height);
                 }
+            }
+
+            if (m_connection && actualBytesRead >= expectedYUV420Size && width > 0 && height > 0) {
+                m_connection->ApplyLocalVideoOverlay((BYTE*)buf, width, height);
             }
             
             // *** VIDEO TX READY FLAG: Mark that actual frames are being captured ***
@@ -11621,6 +11655,16 @@ void MyH323Connection::OnEstablished()
                    << (desiredMuted ? "MUTED" : "UNMUTED"));
             ToggleMicMute();
         }
+    }
+
+    {
+        std::string pendingText;
+        {
+            std::lock_guard<std::mutex> lock(g_pendingOverlayTextMutex);
+            pendingText = g_pendingOverlayTextUtf8;
+        }
+        const bool overlayEnabled = g_pendingOverlayEnabled.load(std::memory_order_relaxed) && !pendingText.empty();
+        SetLocalVideoOverlayText(pendingText, overlayEnabled);
     }
 
     PArgList & args = PProcess::Current().GetArguments();
@@ -19047,6 +19091,205 @@ void MyH323Connection::ToggleCameraMute()
 #ifdef USE_QT6
     // Qt6 UI にカメラ状態を反映
     QtVideoManager::instance().updateCameraState(newMuted);
+#endif
+}
+
+void MyH323Connection::SetLocalVideoOverlayText(const std::string& textUtf8, bool enabled)
+{
+    const bool effectiveEnabled = enabled && !textUtf8.empty();
+
+    std::lock_guard<std::mutex> lock(m_overlayTextMutex);
+    m_overlayTextUtf8 = textUtf8;
+    m_overlayEnabled.store(effectiveEnabled, std::memory_order_release);
+    m_overlayRevision.fetch_add(1, std::memory_order_acq_rel);
+    m_overlayCacheRevision = 0;
+
+    if (!effectiveEnabled) {
+        m_overlayAlphaCache.clear();
+        m_overlayLumaCache.clear();
+        m_overlayCacheWidth = 0;
+        m_overlayCacheHeight = 0;
+        m_overlayCacheX = 0;
+        m_overlayCacheY = 0;
+        m_overlayCacheW = 0;
+        m_overlayCacheH = 0;
+    }
+
+    PTRACE(2, "H323ASKW\tOverlay text "
+           << (effectiveEnabled ? "enabled" : "disabled")
+           << " length=" << textUtf8.size());
+}
+
+bool MyH323Connection::ApplyLocalVideoOverlay(BYTE* yuvData, unsigned width, unsigned height)
+{
+    if (yuvData == NULL || width == 0 || height == 0) {
+        return false;
+    }
+
+    if (!m_overlayEnabled.load(std::memory_order_acquire)) {
+        return false;
+    }
+
+    const uint64_t revision = m_overlayRevision.load(std::memory_order_acquire);
+    std::lock_guard<std::mutex> lock(m_overlayTextMutex);
+
+    if (!m_overlayEnabled.load(std::memory_order_relaxed) || m_overlayTextUtf8.empty()) {
+        return false;
+    }
+
+#ifdef USE_QT6
+    const bool needsRebuild =
+        m_overlayCacheRevision != revision ||
+        m_overlayCacheWidth != width ||
+        m_overlayCacheHeight != height ||
+        m_overlayAlphaCache.size() != static_cast<size_t>(width) * height ||
+        m_overlayLumaCache.size() != static_cast<size_t>(width) * height;
+
+    if (needsRebuild) {
+        const size_t pixelCount = static_cast<size_t>(width) * height;
+        m_overlayAlphaCache.assign(pixelCount, 0);
+        m_overlayLumaCache.assign(pixelCount, 0);
+
+        QImage overlay(static_cast<int>(width), static_cast<int>(height), QImage::Format_ARGB32_Premultiplied);
+        overlay.fill(Qt::transparent);
+
+        QPainter painter(&overlay);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setRenderHint(QPainter::TextAntialiasing, true);
+
+        const int marginX = std::max(16, static_cast<int>(width / 20));
+        const int marginBottom = std::max(10, static_cast<int>(height / 30));
+        const int boxHeight = std::max(72, static_cast<int>(height / 4));
+        const int boxWidth = std::max(80, static_cast<int>(width) - marginX * 2);
+        const int boxY = std::max(0, static_cast<int>(height) - boxHeight - marginBottom);
+        QRect boxRect(marginX, boxY, boxWidth, boxHeight);
+
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0, 0, 0, 160));
+        painter.drawRoundedRect(boxRect, 16, 16);
+
+        QFont font("Hiragino Sans");
+        font.setBold(true);
+        font.setPixelSize(std::max(18, std::min(48, static_cast<int>(height / 20))));
+        painter.setFont(font);
+        painter.setPen(QColor(255, 255, 255, 235));
+
+        const QRect textRect = boxRect.adjusted(18, 10, -18, -10);
+        QTextOption option;
+        option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+        option.setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        painter.drawText(textRect, QString::fromUtf8(m_overlayTextUtf8.c_str()), option);
+        painter.end();
+
+        m_overlayCacheX = boxRect.left();
+        m_overlayCacheY = boxRect.top();
+        m_overlayCacheW = boxRect.width();
+        m_overlayCacheH = boxRect.height();
+
+        const int x0 = std::max(0, m_overlayCacheX);
+        const int y0 = std::max(0, m_overlayCacheY);
+        const int x1 = std::min(static_cast<int>(width), x0 + m_overlayCacheW);
+        const int y1 = std::min(static_cast<int>(height), y0 + m_overlayCacheH);
+
+        for (int y = y0; y < y1; ++y) {
+            const QRgb* src = reinterpret_cast<const QRgb*>(overlay.constScanLine(y));
+            const size_t rowOffset = static_cast<size_t>(y) * width;
+            for (int x = x0; x < x1; ++x) {
+                const QRgb px = src[x];
+                const uint8_t a = static_cast<uint8_t>(qAlpha(px));
+                if (a == 0) {
+                    continue;
+                }
+
+                const uint8_t r = static_cast<uint8_t>(qRed(px));
+                const uint8_t g = static_cast<uint8_t>(qGreen(px));
+                const uint8_t b = static_cast<uint8_t>(qBlue(px));
+                const int luma = (77 * r + 150 * g + 29 * b) >> 8;
+
+                const size_t idx = rowOffset + static_cast<size_t>(x);
+                m_overlayAlphaCache[idx] = a;
+                m_overlayLumaCache[idx] = static_cast<uint8_t>(qBound(0, luma, 255));
+            }
+        }
+
+        m_overlayCacheWidth = width;
+        m_overlayCacheHeight = height;
+        m_overlayCacheRevision = revision;
+    }
+
+    if (m_overlayCacheW <= 0 || m_overlayCacheH <= 0) {
+        return false;
+    }
+
+    BYTE* yPlane = yuvData;
+    BYTE* uPlane = yuvData + (width * height);
+    BYTE* vPlane = uPlane + (width * height / 4);
+
+    const int x0 = std::max(0, m_overlayCacheX);
+    const int y0 = std::max(0, m_overlayCacheY);
+    const int x1 = std::min(static_cast<int>(width), x0 + m_overlayCacheW);
+    const int y1 = std::min(static_cast<int>(height), y0 + m_overlayCacheH);
+
+    for (int y = y0; y < y1; ++y) {
+        const size_t rowOffset = static_cast<size_t>(y) * width;
+        for (int x = x0; x < x1; ++x) {
+            const size_t idx = rowOffset + static_cast<size_t>(x);
+            const uint8_t a = m_overlayAlphaCache[idx];
+            if (a == 0) {
+                continue;
+            }
+
+            const int srcY = static_cast<int>(yPlane[idx]);
+            const int dstY = static_cast<int>(m_overlayLumaCache[idx]);
+            yPlane[idx] = static_cast<BYTE>(((255 - a) * srcY + a * dstY + 127) / 255);
+        }
+    }
+
+    const int uvWidth = static_cast<int>(width / 2);
+    const int uvX0 = x0 / 2;
+    const int uvY0 = y0 / 2;
+    const int uvX1 = (x1 + 1) / 2;
+    const int uvY1 = (y1 + 1) / 2;
+
+    for (int uy = uvY0; uy < uvY1; ++uy) {
+        for (int ux = uvX0; ux < uvX1; ++ux) {
+            const int baseX = ux * 2;
+            const int baseY = uy * 2;
+
+            uint8_t a = 0;
+            for (int dy = 0; dy < 2; ++dy) {
+                const int py = baseY + dy;
+                if (py < y0 || py >= y1) {
+                    continue;
+                }
+                for (int dx = 0; dx < 2; ++dx) {
+                    const int px = baseX + dx;
+                    if (px < x0 || px >= x1) {
+                        continue;
+                    }
+                    const size_t idx = static_cast<size_t>(py) * width + static_cast<size_t>(px);
+                    a = std::max<uint8_t>(a, m_overlayAlphaCache[idx]);
+                }
+            }
+
+            if (a == 0) {
+                continue;
+            }
+
+            const size_t uvIdx = static_cast<size_t>(uy) * uvWidth + static_cast<size_t>(ux);
+            const int srcU = static_cast<int>(uPlane[uvIdx]);
+            const int srcV = static_cast<int>(vPlane[uvIdx]);
+            uPlane[uvIdx] = static_cast<BYTE>(((255 - a) * srcU + a * 128 + 127) / 255);
+            vPlane[uvIdx] = static_cast<BYTE>(((255 - a) * srcV + a * 128 + 127) / 255);
+        }
+    }
+
+    return true;
+#else
+    (void)width;
+    (void)height;
+    (void)yuvData;
+    return false;
 #endif
 }
 

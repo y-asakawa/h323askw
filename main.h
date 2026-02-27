@@ -33,6 +33,7 @@
 #include <vector>
 #include <memory>
 #include <atomic>
+#include <mutex>
 #include <chrono>
 #include <deque>
 #include <set>
@@ -1628,6 +1629,19 @@ public:
      * false = カメラ有効 (通常映像を送信)
      */
     std::atomic<bool> m_localCameraMuted{false};
+    std::mutex m_overlayTextMutex;
+    std::string m_overlayTextUtf8;
+    std::atomic<bool> m_overlayEnabled{false};
+    std::atomic<uint64_t> m_overlayRevision{0};
+    std::vector<uint8_t> m_overlayAlphaCache;
+    std::vector<uint8_t> m_overlayLumaCache;
+    unsigned m_overlayCacheWidth = 0;
+    unsigned m_overlayCacheHeight = 0;
+    uint64_t m_overlayCacheRevision = 0;
+    int m_overlayCacheX = 0;
+    int m_overlayCacheY = 0;
+    int m_overlayCacheW = 0;
+    int m_overlayCacheH = 0;
 
 #if defined(USE_SPEEXDSP)
     // Shared SpeexDSP processor used by mic/speaker for AEC/NS/AGC
@@ -1684,6 +1698,8 @@ public:
     bool IsLocalMicMuted() const { return m_localMicMuted.load(); }
     bool IsRemoteMicMuted() const { return m_remoteMicMuted.load(); }
     bool IsLocalCameraMuted() const { return m_localCameraMuted.load(); }
+    void SetLocalVideoOverlayText(const std::string& textUtf8, bool enabled);
+    bool ApplyLocalVideoOverlay(BYTE* yuvData, unsigned width, unsigned height);
     
     // Recording controls
     bool StartRecording(const PString& filename, const PString& mode = "remote");
