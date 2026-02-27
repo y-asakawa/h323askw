@@ -2955,6 +2955,11 @@ void QtVideoManager::enqueueContentFrame(const unsigned char* yuvData, unsigned 
     if (!yuvData || width == 0 || height == 0) {
         return;
     }
+
+    MyH323Connection* conn = getH323Connection();
+    if (conn && conn->IsRecording()) {
+        conn->RecordContentFrame(yuvData, width, height, false);
+    }
     
     // 最新サイズを記録し、ボタンを有効化
     m_lastContentWidth = static_cast<int>(width);
@@ -3268,6 +3273,14 @@ void QtVideoManager::captureContentFrame()
     // ローカルプレビューウィンドウを更新
     QByteArray frameCopy = m_lastCapturedFrame;  // mutexの外でコピー
     locker.unlock();
+    MyH323Connection* conn = getH323Connection();
+    if (conn && conn->IsRecording()) {
+        conn->RecordContentFrame(
+            reinterpret_cast<const unsigned char*>(frameCopy.constData()),
+            static_cast<unsigned>(w),
+            static_cast<unsigned>(h),
+            true);
+    }
     updateLocalContentPreview(frameCopy, w, h);
 }
 

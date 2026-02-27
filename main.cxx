@@ -614,6 +614,11 @@ public:
     m_loggedMixedAudioPolicy = false;
     m_lastLocalVideo = CachedVideoFrame();
     m_lastRemoteVideo = CachedVideoFrame();
+    m_lastLocalContentVideo = CachedVideoFrame();
+    m_lastRemoteContentVideo = CachedVideoFrame();
+    m_lastLocalContentFrameTick = std::chrono::steady_clock::time_point();
+    m_lastRemoteContentFrameTick = std::chrono::steady_clock::time_point();
+    m_lastMixedLayout = LayoutUnknown;
     m_mixedFrameBuffer.clear();
 
     if (m_mode == Mixed) {
@@ -863,6 +868,33 @@ public:
     m_audioSamples += samples;
   }
 
+  void WriteContentFrame(const BYTE* yuvData, unsigned width, unsigned height, bool isLocalContent)
+  {
+    if (yuvData == NULL || width == 0 || height == 0) {
+      return;
+    }
+
+    PWaitAndSignal lock(m_mutex);
+    if (!m_isRecording.load(std::memory_order_acquire) || m_videoFp == NULL || m_mode != Mixed) {
+      return;
+    }
+
+    const size_t inputBytes = static_cast<size_t>(width) * height * 3 / 2;
+    CachedVideoFrame& target = isLocalContent ? m_lastLocalContentVideo : m_lastRemoteContentVideo;
+    target.width = width;
+    target.height = height;
+    target.data.resize(inputBytes);
+    std::memcpy(target.data.data(), yuvData, inputBytes);
+    target.valid = true;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (isLocalContent) {
+      m_lastLocalContentFrameTick = now;
+    } else {
+      m_lastRemoteContentFrameTick = now;
+    }
+  }
+
 private:
   struct CachedVideoFrame {
     std::vector<BYTE> data;
@@ -871,8 +903,15 @@ private:
     bool valid = false;
   };
 
-  static constexpr unsigned kMixedOutputWidth = 1280;
+  static constexpr unsigned kMixedOutputWidth = 1920;
   static constexpr unsigned kMixedOutputHeight = 720;
+  static constexpr uint64_t kContentFrameTimeoutMs = 1500;
+
+  enum MixedLayout {
+    LayoutUnknown = 0,
+    LayoutTwoUp,
+    LayoutContentOnly
+  };
 
   static std::string ShellQuote(const std::string& text)
   {
@@ -1097,20 +1136,90 @@ private:
     }
 
     FillBlackFrame(m_mixedFrameBuffer.data(), m_videoWidth, m_videoHeight);
+    const bool hasRemoteContent = HasFreshContentFrameLocked(m_lastRemoteContentVideo, m_lastRemoteContentFrameTick);
+    if (hasRemoteContent) {
+      LogMixedLayoutSwitch(LayoutContentOnly);
+      CopyIntoCell(m_lastRemoteContentVideo.data.data(),
+                   m_lastRemoteContentVideo.width,
+                   m_lastRemoteContentVideo.height,
+                   m_mixedFrameBuffer.data(),
+                   m_videoWidth,
+                   m_videoHeight,
+                   0,
+                   0,
+                   m_videoWidth,
+                   m_videoHeight);
+      return;
+    }
 
-    const unsigned cellW = m_videoWidth / 2;
+    const bool hasLocalContent = HasFreshContentFrameLocked(m_lastLocalContentVideo, m_lastLocalContentFrameTick);
+    if (hasLocalContent) {
+      LogMixedLayoutSwitch(LayoutContentOnly);
+      CopyIntoCell(m_lastLocalContentVideo.data.data(),
+                   m_lastLocalContentVideo.width,
+                   m_lastLocalContentVideo.height,
+                   m_mixedFrameBuffer.data(),
+                   m_videoWidth,
+                   m_videoHeight,
+                   0,
+                   0,
+                   m_videoWidth,
+                   m_videoHeight);
+      return;
+    }
+
+    LogMixedLayoutSwitch(LayoutTwoUp);
+    const unsigned cellCount = 2u;
     const unsigned cellH = m_videoHeight;
 
-    if (m_lastLocalVideo.valid) {
-      CopyIntoCell(m_lastLocalVideo.data.data(), m_lastLocalVideo.width, m_lastLocalVideo.height,
+    auto placeFrame = [&](const CachedVideoFrame& src, unsigned cellIndex) {
+      if (!src.valid || cellIndex >= cellCount) {
+        return;
+      }
+      const unsigned x0 = (m_videoWidth * cellIndex) / cellCount;
+      const unsigned x1 = (m_videoWidth * (cellIndex + 1)) / cellCount;
+      if (x1 <= x0) {
+        return;
+      }
+      CopyIntoCell(src.data.data(), src.width, src.height,
                    m_mixedFrameBuffer.data(), m_videoWidth, m_videoHeight,
-                   0, 0, cellW, cellH);
+                   x0, 0, x1 - x0, cellH);
+    };
+
+    placeFrame(m_lastLocalVideo, 0);
+    placeFrame(m_lastRemoteVideo, 1);
+  }
+
+  bool HasFreshContentFrameLocked(CachedVideoFrame& frame, std::chrono::steady_clock::time_point& lastFrameTick)
+  {
+    if (!frame.valid) {
+      return false;
     }
-    if (m_lastRemoteVideo.valid) {
-      CopyIntoCell(m_lastRemoteVideo.data.data(), m_lastRemoteVideo.width, m_lastRemoteVideo.height,
-                   m_mixedFrameBuffer.data(), m_videoWidth, m_videoHeight,
-                   cellW, 0, cellW, cellH);
+    if (lastFrameTick.time_since_epoch().count() == 0) {
+      frame.valid = false;
+      return false;
     }
+    const auto now = std::chrono::steady_clock::now();
+    const uint64_t elapsedMs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - lastFrameTick).count());
+    if (elapsedMs > kContentFrameTimeoutMs) {
+      frame.valid = false;
+      return false;
+    }
+    return true;
+  }
+
+  void LogMixedLayoutSwitch(MixedLayout layout)
+  {
+    if (layout == m_lastMixedLayout) {
+      return;
+    }
+    m_lastMixedLayout = layout;
+    const char* layoutText = "LOCAL|REMOTE (2-up)";
+    if (layout == LayoutContentOnly) {
+      layoutText = "CONTENT only (1-up)";
+    }
+    PTRACE(1, "H323ASKW\tRECORDING: mixed layout switched to " << layoutText);
   }
 
   const char* ModeToString(Mode mode) const
@@ -1147,6 +1256,11 @@ private:
   bool m_loggedMixedAudioPolicy = false;
   CachedVideoFrame m_lastLocalVideo;
   CachedVideoFrame m_lastRemoteVideo;
+  CachedVideoFrame m_lastLocalContentVideo;
+  CachedVideoFrame m_lastRemoteContentVideo;
+  std::chrono::steady_clock::time_point m_lastLocalContentFrameTick;
+  std::chrono::steady_clock::time_point m_lastRemoteContentFrameTick;
+  MixedLayout m_lastMixedLayout = LayoutUnknown;
   std::vector<BYTE> m_mixedFrameBuffer;
 };
 
@@ -6280,6 +6394,13 @@ void MyH323Connection::RecordVideoFrame(const BYTE* yuvData, unsigned width, uns
 {
   if (m_recordingManager.get() != NULL) {
     m_recordingManager->WriteVideoFrame(yuvData, width, height, isLocal);
+  }
+}
+
+void MyH323Connection::RecordContentFrame(const BYTE* yuvData, unsigned width, unsigned height, bool isLocalContent)
+{
+  if (m_recordingManager.get() != NULL) {
+    m_recordingManager->WriteContentFrame(yuvData, width, height, isLocalContent);
   }
 }
 

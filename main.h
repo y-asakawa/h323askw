@@ -1723,6 +1723,7 @@ public:
     void StopRecording();
     bool IsRecording() const;
     void RecordVideoFrame(const BYTE* yuvData, unsigned width, unsigned height, bool isLocal);
+    void RecordContentFrame(const BYTE* yuvData, unsigned width, unsigned height, bool isLocalContent);
     void RecordAudioFrame(const int16_t* pcmData, size_t samples, unsigned sampleRate, bool isLocal);
     
     /**
