@@ -36,6 +36,7 @@
 #pragma clang diagnostic ignored "-Winconsistent-missing-override"
 #endif
 #include "main.h"
+#include "vision_person_mask.h"
 #ifdef __clang__
 #pragma clang diagnostic pop
 #endif
@@ -2395,6 +2396,8 @@ static std::atomic<int> g_pendingHidMuteState{-1};
 static std::mutex g_pendingOverlayTextMutex;
 static std::string g_pendingOverlayTextUtf8;
 static std::atomic<bool> g_pendingOverlayEnabled{false};
+static std::atomic<bool> g_pendingBackgroundBlurEnabled{false};
+static std::atomic<int> g_pendingBackgroundBlurStrength{1};
 
 // Phase 1: グローバルエンドポイントへのアクセサ（Qt UIから使用）
 MyH323EndPoint* GetGlobalH323Endpoint()
@@ -2632,6 +2635,25 @@ static void Qt6SetOverlayTextCallback(const QString& text, bool enabled, void* u
 
     if (g_currentConnection) {
         g_currentConnection->SetLocalVideoOverlayText(textUtf8, effectiveEnabled);
+    }
+}
+
+static void Qt6SetBackgroundBlurCallback(bool enabled, int strength, void* userData)
+{
+    (void)userData;
+
+    int normalizedStrength = strength;
+    if (normalizedStrength < 0) {
+        normalizedStrength = 0;
+    } else if (normalizedStrength > 2) {
+        normalizedStrength = 2;
+    }
+
+    g_pendingBackgroundBlurEnabled.store(enabled, std::memory_order_relaxed);
+    g_pendingBackgroundBlurStrength.store(normalizedStrength, std::memory_order_relaxed);
+
+    if (g_currentConnection) {
+        g_currentConnection->SetLocalVideoBackgroundBlur(enabled, normalizedStrength);
     }
 }
 
@@ -3959,6 +3981,7 @@ void H323ASKW::Main()
         // Phase 1: Multi-Device Audio Callback
         qt6Manager.setApplyAudioDeviceSelectionCallback(Qt6ApplyAudioDeviceSelectionCallback, h323);
         qt6Manager.setApplyAudioProfileCallback(Qt6ApplyAudioProfileCallback, h323);
+        qt6Manager.setBackgroundBlurCallback(Qt6SetBackgroundBlurCallback, nullptr);
         PTRACE(1, "H323ASKW\t🎵 Multi-device audio callback registered");
         
         qt6Manager.refreshDeviceLists();
@@ -7121,6 +7144,7 @@ PBoolean MyVideoChannel::Read(void * buf, PINDEX len)
             }
 
             if (m_connection && actualBytesRead >= expectedYUV420Size && width > 0 && height > 0) {
+                m_connection->ApplyLocalVideoBackgroundBlur((BYTE*)buf, width, height);
                 m_connection->ApplyLocalVideoOverlay((BYTE*)buf, width, height);
             }
             
@@ -11665,6 +11689,12 @@ void MyH323Connection::OnEstablished()
         }
         const bool overlayEnabled = g_pendingOverlayEnabled.load(std::memory_order_relaxed) && !pendingText.empty();
         SetLocalVideoOverlayText(pendingText, overlayEnabled);
+    }
+
+    {
+        const bool blurEnabled = g_pendingBackgroundBlurEnabled.load(std::memory_order_relaxed);
+        const int blurStrength = g_pendingBackgroundBlurStrength.load(std::memory_order_relaxed);
+        SetLocalVideoBackgroundBlur(blurEnabled, blurStrength);
     }
 
     PArgList & args = PProcess::Current().GetArguments();
@@ -19092,6 +19122,263 @@ void MyH323Connection::ToggleCameraMute()
     // Qt6 UI にカメラ状態を反映
     QtVideoManager::instance().updateCameraState(newMuted);
 #endif
+}
+
+void MyH323Connection::SetLocalVideoBackgroundBlur(bool enabled, int strength)
+{
+    int normalizedStrength = strength;
+    if (normalizedStrength < 0) {
+        normalizedStrength = 0;
+    } else if (normalizedStrength > 2) {
+        normalizedStrength = 2;
+    }
+
+    m_backgroundBlurEnabled.store(enabled, std::memory_order_release);
+    m_backgroundBlurStrength.store(normalizedStrength, std::memory_order_release);
+    m_backgroundBlurRevision.fetch_add(1, std::memory_order_acq_rel);
+
+    std::lock_guard<std::mutex> lock(m_backgroundBlurMutex);
+    m_backgroundBlurCacheRevision = 0;
+
+    if (!enabled) {
+        m_backgroundBlurMaskY.clear();
+        m_backgroundBlurMaskUV.clear();
+        m_backgroundBlurTempY.clear();
+        m_backgroundBlurWorkY.clear();
+        m_backgroundBlurCacheWidth = 0;
+        m_backgroundBlurCacheHeight = 0;
+    }
+
+    PTRACE(2, "H323ASKW\tBackground blur "
+           << (enabled ? "enabled" : "disabled")
+           << " strength=" << normalizedStrength);
+}
+
+bool MyH323Connection::ApplyLocalVideoBackgroundBlur(BYTE* yuvData, unsigned width, unsigned height)
+{
+    if (yuvData == NULL || width == 0 || height == 0) {
+        return false;
+    }
+
+    if (!m_backgroundBlurEnabled.load(std::memory_order_acquire)) {
+        return false;
+    }
+
+    int strength = m_backgroundBlurStrength.load(std::memory_order_relaxed);
+    if (strength < 0) {
+        strength = 0;
+    } else if (strength > 2) {
+        strength = 2;
+    }
+
+    static const int kBlurRadiusByStrength[3] = { 10, 16, 22 };
+    const int radius = kBlurRadiusByStrength[strength];
+    if (radius <= 0) {
+        return false;
+    }
+
+    const int w = static_cast<int>(width);
+    const int h = static_cast<int>(height);
+    const int uvWidth = w / 2;
+    const int uvHeight = h / 2;
+    const size_t yPixelCount = static_cast<size_t>(width) * height;
+    const size_t uvPixelCount = static_cast<size_t>(uvWidth) * uvHeight;
+    BYTE* yPlane = yuvData;
+    BYTE* uPlane = yuvData + yPixelCount;
+    BYTE* vPlane = uPlane + uvPixelCount;
+    const uint64_t revision = m_backgroundBlurRevision.load(std::memory_order_acquire);
+
+    std::lock_guard<std::mutex> lock(m_backgroundBlurMutex);
+
+    if (!m_backgroundBlurEnabled.load(std::memory_order_relaxed)) {
+        return false;
+    }
+
+    if (m_backgroundBlurTempY.size() != yPixelCount) {
+        m_backgroundBlurTempY.assign(yPixelCount, 0);
+    }
+    if (m_backgroundBlurWorkY.size() != yPixelCount) {
+        m_backgroundBlurWorkY.assign(yPixelCount, 0);
+    }
+
+    if (m_backgroundBlurMaskY.size() != yPixelCount) {
+        m_backgroundBlurMaskY.assign(yPixelCount, 0);
+    }
+    if (m_backgroundBlurMaskUV.size() != uvPixelCount) {
+        m_backgroundBlurMaskUV.assign(uvPixelCount, 0);
+    }
+
+    if (!m_visionPersonMaskChecked) {
+        m_visionPersonMask.reset(new VisionPersonMaskGenerator());
+        m_visionPersonMaskAvailable = (m_visionPersonMask && m_visionPersonMask->IsAvailable());
+        m_visionPersonMaskChecked = true;
+        PTRACE(2, "H323ASKW\tVision person mask "
+               << (m_visionPersonMaskAvailable ? "available" : "unavailable")
+               << " for background blur");
+    }
+
+    bool usingVisionMask = false;
+    if (m_visionPersonMaskAvailable && m_visionPersonMask) {
+        usingVisionMask = m_visionPersonMask->GenerateBackgroundMask(
+            yPlane, uPlane, vPlane, width, height, strength,
+            m_backgroundBlurMaskY.data(), m_backgroundBlurMaskY.size());
+    }
+
+    const bool rebuildFallbackMask =
+        m_backgroundBlurCacheRevision != revision ||
+        m_backgroundBlurCacheWidth != width ||
+        m_backgroundBlurCacheHeight != height;
+
+    if (!usingVisionMask && rebuildFallbackMask) {
+        static const float kCenterKeepX[3] = { 0.18f, 0.14f, 0.10f };
+        static const float kCenterKeepY[3] = { 0.26f, 0.20f, 0.14f };
+        static const float kSoftEdge[3]    = { 0.20f, 0.16f, 0.12f };
+        static const uint8_t kBaseAlpha[3] = { 128, 186, 228 };
+
+        const float cx = (static_cast<float>(w) - 1.0f) * 0.5f;
+        const float cy = (static_cast<float>(h) - 1.0f) * 0.5f;
+        const float rx = std::max(1.0f, static_cast<float>(w) * kCenterKeepX[strength]);
+        const float ry = std::max(1.0f, static_cast<float>(h) * kCenterKeepY[strength]);
+        const float invRx = 1.0f / rx;
+        const float invRy = 1.0f / ry;
+        const float soft = kSoftEdge[strength];
+
+        for (int y = 0; y < h; ++y) {
+            const float dy = (static_cast<float>(y) - cy) * invRy;
+            const size_t rowOffset = static_cast<size_t>(y) * width;
+
+            for (int x = 0; x < w; ++x) {
+                const float dx = (static_cast<float>(x) - cx) * invRx;
+                const float d = dx * dx + dy * dy;
+                uint8_t alpha = kBaseAlpha[strength];
+                if (d > 1.0f) {
+                    if (d >= 1.0f + soft) {
+                        alpha = 255;
+                    } else {
+                        const float t = (d - 1.0f) / soft;
+                        const float boosted = static_cast<float>(kBaseAlpha[strength]) +
+                                              t * (255.0f - static_cast<float>(kBaseAlpha[strength]));
+                        alpha = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, boosted)));
+                    }
+                }
+                m_backgroundBlurMaskY[rowOffset + static_cast<size_t>(x)] = alpha;
+            }
+        }
+
+        m_backgroundBlurCacheWidth = width;
+        m_backgroundBlurCacheHeight = height;
+        m_backgroundBlurCacheRevision = revision;
+    }
+
+    if (usingVisionMask || rebuildFallbackMask) {
+        for (int uy = 0; uy < uvHeight; ++uy) {
+            for (int ux = 0; ux < uvWidth; ++ux) {
+                const int px = ux * 2;
+                const int py = uy * 2;
+                const int px1 = std::min(w - 1, px + 1);
+                const int py1 = std::min(h - 1, py + 1);
+
+                const size_t idx0 = static_cast<size_t>(py) * width + static_cast<size_t>(px);
+                const size_t idx1 = static_cast<size_t>(py) * width + static_cast<size_t>(px1);
+                const size_t idx2 = static_cast<size_t>(py1) * width + static_cast<size_t>(px);
+                const size_t idx3 = static_cast<size_t>(py1) * width + static_cast<size_t>(px1);
+
+                const unsigned sum =
+                    static_cast<unsigned>(m_backgroundBlurMaskY[idx0]) +
+                    static_cast<unsigned>(m_backgroundBlurMaskY[idx1]) +
+                    static_cast<unsigned>(m_backgroundBlurMaskY[idx2]) +
+                    static_cast<unsigned>(m_backgroundBlurMaskY[idx3]);
+
+                m_backgroundBlurMaskUV[static_cast<size_t>(uy) * uvWidth + static_cast<size_t>(ux)] =
+                    static_cast<uint8_t>(sum / 4);
+            }
+        }
+    }
+
+    const int window = radius * 2 + 1;
+
+    for (int y = 0; y < h; ++y) {
+        const size_t rowOffset = static_cast<size_t>(y) * width;
+        int sum = 0;
+        for (int k = -radius; k <= radius; ++k) {
+            int x = k;
+            if (x < 0) {
+                x = 0;
+            } else if (x >= w) {
+                x = w - 1;
+            }
+            sum += yPlane[rowOffset + static_cast<size_t>(x)];
+        }
+
+        for (int x = 0; x < w; ++x) {
+            m_backgroundBlurTempY[rowOffset + static_cast<size_t>(x)] = static_cast<uint8_t>(sum / window);
+
+            int addX = x + radius + 1;
+            if (addX >= w) {
+                addX = w - 1;
+            }
+            int subX = x - radius;
+            if (subX < 0) {
+                subX = 0;
+            }
+            sum += yPlane[rowOffset + static_cast<size_t>(addX)];
+            sum -= yPlane[rowOffset + static_cast<size_t>(subX)];
+        }
+    }
+
+    for (int x = 0; x < w; ++x) {
+        int sum = 0;
+        for (int k = -radius; k <= radius; ++k) {
+            int y = k;
+            if (y < 0) {
+                y = 0;
+            } else if (y >= h) {
+                y = h - 1;
+            }
+            sum += m_backgroundBlurTempY[static_cast<size_t>(y) * width + static_cast<size_t>(x)];
+        }
+
+        for (int y = 0; y < h; ++y) {
+            const size_t idx = static_cast<size_t>(y) * width + static_cast<size_t>(x);
+            m_backgroundBlurWorkY[idx] = static_cast<uint8_t>(sum / window);
+
+            int addY = y + radius + 1;
+            if (addY >= h) {
+                addY = h - 1;
+            }
+            int subY = y - radius;
+            if (subY < 0) {
+                subY = 0;
+            }
+            sum += m_backgroundBlurTempY[static_cast<size_t>(addY) * width + static_cast<size_t>(x)];
+            sum -= m_backgroundBlurTempY[static_cast<size_t>(subY) * width + static_cast<size_t>(x)];
+        }
+    }
+
+    for (size_t i = 0; i < yPixelCount; ++i) {
+        const uint8_t a = m_backgroundBlurMaskY[i];
+        if (a == 0) {
+            continue;
+        }
+
+        const int srcY = static_cast<int>(yPlane[i]);
+        const int dstY = static_cast<int>(m_backgroundBlurWorkY[i]);
+        yPlane[i] = static_cast<BYTE>(((255 - a) * srcY + a * dstY + 127) / 255);
+    }
+
+    for (size_t i = 0; i < uvPixelCount; ++i) {
+        const uint8_t a = m_backgroundBlurMaskUV[i];
+        if (a == 0) {
+            continue;
+        }
+
+        const int srcU = static_cast<int>(uPlane[i]);
+        const int srcV = static_cast<int>(vPlane[i]);
+        uPlane[i] = static_cast<BYTE>(((255 - a) * srcU + a * 128 + 127) / 255);
+        vPlane[i] = static_cast<BYTE>(((255 - a) * srcV + a * 128 + 127) / 255);
+    }
+
+    return true;
 }
 
 void MyH323Connection::SetLocalVideoOverlayText(const std::string& textUtf8, bool enabled)

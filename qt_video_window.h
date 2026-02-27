@@ -125,6 +125,7 @@ typedef void (*ApplyDeviceSelectionCallback)(const QString& mic, const QString& 
 typedef void (*ApplyAudioDeviceSelectionCallback)(const AudioDeviceSelection& selection, void* userData);
 typedef void (*ApplyAudioProfileCallback)(int index, void* userData);
 typedef void (*SetOverlayTextCallback)(const QString& text, bool enabled, void* userData);
+typedef void (*SetBackgroundBlurCallback)(bool enabled, int strength, void* userData);
 
 // デバイスタイプ定数
 #define QT_DEVICE_TYPE_MIC 0
@@ -605,6 +606,7 @@ signals:
      * @brief ローカル映像の背景テキスト変更要求シグナル
      */
     void overlayTextChanged(const QString& text, bool enabled);
+    void backgroundBlurChanged(bool enabled, int strength);
 
 public slots:
     /**
@@ -688,6 +690,9 @@ private slots:
     void onOverlayTextClicked();
     void onOverlayTextSendClicked();
     void onOverlayTextClearClicked();
+    void onBackgroundBlurClicked();
+    void onBackgroundBlurApplyClicked();
+    void onBackgroundBlurClearClicked();
     void onAddCameraClicked();
     void onCameraRowRemoveRequested(VideoDeviceRowWidget* widget);
     void onSeparateWindowsClicked();
@@ -795,6 +800,7 @@ private:
     QComboBox* m_speakerCombo;
     QComboBox* m_cameraCombo;
     QPushButton* m_overlayTextButton;
+    QPushButton* m_backgroundBlurButton;
 
     // ステータス
     QLabel* m_statusLabel;
@@ -804,6 +810,11 @@ private:
     QLineEdit* m_overlayTextLineEdit;
     QString m_overlayText;
     bool m_overlayTextEnabled;
+    QDialog* m_backgroundBlurDialog;
+    QCheckBox* m_backgroundBlurEnableCheck;
+    QComboBox* m_backgroundBlurStrengthCombo;
+    bool m_backgroundBlurEnabled;
+    int m_backgroundBlurStrength;
 
     // オーディオスペクトラム
     QtAudioSpectrumWidget* m_localSpectrum;   // ローカル（マイク）
@@ -982,6 +993,8 @@ public:
     void applyAudioProfile(int index);
     void setOverlayTextCallback(SetOverlayTextCallback cb, void* userData);
     void applyOverlayText(const QString& text, bool enabled);
+    void setBackgroundBlurCallback(SetBackgroundBlurCallback cb, void* userData);
+    void applyBackgroundBlur(bool enabled, int strength);
     
     // ==================== End of Phase 1 Audio API ====================
     
@@ -1138,6 +1151,8 @@ private:
     void* m_applyAudioProfileUserData;
     SetOverlayTextCallback m_setOverlayTextCb;
     void* m_setOverlayTextUserData;
+    SetBackgroundBlurCallback m_setBackgroundBlurCb;
+    void* m_setBackgroundBlurUserData;
     // ==================== End of Phase 1 Audio Callback ====================
 };
 

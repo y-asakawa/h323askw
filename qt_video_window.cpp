@@ -1285,11 +1285,17 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_speakerCombo(nullptr)
     , m_cameraCombo(nullptr)
     , m_overlayTextButton(nullptr)
+    , m_backgroundBlurButton(nullptr)
     , m_statusLabel(nullptr)
     , m_overlayTextDialog(nullptr)
     , m_overlayTextLineEdit(nullptr)
     , m_overlayText()
     , m_overlayTextEnabled(false)
+    , m_backgroundBlurDialog(nullptr)
+    , m_backgroundBlurEnableCheck(nullptr)
+    , m_backgroundBlurStrengthCombo(nullptr)
+    , m_backgroundBlurEnabled(false)
+    , m_backgroundBlurStrength(1)
     , m_localSpectrum(nullptr)
     , m_remoteSpectrum(nullptr)
     , m_h323Connection(nullptr)
@@ -1739,6 +1745,9 @@ void QtVideoMainWindow::setupUI()
     m_overlayTextButton = new QPushButton("BG Text", this);
     m_overlayTextButton->setToolTip("Open background text input window");
     deviceLayout->addWidget(m_overlayTextButton);
+    m_backgroundBlurButton = new QPushButton("BG Blur", this);
+    m_backgroundBlurButton->setToolTip("Open background blur settings");
+    deviceLayout->addWidget(m_backgroundBlurButton);
 
     deviceLayout->addStretch();
 
@@ -1806,6 +1815,10 @@ void QtVideoMainWindow::setupConnections()
     if (m_overlayTextButton) {
         connect(m_overlayTextButton, &QPushButton::clicked,
                 this, &QtVideoMainWindow::onOverlayTextClicked);
+    }
+    if (m_backgroundBlurButton) {
+        connect(m_backgroundBlurButton, &QPushButton::clicked,
+                this, &QtVideoMainWindow::onBackgroundBlurClicked);
     }
 
     // フレーム受信（スレッドセーフ）
@@ -2448,6 +2461,93 @@ void QtVideoMainWindow::onOverlayTextClearClicked()
     setConnectionStatus("Background text cleared");
 }
 
+void QtVideoMainWindow::onBackgroundBlurClicked()
+{
+    if (!m_backgroundBlurDialog) {
+        m_backgroundBlurDialog = new QDialog(this);
+        m_backgroundBlurDialog->setWindowFlags(Qt::Window);
+        m_backgroundBlurDialog->setWindowTitle("Background Blur");
+        m_backgroundBlurDialog->setMinimumWidth(360);
+        m_backgroundBlurDialog->resize(420, 150);
+
+        QVBoxLayout* layout = new QVBoxLayout(m_backgroundBlurDialog);
+        layout->setContentsMargins(10, 10, 10, 10);
+        layout->setSpacing(8);
+
+        QLabel* hint = new QLabel("Lightweight blur keeps center area sharper.", m_backgroundBlurDialog);
+        layout->addWidget(hint);
+
+        m_backgroundBlurEnableCheck = new QCheckBox("Enable blur", m_backgroundBlurDialog);
+        m_backgroundBlurEnableCheck->setChecked(m_backgroundBlurEnabled);
+        layout->addWidget(m_backgroundBlurEnableCheck);
+
+        QHBoxLayout* strengthRow = new QHBoxLayout();
+        strengthRow->addWidget(new QLabel("Strength:", m_backgroundBlurDialog));
+        m_backgroundBlurStrengthCombo = new QComboBox(m_backgroundBlurDialog);
+        m_backgroundBlurStrengthCombo->addItem("Low");
+        m_backgroundBlurStrengthCombo->addItem("Medium");
+        m_backgroundBlurStrengthCombo->addItem("High");
+        m_backgroundBlurStrengthCombo->setCurrentIndex(m_backgroundBlurStrength);
+        strengthRow->addWidget(m_backgroundBlurStrengthCombo);
+        strengthRow->addStretch();
+        layout->addLayout(strengthRow);
+
+        QHBoxLayout* buttonRow = new QHBoxLayout();
+        QPushButton* applyButton = new QPushButton("Apply", m_backgroundBlurDialog);
+        QPushButton* clearButton = new QPushButton("Disable", m_backgroundBlurDialog);
+        QPushButton* closeButton = new QPushButton("Close", m_backgroundBlurDialog);
+        buttonRow->addWidget(applyButton);
+        buttonRow->addWidget(clearButton);
+        buttonRow->addStretch();
+        buttonRow->addWidget(closeButton);
+        layout->addLayout(buttonRow);
+
+        connect(applyButton, &QPushButton::clicked, this, &QtVideoMainWindow::onBackgroundBlurApplyClicked);
+        connect(clearButton, &QPushButton::clicked, this, &QtVideoMainWindow::onBackgroundBlurClearClicked);
+        connect(closeButton, &QPushButton::clicked, m_backgroundBlurDialog, &QDialog::hide);
+    } else {
+        if (m_backgroundBlurEnableCheck) {
+            m_backgroundBlurEnableCheck->setChecked(m_backgroundBlurEnabled);
+        }
+        if (m_backgroundBlurStrengthCombo) {
+            m_backgroundBlurStrengthCombo->setCurrentIndex(m_backgroundBlurStrength);
+        }
+    }
+
+    m_backgroundBlurDialog->show();
+    m_backgroundBlurDialog->raise();
+    m_backgroundBlurDialog->activateWindow();
+}
+
+void QtVideoMainWindow::onBackgroundBlurApplyClicked()
+{
+    if (m_backgroundBlurEnableCheck) {
+        m_backgroundBlurEnabled = m_backgroundBlurEnableCheck->isChecked();
+    }
+    if (m_backgroundBlurStrengthCombo) {
+        m_backgroundBlurStrength = m_backgroundBlurStrengthCombo->currentIndex();
+    }
+
+    if (m_backgroundBlurStrength < 0) {
+        m_backgroundBlurStrength = 0;
+    } else if (m_backgroundBlurStrength > 2) {
+        m_backgroundBlurStrength = 2;
+    }
+
+    emit backgroundBlurChanged(m_backgroundBlurEnabled, m_backgroundBlurStrength);
+    setConnectionStatus(m_backgroundBlurEnabled ? "Background blur updated" : "Background blur disabled");
+}
+
+void QtVideoMainWindow::onBackgroundBlurClearClicked()
+{
+    m_backgroundBlurEnabled = false;
+    if (m_backgroundBlurEnableCheck) {
+        m_backgroundBlurEnableCheck->setChecked(false);
+    }
+    emit backgroundBlurChanged(false, m_backgroundBlurStrength);
+    setConnectionStatus("Background blur disabled");
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // QtContentWindow Implementation
 ///////////////////////////////////////////////////////////////////////////////
@@ -2531,6 +2631,8 @@ QtVideoManager::QtVideoManager()
     , m_applyAudioProfileUserData(nullptr)
     , m_setOverlayTextCb(nullptr)
     , m_setOverlayTextUserData(nullptr)
+    , m_setBackgroundBlurCb(nullptr)
+    , m_setBackgroundBlurUserData(nullptr)
 {
 }
 
@@ -3309,6 +3411,11 @@ void QtVideoManager::setupSignalConnections()
         [this](const QString& text, bool enabled) {
             applyOverlayText(text, enabled);
         });
+
+    QObject::connect(m_mainWindow, &QtVideoMainWindow::backgroundBlurChanged,
+        [this](bool enabled, int strength) {
+            applyBackgroundBlur(enabled, strength);
+        });
     
     QT_TRACE(1, "Signal connections established between Qt UI and H.323");
 }
@@ -3468,6 +3575,20 @@ void QtVideoManager::applyOverlayText(const QString& text, bool enabled)
         return;
     }
     m_setOverlayTextCb(text, enabled, m_setOverlayTextUserData);
+}
+
+void QtVideoManager::setBackgroundBlurCallback(SetBackgroundBlurCallback cb, void* userData)
+{
+    m_setBackgroundBlurCb = cb;
+    m_setBackgroundBlurUserData = userData;
+}
+
+void QtVideoManager::applyBackgroundBlur(bool enabled, int strength)
+{
+    if (!m_setBackgroundBlurCb) {
+        return;
+    }
+    m_setBackgroundBlurCb(enabled, strength, m_setBackgroundBlurUserData);
 }
 
 // ==================== End of Phase 1 Audio Implementation ====================

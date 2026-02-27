@@ -93,7 +93,8 @@ USB_HID_IMPL_OBJ := $(OBJDIR)/usb_hid_impl.o
 # Use ENDLDLIBS instead of OBJS to add object file at link time
 # This ensures it's linked but we control when it's compiled
 PERMISSIONS_OBJ := $(OBJDIR)/Permissions.o
-ENDLDLIBS += $(USB_HID_IMPL_OBJ) $(PERMISSIONS_OBJ)
+VISION_MASK_OBJ := $(OBJDIR)/vision_person_mask.o
+ENDLDLIBS += $(USB_HID_IMPL_OBJ) $(PERMISSIONS_OBJ) $(VISION_MASK_OBJ)
 endif
 
 # add cleanup files
@@ -166,7 +167,7 @@ endif
 ifeq ($(OSTYPE),Darwin)
   STDCCFLAGS += -D_REENTRANT
   # Add macOS framework support
-  ENDLDLIBS += -framework CoreFoundation -framework CoreVideo -framework CoreMedia -framework CoreGraphics -framework CoreAudio
+  ENDLDLIBS += -framework CoreFoundation -framework CoreVideo -framework CoreMedia -framework CoreGraphics -framework CoreAudio -framework CoreImage -framework Vision
   # IOKit for USB HID Controller (mute button support)
   ENDLDLIBS += -framework IOKit
   # AVFoundation/Foundation for permission bootstrap (camera/mic + Bonjour trigger)
@@ -460,6 +461,15 @@ $(OBJDIR)/Permissions.o: Permissions.mm Permissions.h
 
 # Ensure main links against permission bootstrap object
 $(OBJDIR)/main.o: $(OBJDIR)/Permissions.o
+
+# Vision person segmentation mask (Phase 2 background blur)
+$(OBJDIR)/vision_person_mask.o: vision_person_mask.mm vision_person_mask.h
+	@mkdir -p $(OBJDIR)
+	@echo "[CC] vision_person_mask.mm (Vision person mask)"
+	$(CXX) $(STDCCFLAGS) $(CXXFLAGS) $(CPPFLAGS) -x objective-c++ -fobjc-arc -c $< -o $@
+
+# Ensure main links against Vision person mask object
+$(OBJDIR)/main.o: $(OBJDIR)/vision_person_mask.o
 endif
 
 video: debug-info

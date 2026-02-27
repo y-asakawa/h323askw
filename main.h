@@ -206,6 +206,7 @@ class Qt6VideoOutputDevice : public PVideoOutputDevice
 
 class SpeexAudioProcessor;  // SpeexDSP-based audio processor (AEC/NS/AGC)
 class H323RecordingManager;
+class VisionPersonMaskGenerator;
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -1642,6 +1643,20 @@ public:
     int m_overlayCacheY = 0;
     int m_overlayCacheW = 0;
     int m_overlayCacheH = 0;
+    std::mutex m_backgroundBlurMutex;
+    std::atomic<bool> m_backgroundBlurEnabled{false};
+    std::atomic<int> m_backgroundBlurStrength{1};
+    std::atomic<uint64_t> m_backgroundBlurRevision{0};
+    std::vector<uint8_t> m_backgroundBlurMaskY;
+    std::vector<uint8_t> m_backgroundBlurMaskUV;
+    std::vector<uint8_t> m_backgroundBlurTempY;
+    std::vector<uint8_t> m_backgroundBlurWorkY;
+    unsigned m_backgroundBlurCacheWidth = 0;
+    unsigned m_backgroundBlurCacheHeight = 0;
+    uint64_t m_backgroundBlurCacheRevision = 0;
+    std::unique_ptr<VisionPersonMaskGenerator> m_visionPersonMask;
+    bool m_visionPersonMaskChecked = false;
+    bool m_visionPersonMaskAvailable = false;
 
 #if defined(USE_SPEEXDSP)
     // Shared SpeexDSP processor used by mic/speaker for AEC/NS/AGC
@@ -1700,6 +1715,8 @@ public:
     bool IsLocalCameraMuted() const { return m_localCameraMuted.load(); }
     void SetLocalVideoOverlayText(const std::string& textUtf8, bool enabled);
     bool ApplyLocalVideoOverlay(BYTE* yuvData, unsigned width, unsigned height);
+    void SetLocalVideoBackgroundBlur(bool enabled, int strength);
+    bool ApplyLocalVideoBackgroundBlur(BYTE* yuvData, unsigned width, unsigned height);
     
     // Recording controls
     bool StartRecording(const PString& filename, const PString& mode = "remote");
