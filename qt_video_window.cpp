@@ -362,6 +362,39 @@ void QtVideoWidget::updateFrameRGB24(const unsigned char* rgbData, unsigned widt
     m_needsRepaint = true;
 }
 
+void QtVideoWidget::clearFrameToBlack(unsigned width, unsigned height)
+{
+    QMutexLocker locker(&m_frameMutex);
+
+    unsigned targetWidth = width;
+    unsigned targetHeight = height;
+    if (targetWidth == 0 || targetHeight == 0) {
+        if (m_frameWidth > 0 && m_frameHeight > 0) {
+            targetWidth = m_frameWidth;
+            targetHeight = m_frameHeight;
+        } else {
+            targetWidth = 640;
+            targetHeight = 480;
+        }
+    }
+
+    if (m_currentFrame.width() != static_cast<int>(targetWidth) ||
+        m_currentFrame.height() != static_cast<int>(targetHeight)) {
+        m_currentFrame = QImage(targetWidth, targetHeight, QImage::Format_RGB888);
+    }
+    m_currentFrame.fill(Qt::black);
+    m_frameWidth = targetWidth;
+    m_frameHeight = targetHeight;
+
+    // 切断時はアイコン表示状態も通常に戻す
+    m_cameraMuted = false;
+    m_muted = false;
+
+    updateTargetRect();
+    m_needsRepaint = true;
+    update();
+}
+
 void QtVideoWidget::convertYUV420PtoRGB(const unsigned char* yuvData, unsigned width, unsigned height)
 {
     // YUV420Pのサイズ: Y = width*height, U = width*height/4, V = width*height/4
@@ -1983,6 +2016,7 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
                 safeThis->m_cameraCheckbox->setChecked(false);
                 if (safeThis->m_contentSendButton)
                     safeThis->m_contentSendButton->setEnabled(false);
+                safeThis->clearVideoFramesToBlack();
             }
         }, Qt::QueuedConnection);
     } else {
@@ -2037,6 +2071,7 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
             m_cameraCheckbox->setChecked(false);
             if (m_contentSendButton)
                 m_contentSendButton->setEnabled(false);
+            clearVideoFramesToBlack();
         }
     }
 }
@@ -2071,6 +2106,10 @@ void QtVideoMainWindow::enqueueRemoteFrame(const unsigned char* yuvData, unsigne
 
 void QtVideoMainWindow::onLocalFrameReady(const QByteArray& yuvData, unsigned width, unsigned height)
 {
+    if (m_h323Connection == nullptr || !m_connectEstablished) {
+        return;
+    }
+
     // 追加のフレームレート制限（キューに溜まった古いフレームをスキップ）
     static qint64 lastProcessedTime = 0;
     qint64 currentTime = QDateTime::currentMSecsSinceEpoch();
@@ -2088,6 +2127,10 @@ void QtVideoMainWindow::onLocalFrameReady(const QByteArray& yuvData, unsigned wi
 
 void QtVideoMainWindow::onRemoteFrameReady(const QByteArray& yuvData, unsigned width, unsigned height)
 {
+    if (m_h323Connection == nullptr || !m_connectEstablished) {
+        return;
+    }
+
     // 📺 リモート映像処理のデバッグログ
     static int remoteFrameCounter = 0;
     remoteFrameCounter++;
@@ -2152,6 +2195,16 @@ void QtVideoMainWindow::setLocalCameraMuted(bool muted)
 {
     if (m_localVideo) {
         m_localVideo->setCameraMuted(muted);
+    }
+}
+
+void QtVideoMainWindow::clearVideoFramesToBlack()
+{
+    if (m_localVideo) {
+        m_localVideo->clearFrameToBlack();
+    }
+    if (m_remoteVideo) {
+        m_remoteVideo->clearFrameToBlack();
     }
 }
 
@@ -2240,6 +2293,7 @@ void QtVideoMainWindow::onDisconnectClicked()
     m_isCallActive.store(false, std::memory_order_release);
     m_connectEstablished = false;
     stopConnectBlink();
+    clearVideoFramesToBlack();
     
     setConnectionStatus("Disconnecting...");
     emit disconnectRequested();

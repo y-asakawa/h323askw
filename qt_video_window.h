@@ -178,6 +178,13 @@ public:
     void updateFrameRGB24(const unsigned char* rgbData, unsigned width, unsigned height);
 
     /**
+     * @brief 表示を黒フレームで強制クリア
+     * @param width 指定時はその幅を使用（0なら既存サイズまたは既定値）
+     * @param height 指定時はその高さを使用（0なら既存サイズまたは既定値）
+     */
+    void clearFrameToBlack(unsigned width = 0, unsigned height = 0);
+
+    /**
      * @brief フレームサイズを取得
      */
     QSize frameSize() const { return QSize(m_frameWidth, m_frameHeight); }
@@ -707,6 +714,7 @@ private:
     void setupUI();
     void setupConnections();
     void populateDeviceLists();
+    void clearVideoFramesToBlack();
     void loadAddressHistory();
     void saveAddressHistory();
     void addToAddressHistory(const QString& address);
