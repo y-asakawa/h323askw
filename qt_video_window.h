@@ -49,6 +49,7 @@
 #include <atomic>
 #include <QSlider>
 #include <QPointer>
+#include <QEvent>
 
 #ifdef Q_OS_MAC
 #ifndef __MAC_OS_X_DISABLE_AVAILABILITY
@@ -683,6 +684,7 @@ private:
 protected:
     void closeEvent(QCloseEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private slots:
     void onConnectClicked();
@@ -722,6 +724,7 @@ private:
     void appendClearHistoryItem();
     bool isClearHistoryItem(int index) const;
     void setupMultiDeviceWindow();
+    void updateSingleDevicePanelVisibility();
 
     // ==================== Phase 1: Multi-Device Audio UI Private Methods ====================
     
@@ -795,6 +798,7 @@ private:
     int m_audioProfileIndex;
     QPushButton* m_contentButton;  // コンテンツ再表示ボタン
     QPushButton* m_contentSendButton; // コンテンツ送信ボタン
+    QWidget* m_audioSpectrumPanel;    // メイン側の音声ビジュアライザー
     QWidget* m_gainRowWidget;          // 旧来の全体ゲインUI
     QSlider* m_gainSlider;           // マイク入力ゲイン
     QLabel* m_gainValueLabel;        // 現在のdB表示
@@ -804,11 +808,15 @@ private:
     int m_baseSpeakerGainIndex;      // 旧式スピーカーゲイン(0-9)
     
     // デバイス選択
+    QLabel* m_micLabel;
+    QLabel* m_speakerLabel;
+    QLabel* m_cameraLabel;
     QComboBox* m_micCombo;
     QComboBox* m_speakerCombo;
     QComboBox* m_cameraCombo;
     QPushButton* m_overlayTextButton;
     QPushButton* m_backgroundBlurButton;
+    QWidget* m_singleDevicePanel;
 
     // ステータス
     QLabel* m_statusLabel;

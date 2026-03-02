@@ -1307,6 +1307,7 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_audioProfileIndex(kAudioProfileDefault)
     , m_contentButton(nullptr)
     , m_contentSendButton(nullptr)
+    , m_audioSpectrumPanel(nullptr)
     , m_gainRowWidget(nullptr)
     , m_gainSlider(nullptr)
     , m_gainValueLabel(nullptr)
@@ -1314,11 +1315,15 @@ QtVideoMainWindow::QtVideoMainWindow(QWidget* parent)
     , m_spkGainValueLabel(nullptr)
     , m_baseMicGainIndex(3)
     , m_baseSpeakerGainIndex(3)
+    , m_micLabel(nullptr)
+    , m_speakerLabel(nullptr)
+    , m_cameraLabel(nullptr)
     , m_micCombo(nullptr)
     , m_speakerCombo(nullptr)
     , m_cameraCombo(nullptr)
     , m_overlayTextButton(nullptr)
     , m_backgroundBlurButton(nullptr)
+    , m_singleDevicePanel(nullptr)
     , m_statusLabel(nullptr)
     , m_overlayTextDialog(nullptr)
     , m_overlayTextLineEdit(nullptr)
@@ -1581,24 +1586,26 @@ void QtVideoMainWindow::setupUI()
     mainLayout->addWidget(m_videoSplitter, 1);  // stretch factor = 1
 
     // オーディオスペクトラム表示エリア（横並び）
-    QHBoxLayout* spectrumLayout = new QHBoxLayout();
+    m_audioSpectrumPanel = new QWidget(this);
+    QHBoxLayout* spectrumLayout = new QHBoxLayout(m_audioSpectrumPanel);
+    spectrumLayout->setContentsMargins(0, 0, 0, 0);
     
     // ローカル音声（マイク入力）のスペクトラム
     QVBoxLayout* localSpectrumBox = new QVBoxLayout();
-    QLabel* localSpecLabel = new QLabel("🎤 Mic Input", this);
+    QLabel* localSpecLabel = new QLabel("🎤 Mic Input", m_audioSpectrumPanel);
     localSpecLabel->setStyleSheet("color: #888; font-size: 10px;");
     localSpecLabel->setAlignment(Qt::AlignCenter);
-    m_localSpectrum = new QtAudioSpectrumWidget(this);
+    m_localSpectrum = new QtAudioSpectrumWidget(m_audioSpectrumPanel);
     m_localSpectrum->setBarColor(QColor(0, 180, 255));  // 青系
     localSpectrumBox->addWidget(localSpecLabel);
     localSpectrumBox->addWidget(m_localSpectrum);
     
     // リモート音声（相手の声）のスペクトラム
     QVBoxLayout* remoteSpectrumBox = new QVBoxLayout();
-    QLabel* remoteSpecLabel = new QLabel("🔊 Remote Audio", this);
+    QLabel* remoteSpecLabel = new QLabel("🔊 Remote Audio", m_audioSpectrumPanel);
     remoteSpecLabel->setStyleSheet("color: #888; font-size: 10px;");
     remoteSpecLabel->setAlignment(Qt::AlignCenter);
-    m_remoteSpectrum = new QtAudioSpectrumWidget(this);
+    m_remoteSpectrum = new QtAudioSpectrumWidget(m_audioSpectrumPanel);
     m_remoteSpectrum->setBarColor(QColor(0, 200, 100));  // 緑系
     remoteSpectrumBox->addWidget(remoteSpecLabel);
     remoteSpectrumBox->addWidget(m_remoteSpectrum);
@@ -1606,7 +1613,7 @@ void QtVideoMainWindow::setupUI()
     spectrumLayout->addLayout(localSpectrumBox);
     spectrumLayout->addLayout(remoteSpectrumBox);
     
-    mainLayout->addLayout(spectrumLayout);
+    mainLayout->addWidget(m_audioSpectrumPanel);
 
     // 入出力ゲインスライダー（Mic / Speaker を横並び）
     m_gainRowWidget = new QWidget(this);
@@ -1757,34 +1764,39 @@ void QtVideoMainWindow::setupUI()
 
     mainLayout->addLayout(controlLayout);
 
-    // デバイス選択パネル
-    QHBoxLayout* deviceLayout = new QHBoxLayout();
+    // デバイス選択パネル（Separate時は非表示にしてMulti-Device側へ集約）
+    m_singleDevicePanel = new QWidget(this);
+    QHBoxLayout* deviceLayout = new QHBoxLayout(m_singleDevicePanel);
+    deviceLayout->setContentsMargins(0, 0, 0, 0);
 
-    deviceLayout->addWidget(new QLabel("Mic:", this));
-    m_micCombo = new QComboBox(this);
+    m_micLabel = new QLabel("Mic:", m_singleDevicePanel);
+    deviceLayout->addWidget(m_micLabel);
+    m_micCombo = new QComboBox(m_singleDevicePanel);
     m_micCombo->setMinimumWidth(150);
     deviceLayout->addWidget(m_micCombo);
 
-    deviceLayout->addWidget(new QLabel("Speaker:", this));
-    m_speakerCombo = new QComboBox(this);
+    m_speakerLabel = new QLabel("Speaker:", m_singleDevicePanel);
+    deviceLayout->addWidget(m_speakerLabel);
+    m_speakerCombo = new QComboBox(m_singleDevicePanel);
     m_speakerCombo->setMinimumWidth(150);
     deviceLayout->addWidget(m_speakerCombo);
 
-    deviceLayout->addWidget(new QLabel("Camera:", this));
-    m_cameraCombo = new QComboBox(this);
+    m_cameraLabel = new QLabel("Camera:", m_singleDevicePanel);
+    deviceLayout->addWidget(m_cameraLabel);
+    m_cameraCombo = new QComboBox(m_singleDevicePanel);
     m_cameraCombo->setMinimumWidth(150);
     deviceLayout->addWidget(m_cameraCombo);
 
-    m_overlayTextButton = new QPushButton("BG Text", this);
+    m_overlayTextButton = new QPushButton("BG Text", m_singleDevicePanel);
     m_overlayTextButton->setToolTip("Open background text input window");
     deviceLayout->addWidget(m_overlayTextButton);
-    m_backgroundBlurButton = new QPushButton("BG Blur", this);
+    m_backgroundBlurButton = new QPushButton("BG Blur", m_singleDevicePanel);
     m_backgroundBlurButton->setToolTip("Open background blur settings");
     deviceLayout->addWidget(m_backgroundBlurButton);
 
     deviceLayout->addStretch();
 
-    mainLayout->addLayout(deviceLayout);
+    mainLayout->addWidget(m_singleDevicePanel);
 
     setupMultiDeviceWindow();
 
@@ -1804,6 +1816,7 @@ void QtVideoMainWindow::setupMultiDeviceWindow()
     m_multiDeviceWindow->setWindowTitle("Multi-Device Configuration - H323ASKW");
     m_multiDeviceWindow->setMinimumSize(1180, 560);
     m_multiDeviceWindow->resize(1260, 680);
+    m_multiDeviceWindow->installEventFilter(this);
 
     QVBoxLayout* layout = new QVBoxLayout(m_multiDeviceWindow);
     layout->setContentsMargins(8, 8, 8, 8);
@@ -2018,6 +2031,7 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
                     safeThis->m_contentSendButton->setEnabled(false);
                 safeThis->clearVideoFramesToBlack();
             }
+            safeThis->updateSingleDevicePanelVisibility();
         }, Qt::QueuedConnection);
     } else {
         m_h323Connection = connection;
@@ -2073,6 +2087,7 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
                 m_contentSendButton->setEnabled(false);
             clearVideoFramesToBlack();
         }
+        updateSingleDevicePanelVisibility();
     }
 }
 
@@ -2256,6 +2271,69 @@ void QtVideoMainWindow::keyPressEvent(QKeyEvent* event)
             break;
         default:
             QMainWindow::keyPressEvent(event);
+    }
+}
+
+bool QtVideoMainWindow::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == m_multiDeviceWindow && event != nullptr) {
+        switch (event->type()) {
+            case QEvent::Show:
+            case QEvent::Hide:
+            case QEvent::Close:
+                updateSingleDevicePanelVisibility();
+                break;
+            default:
+                break;
+        }
+    }
+    return QMainWindow::eventFilter(watched, event);
+}
+
+void QtVideoMainWindow::updateSingleDevicePanelVisibility()
+{
+    const bool multiDeviceVisible =
+        (m_multiDeviceWindow != nullptr) && m_multiDeviceWindow->isVisible();
+    const bool hasMultiDeviceSelection =
+        !m_micRows.isEmpty() || !m_speakerRows.isEmpty() || !m_cameraRows.isEmpty();
+    const bool keepMultiViewWhileConnected =
+        (m_h323Connection != nullptr) && hasMultiDeviceSelection;
+    const bool shouldShowSelectors =
+        !m_windowsSeparated && !multiDeviceVisible && !keepMultiViewWhileConnected;
+    const bool canOpenMultiDevice =
+        (m_h323Connection == nullptr) || hasMultiDeviceSelection;
+
+    if (m_multiDeviceButton) {
+        m_multiDeviceButton->setEnabled(canOpenMultiDevice);
+    }
+
+    if (m_singleDevicePanel) {
+        // BG Text / BG Blur は常時表示し、デバイス選択要素だけを切り替える
+        m_singleDevicePanel->setVisible(true);
+    }
+    if (m_micLabel) {
+        m_micLabel->setVisible(shouldShowSelectors);
+    }
+    if (m_speakerLabel) {
+        m_speakerLabel->setVisible(shouldShowSelectors);
+    }
+    if (m_cameraLabel) {
+        m_cameraLabel->setVisible(shouldShowSelectors);
+    }
+    if (m_micCombo) {
+        m_micCombo->setVisible(shouldShowSelectors);
+    }
+    if (m_speakerCombo) {
+        m_speakerCombo->setVisible(shouldShowSelectors);
+    }
+    if (m_cameraCombo) {
+        m_cameraCombo->setVisible(shouldShowSelectors);
+    }
+    if (m_audioSpectrumPanel) {
+        m_audioSpectrumPanel->setVisible(shouldShowSelectors);
+    }
+    if (m_gainRowWidget) {
+        m_gainRowWidget->setVisible(shouldShowSelectors);
     }
 }
 
@@ -3933,12 +4011,14 @@ void QtVideoMainWindow::onSeparateWindowsClicked()
         m_remoteVideo->move(mainPos.x() + mainWidth + 20, mainPos.y());
         
         m_remoteVideo->show();
-        
+
         // ボタンテキスト変更
         m_separateButton->setText("⇦ Combine");
         m_separateButton->setToolTip("Combine local and remote video back into single window");
         
         m_windowsSeparated = true;
+        onMultiDeviceWindowClicked();
+        updateSingleDevicePanelVisibility();
         
         QT_TRACE(1, "Video windows separated");
     } else {
@@ -3954,12 +4034,13 @@ void QtVideoMainWindow::onSeparateWindowsClicked()
         
         // サイズを均等に戻す
         m_videoSplitter->setSizes({1, 1});
-        
+
         // ボタンテキスト変更
         m_separateButton->setText("↗ Separate");
         m_separateButton->setToolTip("Separate local and remote video into different windows");
         
         m_windowsSeparated = false;
+        updateSingleDevicePanelVisibility();
         
         QT_TRACE(1, "Video windows combined");
     }
@@ -3968,6 +4049,13 @@ void QtVideoMainWindow::onSeparateWindowsClicked()
 void QtVideoMainWindow::onMultiDeviceWindowClicked()
 {
     if (!m_multiDeviceWindow) {
+        return;
+    }
+
+    const bool hasMultiDeviceSelection =
+        !m_micRows.isEmpty() || !m_speakerRows.isEmpty() || !m_cameraRows.isEmpty();
+    if (m_h323Connection != nullptr && !hasMultiDeviceSelection) {
+        setConnectionStatus("Single-device call: Multi-Device is disabled");
         return;
     }
 
@@ -3985,6 +4073,7 @@ void QtVideoMainWindow::onMultiDeviceWindowClicked()
     m_multiDeviceWindow->show();
     m_multiDeviceWindow->raise();
     m_multiDeviceWindow->activateWindow();
+    updateSingleDevicePanelVisibility();
 }
 
 void QtVideoMainWindow::onContentWindowClicked()
@@ -4133,6 +4222,8 @@ void QtVideoMainWindow::onRemoteWindowClosed()
         
         // サイズを均等に
         m_videoSplitter->setSizes({1, 1});
+
+        updateSingleDevicePanelVisibility();
         
         // ボタンテキスト変更
         m_separateButton->setText("↗ Separate");
