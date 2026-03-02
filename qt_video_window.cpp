@@ -1981,6 +1981,11 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
             safeThis->m_h323Connection = connection;
             if (connection) {
                 QT_TRACE(1, "H323Connection set - UI controls enabled (via invokeMethod)");
+                safeThis->m_isCallActive.store(true, std::memory_order_release);
+                if (safeThis->m_audioVisualizerTimer && !safeThis->m_audioVisualizerTimer->isActive()) {
+                    safeThis->m_audioVisualizerTimer->start();
+                    QT_TRACE(2, "Audio visualizer timer started (setH323Connection)");
+                }
                 safeThis->m_disconnectButton->setEnabled(true);
                 safeThis->m_connectButton->setEnabled(false);
                 safeThis->m_connectEstablished = true;
@@ -2005,6 +2010,11 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
                     safeThis->m_contentSendButton->setEnabled(true);
             } else {
                 QT_TRACE(1, "H323Connection cleared - UI controls reset (via invokeMethod)");
+                safeThis->m_isCallActive.store(false, std::memory_order_release);
+                if (safeThis->m_audioVisualizerTimer && safeThis->m_audioVisualizerTimer->isActive()) {
+                    safeThis->m_audioVisualizerTimer->stop();
+                    QT_TRACE(2, "Audio visualizer timer stopped (setH323Connection)");
+                }
                 safeThis->m_disconnectButton->setEnabled(false);
                 safeThis->m_connectButton->setEnabled(true);
                 safeThis->m_connectEstablished = false;
@@ -2037,6 +2047,11 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
         m_h323Connection = connection;
         if (connection) {
             QT_TRACE(1, "H323Connection set - UI controls enabled (direct call)");
+            m_isCallActive.store(true, std::memory_order_release);
+            if (m_audioVisualizerTimer && !m_audioVisualizerTimer->isActive()) {
+                m_audioVisualizerTimer->start();
+                QT_TRACE(2, "Audio visualizer timer started (setH323Connection)");
+            }
             m_disconnectButton->setEnabled(true);
             m_connectButton->setEnabled(false);
             m_connectEstablished = true;
@@ -2061,6 +2076,11 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
                 m_contentSendButton->setEnabled(true);
         } else {
             QT_TRACE(1, "H323Connection cleared - UI controls reset (direct call)");
+            m_isCallActive.store(false, std::memory_order_release);
+            if (m_audioVisualizerTimer && m_audioVisualizerTimer->isActive()) {
+                m_audioVisualizerTimer->stop();
+                QT_TRACE(2, "Audio visualizer timer stopped (setH323Connection)");
+            }
             m_disconnectButton->setEnabled(false);
             m_connectButton->setEnabled(true);
             m_connectEstablished = false;
