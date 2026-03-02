@@ -2877,6 +2877,11 @@ static void Qt6ApplyDeviceSelectionCallback(const QString& mic, const QString& s
         ep->SetUseUSBCamera(true);
         ep->SetUSBCameraDeviceName(camName);
         PTRACE(1, "Qt6Callback\tSelected camera: " << camName);
+    } else {
+        // Empty camera means "disable legacy single-camera selection" (multi-camera takes precedence).
+        ep->SetUseUSBCamera(false);
+        ep->SetUSBCameraDeviceName("");
+        PTRACE(1, "Qt6Callback\tCleared legacy single camera selection");
     }
 #endif
 }
@@ -2884,6 +2889,8 @@ static void Qt6ApplyDeviceSelectionCallback(const QString& mic, const QString& s
 // ==================== Phase 1: Multi-Device Audio Callback ====================
 
 #ifdef USE_QT6
+static const char* kNoAudioDeviceSentinel = "__H323ASKW_NO_DEVICE__";
+
 static void Qt6ApplyAudioDeviceSelectionCallback(const AudioDeviceSelection& selection, void* userData)
 {
     MyH323EndPoint* ep = static_cast<MyH323EndPoint*>(userData);
@@ -2923,6 +2930,18 @@ static void Qt6ApplyAudioDeviceSelectionCallback(const AudioDeviceSelection& sel
            << config.inputs.size() << " inputs, "
            << config.outputs.size() << " outputs, "
            << videoConfig.cameras.size() << " cameras");
+
+    // Legacy single-device fields are still referenced by fallback paths.
+    // Keep them synchronized to current selection to avoid stale single-device reuse.
+    const PString legacyMic = !config.inputs.empty()
+        ? config.inputs.front().name
+        : PString(kNoAudioDeviceSentinel);
+    const PString legacySpk = !config.outputs.empty()
+        ? config.outputs.front().name
+        : PString(kNoAudioDeviceSentinel);
+    ep->SetAudioDevices(legacyMic, legacySpk, ep->IsAudioDisabled());
+    PTRACE(2, "Qt6AudioCallback\tSynced legacy audio fallback devices (Mic=" << legacyMic
+           << ", Spk=" << legacySpk << ")");
     
     // エンドポイントに設定を保存（次回の接続時に使用）
     ep->UpdateAudioDeviceConfig(config);
@@ -2933,8 +2952,10 @@ static void Qt6ApplyAudioDeviceSelectionCallback(const AudioDeviceSelection& sel
     
 #ifdef H323_VIDEO
     if (!videoConfig.cameras.empty()) {
+        // Multi-camera mode: keep video enabled, but do not bind legacy single-camera name.
         ep->SetUseUSBCamera(true);
-        ep->SetUSBCameraDeviceName(videoConfig.cameras[0].name);
+        ep->SetUSBCameraDeviceName("");
+        PTRACE(1, "Qt6AudioCallback\tMulti-camera active - legacy single camera name cleared");
     } else {
         ep->SetUseUSBCamera(false);
         ep->SetUSBCameraDeviceName("");
@@ -6706,6 +6727,42 @@ void MyH323Connection::UpdateVideoDevices(const CoreVideoDeviceConfig& cfg)
     }
   }
 
+  // 通話開始時にモザイク未使用でも、通話中のカメラ追加でモザイクへ切替できるようにする。
+  if (m_mosaicVideoInput == NULL && !cfg.cameras.empty() && videoChannelOut != NULL) {
+    PTRACE(1, "H323ASKW\t🎞️ Creating MosaicVideoInputDevice during active call");
+
+    MosaicVideoInputDevice* mosaic = new MosaicVideoInputDevice();
+    if (mosaic != NULL) {
+      mosaic->SetFrameRate(endpoint.GetFrameRate());
+
+      // 既存Readerのサイズを引き継ぎ、なければ720pを使う。
+      unsigned targetWidth = 1280;
+      unsigned targetHeight = 720;
+      PVideoInputDevice* currentReader = videoChannelOut->GetVideoReader();
+      if (currentReader != NULL) {
+        const unsigned w = currentReader->GetFrameWidth();
+        const unsigned h = currentReader->GetFrameHeight();
+        if (w > 0 && h > 0) {
+          targetWidth = w;
+          targetHeight = h;
+        }
+      }
+      mosaic->SetFrameSize(targetWidth, targetHeight);
+
+      if (mosaic->Open("MosaicCamera", TRUE)) {
+        // Replace current reader during an active call.
+        // keepCurrent=false closes/deletes the previous reader first.
+        videoChannelOut->AttachVideoReader(mosaic, false);
+        m_mosaicVideoInput = mosaic;
+        PTRACE(1, "H323ASKW\t✅ Attached MosaicVideoInputDevice during active call ("
+               << targetWidth << "x" << targetHeight << ")");
+      } else {
+        PTRACE(1, "H323ASKW\t❌ Failed to open MosaicVideoInputDevice during active call");
+        delete mosaic;
+      }
+    }
+  }
+
   if (m_mosaicVideoInput) {
     m_mosaicVideoInput->UpdateDevices(cfg.cameras);
     PTRACE(1, "H323ASKW\t✅ Connection: Video device update complete");
@@ -10225,15 +10282,25 @@ PBoolean MyH323Connection::OpenAudioChannel(PBoolean isEncoding, unsigned buffer
         PTRACE(1, "H323ASKW\t❌ Failed to create MicMixerChannel");
         return FALSE;
       }
+      if (m_micMixer->GetDeviceCount() == 0) {
+        PTRACE(1, "H323ASKW\t⚠️ MicMixer has no opened devices - falling back to single-device audio input");
+        delete m_micMixer;
+        m_micMixer = NULL;
+        useMultiDevice = false;
+      }
+      if (!useMultiDevice) {
+        // Fall through to single-device path below
+      } else {
       
-      // Attach directly to codec (MicMixerChannel is PChannel, no wrapper needed)
-      codec.AttachChannel(m_micMixer);
-      
-      PTRACE(1, "H323ASKW\t✅ MicMixerChannel created with "
-             << multiDeviceConfig.inputs.size() << " devices");
-      
-      RegisterPortMapping(1);
-      return TRUE;
+        // Attach directly to codec (MicMixerChannel is PChannel, no wrapper needed)
+        codec.AttachChannel(m_micMixer);
+        
+        PTRACE(1, "H323ASKW\t✅ MicMixerChannel created with "
+               << multiDeviceConfig.inputs.size() << " devices");
+        
+        RegisterPortMapping(1);
+        return TRUE;
+      }
       
     } else {
       // ========== SpeakerFanoutChannel ==========
@@ -10247,15 +10314,25 @@ PBoolean MyH323Connection::OpenAudioChannel(PBoolean isEncoding, unsigned buffer
         PTRACE(1, "H323ASKW\t❌ Failed to create SpeakerFanoutChannel");
         return FALSE;
       }
+      if (m_speakerFanout->GetDeviceCount() == 0) {
+        PTRACE(1, "H323ASKW\t⚠️ SpeakerFanout has no opened devices - falling back to single-device audio output");
+        delete m_speakerFanout;
+        m_speakerFanout = NULL;
+        useMultiDevice = false;
+      }
+      if (!useMultiDevice) {
+        // Fall through to single-device path below
+      } else {
       
-      // Attach directly to codec (SpeakerFanoutChannel is PChannel, no wrapper needed)
-      codec.AttachChannel(m_speakerFanout);
-      
-      PTRACE(1, "H323ASKW\t✅ SpeakerFanoutChannel created with "
-             << multiDeviceConfig.outputs.size() << " devices");
-      
-      RegisterPortMapping(1);
-      return TRUE;
+        // Attach directly to codec (SpeakerFanoutChannel is PChannel, no wrapper needed)
+        codec.AttachChannel(m_speakerFanout);
+        
+        PTRACE(1, "H323ASKW\t✅ SpeakerFanoutChannel created with "
+               << multiDeviceConfig.outputs.size() << " devices");
+        
+        RegisterPortMapping(1);
+        return TRUE;
+      }
     }
   }
   
@@ -10266,6 +10343,17 @@ PBoolean MyH323Connection::OpenAudioChannel(PBoolean isEncoding, unsigned buffer
   // ============================================================
   PString inDev = ep.GetAudioInputDevice();
   PString outDev = ep.GetAudioOutputDevice();
+
+#ifdef USE_QT6
+  if (isEncoding && inDev == kNoAudioDeviceSentinel) {
+    PTRACE(1, "H323ASKW\t🎤 No microphone selected in multi-device mode - skipping audio input channel");
+    return FALSE;
+  }
+  if (!isEncoding && outDev == kNoAudioDeviceSentinel) {
+    PTRACE(1, "H323ASKW\t🔊 No speaker selected in multi-device mode - skipping audio output channel");
+    return FALSE;
+  }
+#endif
   
   // Get default devices if not specified
   if (inDev.IsEmpty())  inDev  = PSoundChannel::GetDefaultDevice(PSoundChannel::Recorder);

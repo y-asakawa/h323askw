@@ -1953,7 +1953,7 @@ void QtVideoMainWindow::populateDeviceLists()
     QtVideoManager::instance().applyDeviceSelection(
         m_micCombo->currentText(),
         m_speakerCombo->currentText(),
-        m_cameraCombo->currentText());
+        m_cameraRows.isEmpty() ? m_cameraCombo->currentText() : QString());
 
     // マルチデバイス設定も同期（旧式ベースデバイス含む）
     onDeviceRowChanged();
@@ -2342,6 +2342,9 @@ void QtVideoMainWindow::onConnectClicked()
     QString address = m_addressCombo->currentText().trimmed();
     if (!address.isEmpty()) {
         QT_TRACE(1, "Connect requested to: " << address.toStdString());
+
+        // 接続直前に最新のマルチデバイス設定を必ずエンドポイントへ反映
+        onDeviceRowChanged();
         
         // 履歴に追加
         addToAddressHistory(address);
@@ -2501,7 +2504,10 @@ void QtVideoMainWindow::onMicDeviceChanged(int index)
     Q_UNUSED(index);
     QString device = m_micCombo->currentText();
     QT_TRACE(1, "Mic device changed: " << device.toStdString());
-    QtVideoManager::instance().applyDeviceSelection(device, m_speakerCombo->currentText(), m_cameraCombo->currentText());
+    QtVideoManager::instance().applyDeviceSelection(
+        device,
+        m_speakerCombo->currentText(),
+        m_cameraRows.isEmpty() ? m_cameraCombo->currentText() : QString());
     onDeviceRowChanged();  // マルチデバイス設定も更新
 }
 
@@ -2510,7 +2516,10 @@ void QtVideoMainWindow::onSpeakerDeviceChanged(int index)
     Q_UNUSED(index);
     QString device = m_speakerCombo->currentText();
     QT_TRACE(1, "Speaker device changed: " << device.toStdString());
-    QtVideoManager::instance().applyDeviceSelection(m_micCombo->currentText(), device, m_cameraCombo->currentText());
+    QtVideoManager::instance().applyDeviceSelection(
+        m_micCombo->currentText(),
+        device,
+        m_cameraRows.isEmpty() ? m_cameraCombo->currentText() : QString());
     onDeviceRowChanged();  // マルチデバイス設定も更新
 }
 
@@ -4392,6 +4401,14 @@ void QtVideoMainWindow::onAddMicClicked()
     }
 
     QStringList devices = getAvailableDevices(QT_DEVICE_TYPE_MIC);
+    if (devices.isEmpty() && m_micCombo) {
+        for (int i = 0; i < m_micCombo->count(); ++i) {
+            const QString name = m_micCombo->itemText(i);
+            if (!name.isEmpty()) {
+                devices.append(name);
+            }
+        }
+    }
     PTRACE(0, "QtVideo\tAvailable mic devices: " << devices.size());
     
     AudioDeviceRowWidget* row = new AudioDeviceRowWidget(QT_DEVICE_TYPE_MIC, devices, this);
@@ -4413,8 +4430,14 @@ void QtVideoMainWindow::onAddMicClicked()
     m_micRows.append(row);
 
     PTRACE(0, "QtVideo\t✅✅✅ Mic row added - total now: " << m_micRows.size());
-    // 追加行の初期ゲインは旧式の現在値に合わせる
+    // 追加行の初期値をシングル選択に寄せる
     AudioDeviceEntry entry = row->getDeviceEntry();
+    if (m_micRows.size() == 1 && m_micCombo) {
+        const QString singleName = m_micCombo->currentText();
+        if (!singleName.isEmpty()) {
+            entry.name = singleName;
+        }
+    }
     entry.gain = kLinTable[m_baseMicGainIndex];
     row->setDeviceEntry(entry);
     updateDeviceRowControls(m_micRows);
@@ -4431,6 +4454,14 @@ void QtVideoMainWindow::onAddSpeakerClicked()
     }
 
     QStringList devices = getAvailableDevices(QT_DEVICE_TYPE_SPEAKER);
+    if (devices.isEmpty() && m_speakerCombo) {
+        for (int i = 0; i < m_speakerCombo->count(); ++i) {
+            const QString name = m_speakerCombo->itemText(i);
+            if (!name.isEmpty()) {
+                devices.append(name);
+            }
+        }
+    }
     AudioDeviceRowWidget* row = new AudioDeviceRowWidget(QT_DEVICE_TYPE_SPEAKER, devices, this);
 
     // シグナル接続
@@ -4448,8 +4479,14 @@ void QtVideoMainWindow::onAddSpeakerClicked()
     m_speakerRows.append(row);
 
     QT_TRACE(2, "Speaker row added (total=" << m_speakerRows.size() << ")");
-    // 追加行の初期ゲインは旧式の現在値に合わせる
+    // 追加行の初期値をシングル選択に寄せる
     AudioDeviceEntry entry = row->getDeviceEntry();
+    if (m_speakerRows.size() == 1 && m_speakerCombo) {
+        const QString singleName = m_speakerCombo->currentText();
+        if (!singleName.isEmpty()) {
+            entry.name = singleName;
+        }
+    }
     entry.gain = kLinTable[m_baseSpeakerGainIndex];
     row->setDeviceEntry(entry);
     updateDeviceRowControls(m_speakerRows);
@@ -4465,6 +4502,14 @@ void QtVideoMainWindow::onAddCameraClicked()
     }
 
     QStringList devices = getAvailableDevices(QT_DEVICE_TYPE_CAMERA);
+    if (devices.isEmpty() && m_cameraCombo) {
+        for (int i = 0; i < m_cameraCombo->count(); ++i) {
+            const QString name = m_cameraCombo->itemText(i);
+            if (!name.isEmpty()) {
+                devices.append(name);
+            }
+        }
+    }
     VideoDeviceRowWidget* row = new VideoDeviceRowWidget(devices, this);
 
     connect(row, &VideoDeviceRowWidget::removeRequested,
@@ -4475,6 +4520,14 @@ void QtVideoMainWindow::onAddCameraClicked()
     row->setRemoveButtonVisible(m_cameraRows.size() > 0);
     m_cameraRowsLayout->addWidget(row);
     m_cameraRows.append(row);
+    if (m_cameraRows.size() == 1 && m_cameraCombo) {
+        const QString singleName = m_cameraCombo->currentText();
+        if (!singleName.isEmpty()) {
+            VideoDeviceEntry entry = row->getDeviceEntry();
+            entry.name = singleName;
+            row->setDeviceEntry(entry);
+        }
+    }
 
     updateCameraRowControls();
     onDeviceRowChanged();
@@ -4591,7 +4644,8 @@ void QtVideoMainWindow::updateAudioVisualizers()
         const unsigned micRate = micMixer->GetSampleRate();
         const size_t fallbackSamples = micMixer->GetFrameSamples();
         const bool muted = conn->IsLocalMicMuted();
-        const size_t micOffset = (m_micCombo && !m_micCombo->currentText().isEmpty()) ? 1 : 0;
+        const size_t micOffset =
+            (m_micCombo && m_micCombo->isVisible() && !m_micCombo->currentText().isEmpty()) ? 1 : 0;
         
         // UI行数を実際のデバイス数でクリップ
         size_t available = (micCount > micOffset) ? (micCount - micOffset) : 0;
@@ -4643,7 +4697,8 @@ void QtVideoMainWindow::updateAudioVisualizers()
         size_t speakerCount = speakerFanout->GetDeviceCount();
         QT_TRACE(4, "updateAudioVisualizers: speakerCount=" << speakerCount);
         const unsigned spkRate = speakerFanout->GetSampleRate();
-        const size_t spkOffset = (m_speakerCombo && !m_speakerCombo->currentText().isEmpty()) ? 1 : 0;
+        const size_t spkOffset =
+            (m_speakerCombo && m_speakerCombo->isVisible() && !m_speakerCombo->currentText().isEmpty()) ? 1 : 0;
         
         // UI行数を実際のデバイス数でクリップ
         size_t available = (speakerCount > spkOffset) ? (speakerCount - spkOffset) : 0;
@@ -4716,20 +4771,24 @@ AudioDeviceSelection QtVideoMainWindow::getAudioDeviceSelection() const
     QSet<QString> seenOutputs;
     QSet<QString> seenCameras;
 
-    if (m_micCombo) {
-        const QString name = m_micCombo->currentText();
-        if (!name.isEmpty()) {
-            selection.inputDevices.append(AudioDeviceEntry(name, kLinTable[m_baseMicGainIndex], false));
-            seenInputs.insert(name);
-        }
+    const bool useMultiMic = !m_micRows.isEmpty();
+    const bool useMultiSpeaker = !m_speakerRows.isEmpty();
+    const bool useMultiCamera = !m_cameraRows.isEmpty();
+    const bool singleMicVisible = (m_micCombo && m_micCombo->isVisible());
+    const bool singleSpeakerVisible = (m_speakerCombo && m_speakerCombo->isVisible());
+    const bool singleCameraVisible = (m_cameraCombo && m_cameraCombo->isVisible());
+    const QString singleMicName = m_micCombo ? m_micCombo->currentText() : QString();
+    const QString singleSpeakerName = m_speakerCombo ? m_speakerCombo->currentText() : QString();
+
+    // シングルUIが表示されている間だけ、シングル設定を有効化する。
+    if (singleMicVisible && !useMultiMic && !singleMicName.isEmpty()) {
+        selection.inputDevices.append(AudioDeviceEntry(singleMicName, kLinTable[m_baseMicGainIndex], false));
+        seenInputs.insert(singleMicName);
     }
 
-    if (m_speakerCombo) {
-        const QString name = m_speakerCombo->currentText();
-        if (!name.isEmpty()) {
-            selection.outputDevices.append(AudioDeviceEntry(name, kLinTable[m_baseSpeakerGainIndex], false));
-            seenOutputs.insert(name);
-        }
+    if (singleSpeakerVisible && !useMultiSpeaker && !singleSpeakerName.isEmpty()) {
+        selection.outputDevices.append(AudioDeviceEntry(singleSpeakerName, kLinTable[m_baseSpeakerGainIndex], false));
+        seenOutputs.insert(singleSpeakerName);
     }
 
     for (const AudioDeviceRowWidget* row : m_micRows) {
@@ -4748,8 +4807,8 @@ AudioDeviceSelection QtVideoMainWindow::getAudioDeviceSelection() const
         }
     }
 
-    if (m_cameraRows.isEmpty()) {
-        if (m_cameraCombo) {
+    if (!useMultiCamera) {
+        if (singleCameraVisible && m_cameraCombo) {
             const QString name = m_cameraCombo->currentText();
             if (!name.isEmpty()) {
                 selection.cameraDevices.append(VideoDeviceEntry(name, false));
