@@ -436,7 +436,7 @@ A: いいえ、1対1の通話のみ対応しています。
 ## ライセンス
 
 このソフトウェアはMozilla Public License (MPL) の下で配布されています。
-詳細は `license.html` を参照してください。
+詳細は `LICENSE.md` を参照してください。
 
 H323ASKW は [callgen323](https://github.com/willamowius/callgen323) を元に、
 macOS Apple Silicon 向け H.323 ビデオクライアントとして改変したものです。
