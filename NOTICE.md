@@ -10,7 +10,7 @@ H323ASKW has been modified into a macOS Apple Silicon H.323 video client with
 Qt6 UI integration, app bundle packaging, local media device handling, recording,
 and related application features.
 
-The upstream callgen323 project identifies its license as MPL. H323ASKW keeps
+The upstream callgen323 project identifies its license as MPL 1.0. H323ASKW keeps
 the Mozilla Public License text in `LICENSE.md`. Source files derived from the
 upstream project retain their original copyright notices where present.
 

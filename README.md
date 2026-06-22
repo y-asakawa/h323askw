@@ -435,7 +435,7 @@ A: いいえ、1対1の通話のみ対応しています。
 
 ## ライセンス
 
-このソフトウェアはMozilla Public License (MPL) の下で配布されています。
+このソフトウェアはMozilla Public License Version 1.0 (MPL 1.0) の下で配布されています。
 詳細は `LICENSE.md` を参照してください。
 
 H323ASKW は [callgen323](https://github.com/willamowius/callgen323) を元に、
