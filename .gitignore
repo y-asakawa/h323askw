@@ -31,6 +31,12 @@ obj_Darwin_aarch64_d_s/
 # Distribution
 dist/
 
+# Locally generated API reference manuals
+docs/H323Plus API Reference Manual (Version 1.27.0).pdf
+docs/H323Plus API Reference Manual (Version 1.27.0).txt
+docs/PTLib API Reference Manual.pdf
+docs/PTLib API Reference Manual.txt
+
 # Debug logs
 *.log
 debug.log
