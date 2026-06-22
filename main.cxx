@@ -3424,9 +3424,7 @@ void H323ASKW::Main()
     
     // Load macOS video plugin for real camera access
     cout << "Loading macOS video input plugin..." << endl;
-    PPluginManager & pluginMgr = PPluginManager::GetPluginManager();
-    pluginMgr.LoadPlugin("/Users/example/ptlib/plugins/vidinput_macos/vidinput_macos_pwplugin.dylib");
-    pluginMgr.LoadPlugin("/Users/example/ptlib/plugins/vidinput_macos/libvidinput_macos.dylib");
+    LoadVideoPlugins();
     
     // List available devices first
     PStringArray availableDevices = PVideoInputDevice::GetDriversDeviceNames("MacOS");
@@ -5422,9 +5420,7 @@ MyH323EndPoint::MyH323EndPoint()
     const char* resolutionName = "CIF (fallback)";
     
     // Load macOS video plugin for camera detection
-    PPluginManager & pluginMgr = PPluginManager::GetPluginManager();
-    pluginMgr.LoadPlugin("/Users/example/ptlib/plugins/vidinput_macos/vidinput_macos_pwplugin.dylib");
-    pluginMgr.LoadPlugin("/Users/example/ptlib/plugins/vidinput_macos/libvidinput_macos.dylib");
+    LoadVideoPlugins();
     
     // Try to detect camera resolution for H.323 codec
     PStringArray availableDevices = PVideoInputDevice::GetDriversDeviceNames("MacOS");

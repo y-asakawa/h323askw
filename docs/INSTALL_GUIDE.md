@@ -445,6 +445,7 @@ A: いいえ、1対1の通話のみ対応しています。
 
 このソフトウェアはMozilla Public License Version 1.0 (MPL 1.0) の下で配布されています。
 詳細は `LICENSE.md` を参照してください。
+派生元、変更内容、外部依存関係の概要は `NOTICE.md` と `CHANGES.md` を参照してください。
 
 ---
 

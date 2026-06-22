@@ -114,8 +114,8 @@ otool -L obj_Darwin_aarch64/h323askw
 出力例:
 ```
 obj_Darwin_aarch64/h323askw:
-    /Users/example/h323plus/lib/libh323_Darwin_aarch64_.1.28.0.dylib
-    /Users/example/ptlib/lib_Darwin_aarch64/libpt.2.10.9.dylib
+    /path/to/h323plus/lib/libh323_Darwin_aarch64_.1.28.0.dylib
+    /path/to/ptlib/lib_Darwin_aarch64/libpt.2.10.9.dylib
     /opt/homebrew/opt/openssl@3/lib/libssl.3.dylib
     /opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib
     /opt/homebrew/opt/sdl2/lib/libSDL2-2.0.0.dylib
@@ -130,21 +130,21 @@ obj_Darwin_aarch64/h323askw:
 
 ```bash
 # H323Plusライブラリの依存関係
-otool -L /Users/example/h323plus/lib/libh323_Darwin_aarch64_.1.28.0.dylib
+otool -L /path/to/h323plus/lib/libh323_Darwin_aarch64_.1.28.0.dylib
 
 # PTLibの依存関係
-otool -L /Users/example/ptlib/lib_Darwin_aarch64/libpt.2.10.9.dylib
+otool -L /path/to/ptlib/lib_Darwin_aarch64/libpt.2.10.9.dylib
 ```
 
 ### ライブラリのInstall Nameを確認
 
 ```bash
-otool -D /Users/example/h323plus/lib/libh323_Darwin_aarch64_.1.28.0.dylib
+otool -D /path/to/h323plus/lib/libh323_Darwin_aarch64_.1.28.0.dylib
 ```
 
 出力:
 ```
-/Users/example/h323plus/lib/libh323_Darwin_aarch64_.1.28.0.dylib
+/path/to/h323plus/lib/libh323_Darwin_aarch64_.1.28.0.dylib
 ```
 
 このInstall Nameも書き換える必要があります。
@@ -169,7 +169,7 @@ Mach-O 64-bit executable arm64
 ### 1. スクリプトの実行
 
 ```bash
-cd /Users/example/h323askw
+cd /path/to/h323askw
 ./create_app_bundle.sh
 ```
 
@@ -250,7 +250,7 @@ install_name_tool -change <古いパス> <新しいパス> <対象ファイル>
 例:
 ```bash
 install_name_tool -change \
-    "/Users/example/h323plus/lib/libh323_Darwin_aarch64_.1.28.0.dylib" \
+    "/path/to/h323plus/lib/libh323_Darwin_aarch64_.1.28.0.dylib" \
     "@executable_path/../Frameworks/libh323.dylib" \
     H323ASKW.app/Contents/MacOS/h323askw
 ```

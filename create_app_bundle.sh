@@ -1132,9 +1132,9 @@ verify_bundle() {
     
     # 実行ファイルの依存関係をチェック (最初の行はファイル名なのでスキップ)
     log_info "  実行ファイルの依存関係を確認..."
-    if otool -L "${APP_BUNDLE}/Contents/MacOS/h323askw_bin" | tail -n +2 | grep -q "/Users/example"; then
+    if otool -L "${APP_BUNDLE}/Contents/MacOS/h323askw_bin" | tail -n +2 | grep -q "/Users/"; then
         log_error "  絶対パスがまだ残っています！"
-        otool -L "${APP_BUNDLE}/Contents/MacOS/h323askw_bin" | tail -n +2 | grep "/Users/example"
+        otool -L "${APP_BUNDLE}/Contents/MacOS/h323askw_bin" | tail -n +2 | grep "/Users/"
         has_error=1
     fi
     
@@ -1147,7 +1147,7 @@ verify_bundle() {
     # ライブラリの依存関係をチェック (最初の行はファイル名なのでスキップ)
     log_info "  ライブラリの依存関係を確認..."
     for lib in "${APP_BUNDLE}/Contents/Frameworks/"*.dylib; do
-        if otool -L "$lib" | tail -n +2 | grep -q "/Users/example\|/opt/homebrew"; then
+        if otool -L "$lib" | tail -n +2 | grep -q "/Users/\|/opt/homebrew"; then
             log_warn "  $(basename $lib) に問題があるかもしれません"
             has_error=1
         fi
@@ -1156,9 +1156,9 @@ verify_bundle() {
     # プラグイン依存もチェック (Resources/plugins と Qt PlugIns)
     log_info "  プラグインの依存関係を確認..."
     while IFS= read -r -d '' plugin; do
-        if otool -L "$plugin" | tail -n +2 | grep -q "/Users/example\|/opt/homebrew"; then
+        if otool -L "$plugin" | tail -n +2 | grep -q "/Users/\|/opt/homebrew"; then
             log_warn "  $(basename "$plugin") に外部パス依存があります"
-            otool -L "$plugin" | tail -n +2 | grep "/Users/example\|/opt/homebrew" || true
+            otool -L "$plugin" | tail -n +2 | grep "/Users/\|/opt/homebrew" || true
             has_error=1
         fi
     done < <(find "${APP_BUNDLE}/Contents/Resources/plugins" "${APP_BUNDLE}/Contents/PlugIns" -name "*.dylib" -print0 2>/dev/null || true)

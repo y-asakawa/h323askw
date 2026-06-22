@@ -440,7 +440,7 @@ A: いいえ、1対1の通話のみ対応しています。
 
 H323ASKW は [callgen323](https://github.com/willamowius/callgen323) を元に、
 macOS Apple Silicon 向け H.323 ビデオクライアントとして改変したものです。
-派生元、変更内容、外部依存関係の概要は `NOTICE.md` を参照してください。
+派生元、変更内容、外部依存関係の概要は `NOTICE.md` と `CHANGES.md` を参照してください。
 
 ---
 
