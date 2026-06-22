@@ -45,7 +45,7 @@ jobs:
         working-directory: ptlib
         run: |
           ./configure --enable-ipv6 --disable-odbc --disable-sdl --disable-lua --disable-expat
-          make optnoshared
+          make debugnoshared
 
       - name: Build H323Plus
         working-directory: h323plus
@@ -53,7 +53,7 @@ jobs:
           PWLIBDIR: ${{ github.workspace }}/ptlib
         run: |
           ./configure --enable-h235 --enable-h235-256 --enable-h46017 --enable-h46026 --enable-h46019m --enable-h249 --enable-h46025 --enable-h460p --enable-h460pre --enable-h460com --enable-h460im --enable-h461 --enable-t120 --enable-t140 --enable-aec
-          make optnoshared
+          make debugnoshared
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
