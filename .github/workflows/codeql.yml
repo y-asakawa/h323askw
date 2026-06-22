@@ -66,6 +66,7 @@ jobs:
           PWLIBDIR: ${{ github.workspace }}/ptlib
           OPENH323DIR: ${{ github.workspace }}/h323plus
           PKG_CONFIG_PATH: /opt/homebrew/opt/qt/lib/pkgconfig:/opt/homebrew/opt/openssl@3/lib/pkgconfig
+          H323ASKW_DARWIN_ARCH: arm64
         run: make video
 
       - name: Perform CodeQL Analysis

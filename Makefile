@@ -85,6 +85,20 @@ $(OBJDIR)/%.o: %.mm
 # Robust macOS detection (use uname as fallback because OSTYPE may vary)
 DARWIN := $(shell uname -s 2>/dev/null)
 
+# Keep H323ASKW objects aligned with Homebrew/PTLib/H323Plus libraries on macOS.
+# CI may wrap the compiler for CodeQL, so make the target architecture explicit.
+ifeq ($(DARWIN),Darwin)
+H323ASKW_DARWIN_ARCH ?= $(shell uname -m 2>/dev/null)
+ifeq ($(H323ASKW_DARWIN_ARCH),aarch64)
+H323ASKW_DARWIN_ARCH := arm64
+endif
+ifneq ($(filter arm64 x86_64,$(H323ASKW_DARWIN_ARCH)),)
+H323ASKW_DARWIN_ARCH_FLAGS := -arch $(H323ASKW_DARWIN_ARCH)
+STDCCFLAGS += $(H323ASKW_DARWIN_ARCH_FLAGS)
+LDFLAGS += $(H323ASKW_DARWIN_ARCH_FLAGS)
+endif
+endif
+
 # Add USB HID implementation object (macOS only)
 # usb_hid_impl.mm uses IOKit and must be compiled separately to avoid ULONG conflict
 # usb_hid_controller.cpp is in SOURCES and will be built normally
@@ -211,6 +225,7 @@ debug-info:
 	@echo "OSTYPE: $(DARWIN)"
 	@echo "SDL2_FOUND: $(SDL2_FOUND)"
 	@echo "STDCCFLAGS: $(STDCCFLAGS)"
+	@echo "LDFLAGS: $(LDFLAGS)"
 	@echo "ENDLDLIBS: $(ENDLDLIBS)"
 	@echo "H264_PLUGIN_DIR: $(H264_PLUGIN_DIR)"
 	@echo "=================================="
@@ -447,7 +462,7 @@ ifeq ($(shell uname -s),Darwin)
 $(OBJDIR)/usb_hid_impl.o: usb_hid_impl.mm usb_hid_impl.h
 	@mkdir -p $(OBJDIR)
 	@echo "[CC] usb_hid_impl.mm (IOKit, no PTLib)"
-	$(CXX) -std=c++17 -O2 -Wall -c $< -o $@
+	$(CXX) $(H323ASKW_DARWIN_ARCH_FLAGS) $(CXXFLAGS) $(CPPFLAGS) -std=c++17 -O2 -Wall -c $< -o $@
 
 # Make main.o depend on usb_hid_impl.o to ensure correct build order
 $(OBJDIR)/main.o: $(OBJDIR)/usb_hid_impl.o
