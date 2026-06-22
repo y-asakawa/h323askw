@@ -17,7 +17,7 @@
 #define MAJOR_VERSION 2
 #define MINOR_VERSION 2
 #define BUILD_TYPE    ReleaseCode
-#define BUILD_NUMBER 2
+#define BUILD_NUMBER 5
 
 
 #endif  // _H323ASKW_VERSION_H

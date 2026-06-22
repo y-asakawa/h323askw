@@ -78,6 +78,7 @@
 #include <QFont>
 #include <QTextOption>
 #include <QString>
+#include <QThread>
 #endif
 #ifndef _WIN32
 #include <signal.h>
@@ -10181,6 +10182,23 @@ PBoolean MyH323Connection::OpenAudioChannel(PBoolean isEncoding, unsigned buffer
   
   // Get audio configuration from endpoint
   MyH323EndPoint& ep = dynamic_cast<MyH323EndPoint&>(GetEndPoint());
+
+#ifdef USE_QT6
+  // Incoming calls do not pass through onConnectClicked(), so ensure the latest
+  // UI selection is pushed before reading endpoint audio config.
+  QtVideoMainWindow* uiWindow = QtVideoManager::instance().mainWindow();
+  QCoreApplication* app = QCoreApplication::instance();
+  if (uiWindow != NULL && app != NULL) {
+    const Qt::ConnectionType syncType =
+        (QThread::currentThread() == app->thread())
+            ? Qt::DirectConnection
+            : Qt::BlockingQueuedConnection;
+    const bool ok = QMetaObject::invokeMethod(uiWindow, "onDeviceRowChanged", syncType);
+    PTRACE(2, "H323ASKW\t🔄 Pre-OpenAudioChannel UI device sync "
+           << (ok ? "succeeded" : "failed")
+           << " (isEncoding=" << isEncoding << ")");
+  }
+#endif
   
   // Check if audio is disabled
   if (ep.IsAudioDisabled()) {
