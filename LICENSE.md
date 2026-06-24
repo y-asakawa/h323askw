@@ -369,9 +369,10 @@ The Initial Developer of the Original Code is Benny L. Prijono.
 Portions created by Jan Willamowius are Copyright (C) 2008-2018
 Jan Willamowius. All Rights Reserved.
 
-Portions created by Yoshifumi Asakawa are Copyright (C) 2024-2025
+Portions created by Yoshifumi Asakawa are Copyright (C) 2024-2026
 Yoshifumi Asakawa. All Rights Reserved.
 
 Contributor(s):
 Equivalence Pty. Ltd.
-Y. Asakawa (2025) - H323ASKW Qt6 video client, macOS ARM64 port
+Y. Asakawa (2024-2026) - H323ASKW Qt6 video client,
+macOS Apple Silicon port and application extensions.

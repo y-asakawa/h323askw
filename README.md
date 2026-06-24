@@ -1,509 +1,398 @@
-# H323ASKW インストールマニュアル
+# H323ASKW
 
-このドキュメントでは、H323ASKWのインストール方法と初期設定について説明します。
+H323ASKW is an H.323 audio and video client for Apple Silicon Macs. It is
+derived from [CallGen323](https://github.com/willamowius/callgen323) and uses
+H323Plus, PTLib, Qt 6, and external media libraries.
 
----
+The application supports direct H.323 calls, gatekeeper-based calls, local
+audio and video device selection, and H.264, H.263, H.261, G.711, and G.722
+media.
 
-## 目次
+> **Binary distribution notice:** The reviewed development environment uses a
+> GPL-enabled FFmpeg build. Do not redistribute a DMG or application bundle
+> produced from that configuration until the applicable license compatibility
+> and distribution requirements have been resolved. See
+> [Third-Party Notices](THIRD-PARTY-NOTICES.md).
 
-1. [システム要件](#システム要件)
-2. [インストール方法](#インストール方法)
-3. [初回起動時の設定](#初回起動時の設定)
-4. [基本的な使い方](#基本的な使い方)
-5. [コマンドラインオプション](#コマンドラインオプション)
-6. [設定ファイル](#設定ファイル)
-7. [アンインストール](#アンインストール)
-8. [トラブルシューティング](#トラブルシューティング)
-9. [ソースからビルドする場合の注意事項](#ソースからビルドする場合の注意事項)
+## Contents
 
----
+1. [System Requirements](#system-requirements)
+2. [Installation](#installation)
+3. [First Launch](#first-launch)
+4. [Basic Usage](#basic-usage)
+5. [Command-Line Options](#command-line-options)
+6. [Configuration](#configuration)
+7. [Troubleshooting](#troubleshooting)
+8. [Building from Source](#building-from-source)
+9. [License and Third-Party Components](#license-and-third-party-components)
 
-## システム要件
+## System Requirements
 
-### 対応OS
+### Supported Systems
 
-- macOS 11.0 (Big Sur) 以降
-- Apple Silicon (M1/M2/M3/M4) Mac
+- macOS 11.0 Big Sur or later
+- Apple Silicon Mac (M1, M2, M3, M4, or later)
 
-> **注意**: 現在はApple Silicon専用です。Intel Macでは動作しません。
+The distributed application bundle is currently ARM64-only and does not run on
+Intel Macs.
 
-### 追加ソフトウェア
+### Runtime Dependencies
 
-**不要です。** 必要なライブラリは全てApp Bundle内に含まれています。
+The application bundle is intended to contain its required libraries.
+Homebrew, FFmpeg, and OpenSSL should not need to be installed separately on the
+target Mac.
 
-> ℹ️ Homebrew、FFmpeg、OpenSSL などを別途インストールする必要はありません。
+### Hardware
 
-### ハードウェア要件
+| Item | Minimum | Recommended |
+| --- | --- | --- |
+| Memory | 4 GB | 8 GB or more |
+| Storage | 200 MB | 500 MB |
+| Camera | Built-in or external webcam | |
+| Microphone | Built-in or external microphone | |
+| Network | 1 Mbps | 10 Mbps or more |
 
-| 項目 | 最小要件 | 推奨 |
-|------|----------|------|
-| メモリ | 4GB | 8GB以上 |
-| ストレージ | 200MB | 500MB |
-| カメラ | 内蔵/外付けWebカメラ | - |
-| マイク | 内蔵/外付けマイク | - |
-| ネットワーク | 1Mbps以上 | 10Mbps以上 |
+### Codecs
 
-### 対応コーデック
+| Media | Codecs |
+| --- | --- |
+| Video | H.264, H.263, H.261 |
+| Audio | G.711 mu-law/A-law, G.722 |
 
-| 種別 | コーデック |
-|------|-----------|
-| 映像 | H.264, H.263, H.261 |
-| 音声 | G.711 (μ-law/A-law), G.722 |
+## Installation
 
----
+### Install from a DMG
 
-## インストール方法
+1. Open the H323ASKW DMG.
+2. Drag `H323ASKW.app` into the `Applications` folder.
+3. Eject the H323ASKW volume.
 
-### 方法1: DMGファイルからインストール
+### Install the Application Bundle Directly
 
-1. **DMGファイルを開く**
-   
-   `H323ASKW-1.0.0.dmg` をダブルクリックしてマウントします。
+Copy `H323ASKW.app` to `/Applications` or another suitable location.
 
-2. **アプリケーションフォルダにコピー**
-   
-   開いたウィンドウで `H323ASKW.app` を `Applications` フォルダにドラッグ&ドロップします。
+## First Launch
 
-3. **DMGをアンマウント**
-   
-   Finderのサイドバーで H323ASKW ボリュームの取り出しボタンをクリックします。
+### Gatekeeper Warning
 
-### 方法2: App Bundleを直接コピー
+An unsigned build may be blocked because macOS cannot verify its developer.
+Use one of the following methods:
 
-1. `H323ASKW.app` を任意の場所（`/Applications` 推奨）にコピーします。
+1. Control-click `H323ASKW.app`, select **Open**, and confirm.
+2. Open **System Settings > Privacy & Security** and select **Open Anyway**.
+3. Remove the quarantine attribute from a build you obtained from a trusted
+   source:
 
-2. 完了です。
-
----
-
-## 初回起動時の設定
-
-### Gatekeeperの警告について
-
-署名されていないアプリの場合、以下の警告が表示されることがあります。
-
-```
-"H323ASKW"は、開発元を検証できないため開けません。
-```
-
-**対処方法:**
-
-1. **右クリックから開く（推奨）**
-   
-   - `H323ASKW.app` を右クリック（またはControl+クリック）
-   - 「開く」を選択
-   - 確認ダイアログで「開く」をクリック
-
-2. **システム設定から許可**
-   
-   - 「システム設定」→「プライバシーとセキュリティ」を開く
-   - 「セキュリティ」セクションで「このまま開く」をクリック
-
-3. **コマンドラインで検疫属性を削除**
-   
    ```bash
    xattr -cr /Applications/H323ASKW.app
    ```
 
-### カメラ・マイクの許可
+Removing quarantine disables a macOS security check. Only do this for an
+application bundle whose source and integrity you trust.
 
-初回起動時に、カメラとマイクへのアクセス許可を求めるダイアログが表示されます。
+### Camera and Microphone Access
 
-1. 「OK」または「許可」をクリックして許可します。
-2. 許可しないとビデオ通話機能が使用できません。
+Allow camera and microphone access when macOS prompts for permission. These
+permissions can be changed later under:
 
-後から変更する場合:
-- 「システム設定」→「プライバシーとセキュリティ」→「カメラ」/「マイク」
-- H323ASKW のチェックを ON にする
+**System Settings > Privacy & Security > Camera / Microphone**
 
----
+Restart H323ASKW after changing a permission.
 
-## 基本的な使い方
+## Basic Usage
 
-### ターミナルからの起動
+### Launch from Terminal
 
 ```bash
-# 基本的な起動
-/Applications/H323ASKW.app/Contents/MacOS/h323askw [オプション]
-
-# または、アプリディレクトリから
-cd /Applications/H323ASKW.app/Contents/MacOS
-./h323askw [オプション]
+/Applications/H323ASKW.app/Contents/MacOS/h323askw [options]
 ```
 
-### 発信（Make Call）
+Alternatively:
 
 ```bash
-# H.323アドレスに発信
-./h323askw -n 192.168.1.100
+cd /Applications/H323ASKW.app/Contents/MacOS
+./h323askw [options]
+```
 
-# ゲートキーパー経由で発信
+### Make a Call
+
+Call an H.323 address:
+
+```bash
+./h323askw -n 192.168.1.100
+```
+
+Call through a gatekeeper:
+
+```bash
 ./h323askw -g gatekeeper.example.com -n endpoint_alias
 ```
 
-### 着信待ち（Wait for Call）
+### Wait for an Incoming Call
 
 ```bash
-# 着信を待機
 ./h323askw -l
+```
 
-# 特定のポートで待機
+Listen on a specific port:
+
+```bash
 ./h323askw -l -p 1720
 ```
 
-### Finderからの起動
+### Launch from Finder
 
-1. `/Applications/H323ASKW.app` をダブルクリック
-2. ターミナルウィンドウが開き、デフォルト設定で起動します
+Open `/Applications/H323ASKW.app`. The packaged launcher starts H323ASKW with
+its default configuration.
 
----
+## Command-Line Options
 
-## コマンドラインオプション
+The available options can vary with the build. Run `h323askw --help` for the
+authoritative list.
 
-### 接続オプション
+### Connection Options
 
-| オプション | 説明 | 例 |
-|-----------|------|-----|
-| `-n <address>` | 発信先アドレス | `-n 192.168.1.100` |
-| `-g <gatekeeper>` | ゲートキーパーアドレス | `-g gk.example.com` |
-| `-l` | 着信待機モード | `-l` |
-| `-p <port>` | リスニングポート | `-p 1720` |
+| Option | Description | Example |
+| --- | --- | --- |
+| `-n <address>` | Destination address | `-n 192.168.1.100` |
+| `-g <gatekeeper>` | Gatekeeper address | `-g gk.example.com` |
+| `-l` | Wait for incoming calls | `-l` |
+| `-p <port>` | Listening port | `-p 1720` |
 
-### メディアオプション
+### Media Options
 
-| オプション | 説明 | 例 |
-|-----------|------|-----|
-| `--video` | ビデオ有効 | `--video` |
-| `--no-video` | ビデオ無効 | `--no-video` |
-| `-s <device>` | 音声デバイス | `-s "Default Audio Input"` |
-| `-v <device>` | ビデオデバイス | `-v "Default Video Input"` |
+| Option | Description | Example |
+| --- | --- | --- |
+| `--video` | Enable video | `--video` |
+| `--no-video` | Disable video | `--no-video` |
+| `-s <device>` | Select an audio device | `-s "Default Audio Input"` |
+| `-v <device>` | Select a video device | `-v "Default Video Input"` |
 
-### 表示オプション
+### Logging Options
 
-| オプション | 説明 | 例 |
-|-----------|------|-----|
-| `-t` | トレースレベル | `-t 3` |
-| `-o <file>` | トレース出力先 | `-o debug.log` |
-| `--help` | ヘルプ表示 | `--help` |
+| Option | Description | Example |
+| --- | --- | --- |
+| `-t <level>` | Set the trace level | `-t 3` |
+| `-o <file>` | Write trace output to a file | `-o debug.log` |
+| `--help` | Display help | `--help` |
 
-### 使用例
+Examples:
 
 ```bash
-# ビデオ通話で発信、トレースレベル3
+# Make a video call with trace level 3
 ./h323askw -n 192.168.1.100 --video -t 3
 
-# 着信待機、ログ出力
+# Wait for a call and write a trace log
 ./h323askw -l -t 4 -o /tmp/h323askw.log
 
-# ゲートキーパー経由でエイリアス指定発信
+# Call an alias through a gatekeeper
 ./h323askw -g 10.0.0.1 -n user@example.com --video
 ```
 
----
+## Configuration
 
-## 設定ファイル
+### User Preferences
 
-### ユーザー設定の保存場所
+Address history is stored in:
 
-アプリケーションの設定は以下の場所に保存されます:
+```text
+~/Library/Preferences/com.H323ASKW.VideoClient.plist
+```
 
-| 設定項目 | 保存場所 |
-|----------|----------|
-| アドレス履歴 | `~/Library/Preferences/com.H323ASKW.VideoClient.plist` |
+The application stores up to 20 recent addresses. To clear the history:
 
-#### アドレス履歴について
-
-- **保存場所**: `~/Library/Preferences/com.H323ASKW.VideoClient.plist`
-- **保存タイミング**: 接続時およびアプリ終了時に自動保存
-- **最大件数**: 20件（古い履歴は自動削除）
-- **形式**: macOS標準のplist形式
-
-履歴をクリアしたい場合:
 ```bash
-rm ~/Library/Preferences/com.H323ASKW.VideoClient.plist
+rm -f ~/Library/Preferences/com.H323ASKW.VideoClient.plist
 ```
 
-### プラグインパス
+### Plugin Layout
 
-プラグインは以下の場所から読み込まれます:
+Packaged plugins are loaded from:
 
-```
+```text
 H323ASKW.app/Contents/Resources/plugins/
-├── video/
-│   ├── H.264/
-│   │   └── h264_video_pwplugin.dylib
-│   ├── H.263-ffmpeg/
-│   │   └── h263-ffmpeg_video_pwplugin.dylib
-│   └── H.261-vic/
-│       └── h261-vic_video_pwplugin.dylib
-├── vidinput/
-│   └── vidinput_macos_pwplugin.dylib
+├── audio/
 ├── sound/
-│   └── portaudio_pwplugin.dylib
-└── audio/
-    ├── g722_audio_pwplugin.dylib
-    └── g7221_audio_pwplugin.dylib
+├── video/
+└── vidinput/
 ```
 
-### 環境変数
+Typical plugins include:
 
-必要に応じて以下の環境変数を設定できます:
+```text
+video/H.264/h264_video_pwplugin.dylib
+video/H.263-ffmpeg/h263-ffmpeg_video_pwplugin.dylib
+video/H.261-vic/h261-vic_video_pwplugin.dylib
+vidinput/vidinput_macos_pwplugin.dylib
+sound/portaudio_pwplugin.dylib
+audio/g722_audio_pwplugin.dylib
+```
 
-| 変数名 | 説明 |
-|--------|------|
-| `PTLIB_PLUGIN_DIR` | PTLibプラグインのパス |
-| `H323_PLUGIN_DIR` | H.323プラグインのパス |
-| `PTRACE_LEVEL` | デフォルトトレースレベル |
+### Environment Variables
+
+| Variable | Purpose |
+| --- | --- |
+| `PTLIB_PLUGIN_DIR` | PTLib plugin directory |
+| `PWLIB_PLUGIN_DIR` | Legacy PTLib plugin directory |
+| `H323_PLUGIN_DIR` | H.323 plugin directory |
+| `PTRACE_LEVEL` | Default trace level |
+
+Example:
 
 ```bash
 export PTRACE_LEVEL=4
 ./h323askw -l
 ```
 
----
+## Uninstallation
 
-## アンインストール
+Remove the application:
 
-### 手順
-
-1. **アプリケーションを削除**
-   
-   ```bash
-   rm -rf /Applications/H323ASKW.app
-   ```
-   
-   または、Finderで `H323ASKW.app` をゴミ箱にドラッグ
-
-2. **設定ファイルを削除（オプション）**
-   
-   ```bash
-   # アドレス履歴
-   rm -f ~/Library/Preferences/com.H323ASKW.VideoClient.plist
-   ```
-
-3. **ゴミ箱を空にする**
-
----
-
-## トラブルシューティング
-
-### アプリが起動しない
-
-#### 「Library not loaded」エラー
-
-```
-dyld: Library not loaded: @executable_path/../Frameworks/libh323.dylib
+```bash
+rm -rf /Applications/H323ASKW.app
 ```
 
-**対処**: App Bundleが破損している可能性があります。再インストールしてください。
+Optionally remove its preferences:
 
-#### 「This app is damaged」エラー
-
-```
-"H323ASKW.app"は壊れているため開けません。
+```bash
+rm -f ~/Library/Preferences/com.H323ASKW.VideoClient.plist
 ```
 
-**対処**: 検疫属性を削除します。
+## Troubleshooting
+
+### Application Does Not Start
+
+If `dyld` reports that a bundled library such as `libh323.dylib` cannot be
+loaded, the application bundle may be incomplete or damaged. Recreate or
+reinstall the bundle.
+
+If macOS reports that the application is damaged, verify the source of the
+bundle before removing quarantine:
+
 ```bash
 xattr -cr /Applications/H323ASKW.app
 ```
 
-### カメラ/マイクが使えない
+### Camera or Microphone Is Unavailable
 
-1. **権限を確認**
-   - 「システム設定」→「プライバシーとセキュリティ」→「カメラ」/「マイク」
-   - H323ASKW が許可されているか確認
+1. Check the Camera and Microphone permissions in System Settings.
+2. Restart H323ASKW after changing permissions.
+3. Launch from Terminal and capture a trace:
 
-2. **アプリを再起動**
-   - 権限を変更した後は再起動が必要です
-
-3. **ターミナルから起動してログを確認**
    ```bash
    ./h323askw -l -t 4 2>&1 | tee debug.log
    ```
 
-### 通話が確立しない
+### A Call Cannot Be Established
 
-#### ファイアウォールの確認
+H.323 commonly uses:
 
-H.323では以下のポートを使用します:
+| Port | Protocol | Purpose |
+| --- | --- | --- |
+| 1720 | TCP | H.225 call signaling |
+| 1719 | UDP | Gatekeeper RAS |
+| Dynamic ports | UDP | RTP audio and video |
 
-| ポート | プロトコル | 用途 |
-|--------|-----------|------|
-| 1720 | TCP | H.225 (通話制御) |
-| 1719 | UDP | RAS (ゲートキーパー通信) |
-| 動的 | UDP | RTP (音声/映像データ) |
+Allow H323ASKW through the macOS firewall. NAT environments may also require
+port forwarding or H.460 support, depending on the network and remote
+endpoint.
 
-**macOSファイアウォールで許可:**
+### No Video Is Displayed
 
-```bash
-# 着信接続を許可（初回起動時にダイアログが出ます）
-# または「システム設定」→「ファイアウォール」→「オプション」で設定
-```
+1. Confirm that the remote endpoint supports H.264, H.263, or H.261.
+2. Capture a detailed trace:
 
-#### NAT/ルーター設定
-
-NAT環境では、ポートフォワーディングが必要な場合があります:
-- TCP 1720 → H323ASKWを実行するMacのIPアドレス
-
-### 映像が表示されない
-
-1. **コーデックの互換性を確認**
-   - 相手端末が H.264、H.263、または H.261 に対応しているか確認
-   
-2. **トレースログで確認**
    ```bash
    ./h323askw -n 192.168.1.100 --video -t 5 -o video_debug.log
    ```
-   
-3. **コーデックフォールバック**
-   - H.264で問題がある場合、H.263 → H.261 の順で自動的にフォールバックします
 
-### ビデオ送信が2フレーム目以降で停止する（Buffer too small エラー）
+3. Confirm that the expected codec plugins were loaded from the application
+   bundle.
 
-H.323 Plus ライブラリに既知のバグがあります。以下のエラーが出る場合：
+### Video Stops After the First Frame
 
-```
+An affected H323Plus build can report:
+
+```text
 Buffer too small (2000 bytes), required: 1382400 bytes
 Failed to read data from video grabber
 ```
 
-**原因**: `h323pluginmgr.cxx` の `bytesPerFrame = outputDataSize;` という行が、
-生フレームサイズ（1,382,400バイト）をMTUサイズ（2,000バイト）で誤って上書きしています。
+See [Required H323Plus Video Patch](#required-h323plus-video-patch).
 
-**修正方法**:
+### No Audio Is Sent or Received
 
-1. `h323plus/src/h323pluginmgr.cxx` を編集
-2. 1858行目付近と1960行目付近の以下の行をコメントアウト:
-   ```cpp
-   // bytesPerFrame = outputDataSize;  // BUG FIX
-   ```
-3. H.323 Plus を再ビルド: `cd h323plus && make`
-
-詳細は `docs/H323PLUS_BUGFIX_bytesPerFrame.txt` を参照してください
-
-### 音声が聞こえない/届かない
-
-1. **音声デバイスの確認**
-   ```bash
-   # 利用可能なデバイスを表示
-   ./h323askw --list-audio-devices
-   ```
-
-2. **システムの音量設定を確認**
-   - 入出力デバイスが正しく設定されているか確認
-
-3. **ミュート状態の確認**
-   - 通話中にマイクミュートになっていないか確認
-
-### ログの取得方法
-
-問題報告時は以下のログを取得してください:
+Check the selected input/output devices, system volume, and microphone mute
+state. To inspect available devices when supported by the build:
 
 ```bash
-# 詳細ログを取得
-./h323askw [通常のオプション] -t 6 -o ~/Desktop/h323askw_debug.log 2>&1
-
-# ログファイルの場所
-~/Desktop/h323askw_debug.log
+./h323askw --list-audio-devices
 ```
 
----
+For G.722 calls that connect but transmit no usable audio, see
+[G.722 Packetization Fix](#g722-packetization-fix).
 
-## サポート
+### Collect a Trace Log
 
-### ログファイルの場所
+```bash
+./h323askw [normal options] -t 6 \
+  -o ~/Desktop/h323askw_debug.log 2>&1
+```
 
-- アプリケーションログ: 起動時に `-o` オプションで指定した場所
-- システムログ: `Console.app` で「h323askw」を検索
+System-level messages can also be found by searching for `h323askw` in
+`Console.app`.
 
-### よくある質問
+## Building from Source
 
-**Q: Intel Macで使えますか？**
+The build expects compatible H323Plus and PTLib source trees. See
+[the build guide](docs/APP_BUNDLE_BUILD_GUIDE.md) for application bundle
+packaging details.
 
-A: 現在はApple Silicon専用です。Intel Mac対応版は別途ビルドが必要です。
+### Required H323Plus Video Patch
 
-**Q: WindowsやLinuxで使えますか？**
+Some H323Plus versions overwrite the raw video frame size with the RTP output
+buffer size in `h323plus/src/h323pluginmgr.cxx`. This causes video capture to
+fail after the first frame.
 
-A: このApp BundleはmacOS専用です。他のプラットフォームでは、ソースからビルドする必要があります。
+In the affected locations, retain the buffer resize but remove or disable the
+assignment to `bytesPerFrame`:
 
-**Q: 複数の通話を同時にできますか？**
+```cpp
+dst.SetMinSize(outputDataSize);
+// bytesPerFrame = outputDataSize;
+```
 
-A: いいえ、1対1の通話のみ対応しています。
+```cpp
+bufferRTP.SetMinSize(outputDataSize);
+// bytesPerFrame = outputDataSize;
+```
 
----
+Rebuild H323Plus after applying the change:
 
-## ライセンス
+```bash
+cd h323plus
+make clean
+make
+```
 
-このソフトウェアはMozilla Public License Version 1.0 (MPL 1.0) の下で配布されています。
-詳細は `LICENSE.md` を参照してください。
+Symptoms of an unpatched build include:
 
-H323ASKW は [callgen323](https://github.com/willamowius/callgen323) を元に、
-macOS Apple Silicon 向け H.323 ビデオクライアントとして改変したものです。
-派生元、変更内容、外部依存関係の概要は `NOTICE.md` と `CHANGES.md` を参照してください。
+- `Buffer too small (2000 bytes), required: 1382400 bytes`
+- remote video freezing or not appearing
+- every H.264 output frame being encoded as an I-frame
+- severely reduced camera frame rate
 
----
+### G.722 Packetization Fix
 
-## ソースからビルドする場合の注意事項
-
-### H.323 Plus ライブラリの必須パッチ
-
-ソースからビルドする場合、**H.323 Plus ライブラリに既知のバグがあるため、必ず以下のパッチを適用してください**。
-このパッチを適用しないと、ビデオ通話が正常に動作しません。
-
-#### バグの概要
-
-`h323pluginmgr.cxx` の `bytesPerFrame = outputDataSize;` という行が、
-ビデオフレームバッファサイズを誤ってMTUサイズ（2000バイト）で上書きし、
-2フレーム目以降のカメラ読み込みが失敗します。
-
-#### パッチ適用手順
-
-1. **ファイルを編集**: `h323plus/src/h323pluginmgr.cxx`
-
-2. **1858行目付近を修正**:
-   ```cpp
-   dst.SetMinSize(outputDataSize);
-   // bytesPerFrame = outputDataSize;  // BUG FIX: This was incorrectly overwriting the raw frame size with MTU size
-   ```
-
-3. **1960行目付近を修正**:
-   ```cpp
-   bufferRTP.SetMinSize(outputDataSize);
-   // bytesPerFrame = outputDataSize;  // BUG FIX: This was incorrectly overwriting the raw frame size with MTU size
-   ```
-
-4. **H.323 Plus を再ビルド**:
-   ```bash
-   cd h323plus
-   make clean
-   make
-   ```
-
-#### 詳細ドキュメント
-
-パッチの詳細、症状の説明、検証方法については以下を参照してください:
-- `docs/H323PLUS_BUGFIX_bytesPerFrame.txt`
-
-#### パッチ未適用時の症状
-
-- "Buffer too small (2000 bytes), required: 1382400 bytes" エラー
-- 相手側で映像が固まる、または表示されない
-- H.264エンコーダーが全てI-Frameを出力する
-- カメラFPSが著しく低下する
-
-### G.722 接続で「相手にこちらの音声が届かない」場合の修正
-
-G.722（64k）接続時、送信側のRTPパケット化が 1ms（1フレーム）になっている環境では、
-相手機器との組み合わせによっては受話側で実質無音になることがあります。
-
-ソースからビルドする場合は、`h323plus/src/channels.cxx` の `H323_RTPChannel::Transmit()` で
-**G.722送信時のみ 20ms 固定（1ms × 20フレーム）** にしてください。
+Some remote endpoints cannot use G.722 audio when the sender transmits one
+1 ms frame per RTP packet. In affected H323Plus builds,
+`H323_RTPChannel::Transmit()` in `h323plus/src/channels.cxx` should use 20
+frames per packet for G.722:
 
 ```cpp
 unsigned framesInPacket = capability->GetTxFramesInPacket();
 rtpPayloadType = GetRTPPayloadType();
-...
+
 if (isAudio && rtpPayloadType == RTP_DataFrame::G722) {
   framesInPacket = 20;
 } else if (framesInPacket > 8) {
@@ -511,26 +400,63 @@ if (isAudio && rtpPayloadType == RTP_DataFrame::G722) {
 }
 ```
 
-#### 反映手順
+Rebuild H323Plus and H323ASKW:
 
-1. `h323plus/src/channels.cxx` を修正
-2. `h323plus` を再ビルド
-   ```bash
-   cd h323plus
-   make clean
-   make
-   ```
-3. `h323askw` を再ビルド
-   ```bash
-   cd ../h323askw
-   make clean
-   make
-   ```
+```bash
+cd h323plus
+make clean
+make
 
-#### ログ確認ポイント
+cd ../h323askw
+make clean
+make
+```
 
-通話時ログに以下のように出れば、20msパケット化が有効です。
+The trace should then contain a line similar to:
 
-- `Transmit G.722-64k thread started: ... size=20*8=160`
+```text
+Transmit G.722-64k thread started: ... size=20*8=160
+```
 
-`size=1*8=8` のままなら、修正済みライブラリがリンクされていない可能性があります。
+If it still reports `size=1*8=8`, the application is probably linked to an
+unpatched H323Plus library.
+
+## License and Third-Party Components
+
+H323ASKW is derived from the
+[CallGen323](https://github.com/willamowius/callgen323) project. CallGen323 was
+originally developed by Benny L. Prijono and was later maintained and extended
+by Jan Willamowius and other contributors.
+
+Files derived from CallGen323 are distributed under the Mozilla Public License
+Version 1.0. See:
+
+- [LICENSE.md](LICENSE.md)
+- [NOTICE.md](NOTICE.md)
+- [CHANGES.md](CHANGES.md)
+
+H323ASKW uses or can be built with third-party libraries and codec plugins,
+including H323Plus, PTLib, Qt, FFmpeg, x264, x265, OpenSSL, PortAudio, and
+SpeexDSP. These components remain subject to their respective licenses and are
+not relicensed under the H323ASKW license.
+
+Additional information:
+
+- [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md): public attribution and
+  third-party license index
+- [docs/DEPENDENCY-LICENSE-REVIEW.md](docs/DEPENDENCY-LICENSE-REVIEW.md):
+  build-dependent dependency and binary-release license review record
+
+Binary distribution requirements depend on the exact libraries, plugins,
+build options, and linking methods used in a release. Before publishing a DMG
+or application bundle, inspect the completed artifact and include all required
+license texts, copyright notices, and source-code availability materials.
+
+H323ASKW is an independent project and is not endorsed by or affiliated with
+the original CallGen323 developers or any third-party project.
+
+## Additional Documentation
+
+- [Japanese installation guide](docs/INSTALL_GUIDE.md)
+- [macOS application bundle build guide](docs/APP_BUNDLE_BUILD_GUIDE.md)
+- [Security policy](SECURITY.md)

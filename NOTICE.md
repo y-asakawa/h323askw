@@ -1,33 +1,69 @@
-# Notices
+## Notices
 
-H323ASKW is derived from the H.323 call generator project:
+H323ASKW
 
-- Upstream project: https://github.com/willamowius/callgen323
-- Upstream author/maintainer: Jan Willamowius and contributors
-- Original project purpose: H.323 call generator for load testing
+H323ASKW is derived from the CallGen323 H.323 call generator project.
 
-H323ASKW has been modified into a macOS Apple Silicon H.323 video client with
-Qt6 UI integration, app bundle packaging, local media device handling, recording,
-and related application features. A summary of modifications and dates is kept
-in `CHANGES.md`.
+* Upstream project: https://github.com/willamowius/callgen323
+* Original Code: CallGen323
+* Initial Developer: Benny L. Prijono
+* Upstream maintainer: Jan Willamowius
+* Upstream contributors: Equivalence Pty. Ltd. and other contributors
+* Original purpose: H.323 call generation and load testing
 
-The upstream callgen323 source files identify their license as Mozilla Public
-License Version 1.0. H323ASKW keeps the Mozilla Public License 1.0 text in
-`LICENSE.md`. Source files derived from the upstream project retain their
-original copyright notices where present.
+H323ASKW has been modified and extended into a macOS Apple Silicon H.323
+audio and video client. The modifications include Qt 6 user-interface
+integration, macOS application bundle packaging, local audio and video device
+handling, call recording, and related application features.
 
-H323ASKW also depends on external projects including:
+A summary of the modifications and their dates is provided in `CHANGES.md`.
 
-- PTLib: https://github.com/willamowius/ptlib
-- H323Plus: https://github.com/willamowius/h323plus
-- Qt: https://www.qt.io/
-- FFmpeg: https://ffmpeg.org/
-- x264: https://www.videolan.org/developers/x264.html
-- SpeexDSP: https://www.speex.org/
-- Platform frameworks provided by macOS
+The CallGen323 source files are licensed under the Mozilla Public License
+Version 1.0. Files derived from or containing CallGen323 source code remain
+subject to the Mozilla Public License Version 1.0 and retain the original
+copyright and license notices where present.
 
-Those dependencies remain under their respective licenses. Source publication of
-H323ASKW does not include those third-party libraries. If distributing a binary
-or app bundle that includes third-party dynamic libraries or plugins, include
-the corresponding third-party license notices and comply with the distribution
-terms of each bundled component.
+The complete Mozilla Public License Version 1.0 text is included in
+[`LICENSE.md`](LICENSE.md).
+
+Copyright notices for H323ASKW modifications are included in the corresponding
+source files.
+
+## Source Code Availability
+
+The source code for H323ASKW, including modifications to the Covered Code, is
+available from the H323ASKW GitHub repository under the terms of the Mozilla
+Public License Version 1.0.
+
+## Third-Party Software
+
+H323ASKW uses or may be built with the following external projects:
+
+* PTLib: https://github.com/willamowius/ptlib
+* H323Plus: https://github.com/willamowius/h323plus
+* Qt: https://www.qt.io/
+* FFmpeg: https://ffmpeg.org/
+* x264: https://www.videolan.org/developers/x264.html
+* x265: https://www.x265.org/
+* OpenSSL: https://openssl-library.org/
+* PortAudio: https://www.portaudio.com/
+* SpeexDSP: https://www.speex.org/
+* Frameworks and libraries provided by macOS
+
+These projects remain subject to their respective licenses. Publication of the
+H323ASKW source code does not, by itself, include or relicense these third-party
+projects.
+
+Third-party libraries and codec plugins are documented in
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). Build-specific dependency
+and license review information is maintained in
+[`docs/DEPENDENCY-LICENSE-REVIEW.md`](docs/DEPENDENCY-LICENSE-REVIEW.md).
+
+Binary releases, macOS application bundles, installers, and other packaged
+distributions that include third-party libraries, frameworks, plugins, or
+executables must include the applicable copyright notices, license texts, and
+source-code offers or source-code availability information required by those
+third-party licenses.
+
+No endorsement by the original CallGen323 developers, contributors, or
+third-party software projects is implied.
