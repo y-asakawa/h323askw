@@ -14,6 +14,12 @@ media.
 > and distribution requirements have been resolved. See
 > [Third-Party Notices](THIRD-PARTY-NOTICES.md).
 
+
+## Screenshot
+<p>
+  <img src="h323askw01.png" alt="h323askw screenshot 1" width="50%">
+</p>
+
 ## Contents
 
 1. [System Requirements](#system-requirements)
