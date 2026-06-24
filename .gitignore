@@ -49,6 +49,7 @@ moc_*.cpp
 
 # Editor/IDE
 .vscode/
+*.code-workspace
 *.swp
 *.swo
 *~
