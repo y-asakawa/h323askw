@@ -12,6 +12,7 @@ on:
       - "NOTICE"
       - "*.png"
       - ".github/dependabot.yml"
+      - ".github/workflows/codeql.yml"
   pull_request:
     branches: ["master"]
     paths-ignore:
@@ -22,6 +23,7 @@ on:
       - "NOTICE"
       - "*.png"
       - ".github/dependabot.yml"
+      - ".github/workflows/codeql.yml"
 
 permissions:
   actions: read
