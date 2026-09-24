@@ -9,7 +9,15 @@ H323ASKW is derived from the CallGen323 H.323 call generator project.
 * Initial Developer: Benny L. Prijono
 * Upstream maintainer: Jan Willamowius
 * Upstream contributors: Equivalence Pty. Ltd. and other contributors
+* H323ASKW contributor: Y. Asakawa (2024-2026) - Qt 6 video client,
+  macOS Apple Silicon port, and application extensions
 * Original purpose: H.323 call generation and load testing
+
+Portions created by Jan Willamowius are Copyright (C) 2008-2018
+Jan Willamowius. All Rights Reserved.
+
+Portions created by Yoshifumi Asakawa are Copyright (C) 2024-2026
+Yoshifumi Asakawa. All Rights Reserved.
 
 H323ASKW has been modified and extended into a macOS Apple Silicon H.323
 audio and video client. The modifications include Qt 6 user-interface

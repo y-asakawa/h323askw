@@ -443,9 +443,15 @@ A: いいえ、1対1の通話のみ対応しています。
 
 ## ライセンス
 
-このソフトウェアはMozilla Public License Version 1.0 (MPL 1.0) の下で配布されています。
-詳細は `LICENSE.md` を参照してください。
-派生元、変更内容、外部依存関係の概要は `NOTICE.md` と `CHANGES.md` を参照してください。
+CallGen323由来のソースファイルにはMozilla Public License Version 1.0
+(MPL 1.0)が適用されます。H323ASKW独自のソースファイルやビルドスクリプトも、
+別記のない限りMPL 1.0で配布します。ライセンス全文、派生元、変更履歴は
+[`LICENSE.md`](../LICENSE.md)、[`NOTICE.md`](../NOTICE.md)、
+[`CHANGES.md`](../CHANGES.md)を参照してください。
+
+H323Plus、PTLib、Qt、FFmpegなどの第三者コンポーネントには、それぞれの
+ライセンスが適用されます。詳細は
+[`THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md)を参照してください。
 
 ---
 

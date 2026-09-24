@@ -350,29 +350,22 @@ agree to work with affected parties to distribute responsibility on an
 equitable basis.
 
 
-## Exhibit A - H323ASKW Notice
+EXHIBIT A.
 
-The contents of this file are subject to the Mozilla Public License
+``The contents of this file are subject to the Mozilla Public License
 Version 1.0 (the "License"); you may not use this file except in
 compliance with the License. You may obtain a copy of the License at
-https://www.mozilla.org/MPL/
+http://www.mozilla.org/MPL/
 
 Software distributed under the License is distributed on an "AS IS"
 basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
 the License for the specific language governing rights and limitations
 under the License.
 
-The Original Code is CallGen323.
+The Original Code is ______________________________________.
 
-The Initial Developer of the Original Code is Benny L. Prijono.
+The Initial Developer of the Original Code is ________________________.
+Portions created by ______________________ are Copyright (C) ______
+_______________________. All Rights Reserved.
 
-Portions created by Jan Willamowius are Copyright (C) 2008-2018
-Jan Willamowius. All Rights Reserved.
-
-Portions created by Yoshifumi Asakawa are Copyright (C) 2024-2026
-Yoshifumi Asakawa. All Rights Reserved.
-
-Contributor(s):
-Equivalence Pty. Ltd.
-Y. Asakawa (2024-2026) - H323ASKW Qt6 video client,
-macOS Apple Silicon port and application extensions.
+Contributor(s): ______________________________________.''
