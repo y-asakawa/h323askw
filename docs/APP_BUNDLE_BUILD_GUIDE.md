@@ -36,6 +36,24 @@ H323ASKWは複数のダイナミックライブラリ（dylib）に依存して�
 - Xcode Command Line Tools
 - Homebrew
 
+アプリ本体のクリーンビルド手順は[README](../README.md#building-from-source)と
+[Build CI](../.github/workflows/build.yml)を参照してください。Bundle作成は別工程で、
+ビデオ・音声プラグインと依存ライブラリの準備が追加で必要です。
+
+`create_app_bundle.sh`は、既定で公開H323Plusソースの
+`h323plus/plugins/video/`からH.264などのプラグインを探します。
+H.264プラグインはH323Plusのconfigure後に
+`make -C h323plus/plugins/video/H.264`などで別途ビルドしてください。
+このプラグインの現行Homebrew環境でのビルド・実行互換性は、Build CIの
+検証対象外です。独自のプラグインツリーを使う場合だけ、
+`H323PLUS_PLUGINS_DIR`に`H.264/`を含む親ディレクトリを指定します。
+非公開の`y-asakawa/h323plus-plugins`は公開版の本体ビルドに必須ではありません。
+一方、Bundle作成で必要な`vidinput_macos_pwplugin.dylib`と
+`portaudio_pwplugin.dylib`のソースは、現時点の公開PTLibにはありません。
+これらを別途入手・ビルドできない場合、同等のカメラ・音声機能付きBundleは
+第三者が再現できません。スクリプトは不足を事前に検出して停止します。
+検証で外部絶対パスなどの依存問題が見つかった場合もBundle作成は失敗します。
+
 ### 必要なファイル
 
 | 種別 | ファイル | 場所 |
@@ -171,6 +189,12 @@ Mach-O 64-bit executable arm64
 ```bash
 cd /path/to/h323askw
 ./create_app_bundle.sh
+```
+
+既存の`dist/`を上書きせずに試す場合は、`OUTPUT_DIR`で出力先を指定できます。
+
+```bash
+OUTPUT_DIR=/tmp/h323askw-bundle-test ./create_app_bundle.sh
 ```
 
 ### 2. 実行結果

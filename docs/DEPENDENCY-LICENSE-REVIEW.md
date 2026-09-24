@@ -25,6 +25,12 @@ The H323Plus Plugins repository was private when reviewed. Preserve access to
 the source revision and its history for as long as a release containing those
 plugins is distributed.
 
+The bundle script now defaults to the public H323Plus plugin sources instead.
+The private plugin revision above is historical review evidence, not a required
+build dependency. Review the exact plugin sources and binary selected for each
+release; this record does not establish equivalence between the public and
+private plugin builds.
+
 ## Reviewed Local FFmpeg Build
 
 The Homebrew FFmpeg build reviewed on the development machine reported:
@@ -67,6 +73,7 @@ distributed with the release artifact.
 | libjpeg-turbo | IJG, zlib, and BSD 3-Clause |
 | JPEG XL | BSD 3-Clause |
 | LAME | LGPL 2.0-or-later |
+| mpg123 / libmpg123 | LGPL 2.1-only (Homebrew formula metadata checked 2026-09-24; verify the bundled build) |
 | libogg | BSD 3-Clause |
 | libpng | libpng 2.0 |
 | libsoxr | LGPL 2.1-or-later |

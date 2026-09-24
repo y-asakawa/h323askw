@@ -28,9 +28,9 @@ BUNDLE_ID="com.h323askw.app"
 
 # ソースパス (スクリプト位置から相対的に導出)
 CALLGEN_DIR="${SCRIPT_DIR}"
-H323PLUS_DIR="${SCRIPT_DIR}/../h323plus"
-H323PLUS_PLUGINS_DIR="${SCRIPT_DIR}/../h323plus-plugins"
-PTLIB_DIR="${SCRIPT_DIR}/../ptlib"
+H323PLUS_DIR="${H323PLUS_DIR:-${SCRIPT_DIR}/../h323plus}"
+H323PLUS_PLUGINS_DIR="${H323PLUS_PLUGINS_DIR:-${H323PLUS_DIR}/plugins/video}"
+PTLIB_DIR="${PTLIB_DIR:-${SCRIPT_DIR}/../ptlib}"
 
 # Homebrew ディレクトリ (環境変数または自動検出)
 if [ -n "${HOMEBREW_PREFIX}" ]; then
@@ -45,7 +45,7 @@ else
 fi
 
 # 出力ディレクトリ
-OUTPUT_DIR="${CALLGEN_DIR}/dist"
+OUTPUT_DIR="${OUTPUT_DIR:-${CALLGEN_DIR}/dist}"
 APP_BUNDLE="${OUTPUT_DIR}/${APP_NAME}.app"
 APP_RESOURCES="${APP_BUNDLE}/Contents/Resources"
 APP_ICON_NAME="${APP_NAME}.icns"
@@ -266,6 +266,16 @@ check_prerequisites() {
         missing=1
     else
         log_info "  Found H.264 plugin: ${H323PLUS_PLUGINS_DIR}/H.264/h264_video_pwplugin.dylib"
+    fi
+
+    # These macOS PTLib plugins are not part of the upstream PTLib checkout.
+    if [ ! -f "${PTLIB_DIR}/plugins/vidinput_macos/vidinput_macos_pwplugin.dylib" ]; then
+        log_error "macOS カメラプラグインが見つかりません: ${PTLIB_DIR}/plugins/vidinput_macos/vidinput_macos_pwplugin.dylib"
+        missing=1
+    fi
+    if [ ! -f "${PTLIB_DIR}/lib_Darwin_aarch64/device/sound/portaudio_pwplugin.dylib" ]; then
+        log_error "PortAudio プラグインが見つかりません: ${PTLIB_DIR}/lib_Darwin_aarch64/device/sound/portaudio_pwplugin.dylib"
+        missing=1
     fi
     
     # アイコン素材
@@ -552,6 +562,7 @@ copy_libraries() {
         "jpeg-xl:libjxl_threads"
         "jpeg-xl:libjxl_cms"
         "lame:libmp3lame"
+        "mpg123:libmpg123"
         "openjpeg:libopenjp2"
         "opus:libopus"
         "rav1e:librav1e"
@@ -1181,7 +1192,8 @@ verify_bundle() {
     if [ $has_error -eq 0 ]; then
         log_success "App Bundle の検証が完了しました (問題なし)"
     else
-        log_warn "いくつかの問題が見つかりました。確認してください。"
+        log_error "App Bundle の依存関係に問題があります。"
+        return 1
     fi
 }
 

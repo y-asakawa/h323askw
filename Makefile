@@ -6,6 +6,7 @@
 
 PROG		= h323askw
 SOURCES		= main.cxx
+.DEFAULT_GOAL := video
 
 # USB HID Controller for physical mute button (Jabra, Plantronics, etc.)
 # macOS only - requires IOKit framework
@@ -42,21 +43,21 @@ else
   $(warning pkg-config not found - Qt6 UI may not work. Install pkg-config.)
 endif
 
-# moc compiler for Q_OBJECT classes
-MOC := /opt/homebrew/share/qt/libexec/moc
+# moc compiler for Q_OBJECT classes (override with MOC=... if needed)
+QT6_MOC_DIR := $(shell $(PKG_CONFIG) --variable=libexecdir Qt6Core 2>/dev/null)
+MOC ?= $(if $(QT6_MOC_DIR),$(QT6_MOC_DIR)/moc,moc)
 endif
 
 # Control verbosity: set QUIET=0 to enable informational messages, QUIET=1 (default) to suppress them
 QUIET ?= 1
 
-# Set up H323Plus environment variables
-export PWLIBDIR := ../ptlib
-export OPENH323DIR := ../h323plus
-export PWLIBPLUGINDIR := ../h323plus/plugins
-
-ifndef OPENH323DIR
-OPENH323DIR=$(HOME)/h323plus
-endif
+# Sibling source trees are the default; callers may override either location.
+PWLIBDIR ?= ../ptlib
+OPENH323DIR ?= ../h323plus
+override PWLIBDIR := $(abspath $(PWLIBDIR))
+override OPENH323DIR := $(abspath $(OPENH323DIR))
+PWLIBPLUGINDIR ?= $(OPENH323DIR)/plugins
+export PWLIBDIR OPENH323DIR PWLIBPLUGINDIR
 
 # Check if H323Plus directory exists
 ifeq ($(wildcard $(OPENH323DIR)/openh323u.mak),)
@@ -137,19 +138,15 @@ ifeq ($(SPEEXDSP_FOUND),0)
   $(warning SpeexDSP not found - echo cancellation / noise suppression disabled)
 endif
 
-# H.264 plugin support - using unified plugin only
-H264_PLUGIN_DIR := ../h323plus/plugins/video/H.264
+# Optional locally built unified H.264 plugin
+H264_PLUGIN_DIR ?= $(OPENH323DIR)/plugins/video/H.264
 H264_UNIFIED_PLUGIN := $(H264_PLUGIN_DIR)/h264_plugin_h323plus.dylib
 
-# Check for unified H.264 plugin
 ifneq ($(wildcard $(H264_UNIFIED_PLUGIN)),)
 	ifeq ($(QUIET),0)
 		$(info Found unified H.264 plugin at $(H264_UNIFIED_PLUGIN))
 	endif
   STDCCFLAGS += -DH264_PLUGIN_AVAILABLE -DH264_UNIFIED_PLUGIN
-else
-  $(warning H.264 plugin not found - H.264 video codec may not be available)
-  $(warning Run 'make build-h264-unified-plugin' to build the unified H.264 plugin)
 endif
 
 # Video support - always enable for this application
@@ -163,7 +160,7 @@ STDCCFLAGS += -DH323_H239
 
 # macOS USB camera support
 ifeq ($(OSTYPE),Darwin)
-  VIDINPUT_MACOS := ../ptlib/plugins/vidinput_macos/libvidinput_macos.dylib
+  VIDINPUT_MACOS := $(PWLIBDIR)/plugins/vidinput_macos/vidinput_macos_pwplugin.dylib
   ifneq ($(wildcard $(VIDINPUT_MACOS)),)
     ifeq ($(QUIET),0)
       $(info Found macOS video input plugin)
@@ -173,8 +170,6 @@ ifeq ($(OSTYPE),Darwin)
     $(warning macOS video input plugin not found - USB camera support may not work)
     $(warning Build vidinput_macos plugin in PTLib)
   endif
-  # Set plugin directory for PTLib plugins
-  STDCCFLAGS += -DPTLIB_PLUGIN_DIR=\"../ptlib/lib_Darwin_aarch64\"
 endif
 
 # Additional macOS-specific flags
@@ -188,32 +183,18 @@ ifeq ($(OSTYPE),Darwin)
   ENDLDLIBS += -framework AVFoundation -framework Foundation
 endif
 
-# Sanitize ENDLDLIBS using a concise shell pipeline:
-#  - remove exact tokens '-multiply_defined' and 'suppress'
-#  - drop any -L path referencing the old Homebrew OpenSSL Cellar that no longer exists
-#  - remove duplicate tokens while preserving first occurrence order
+# Sanitize legacy linker flags and deduplicate while preserving order.
 ORIG_ENDLDLIBS := $(ENDLDLIBS)
 # Convert token stream so that '-framework NAME' becomes a single token, then
 # filter out obsolete tokens and deduplicate while preserving order.
 ENDLDLIBS := $(shell printf "%s" "$(ORIG_ENDLDLIBS)" \
 	| perl -pe 's/\s+/\n/g' \
 	| awk '\
-		{ if ($$0 == "-multiply_defined" || $$0 == "suppress" || $$0 == "/opt/homebrew/Cellar/openssl@3/3.5.1/lib") next; \
+		{ if ($$0 == "-multiply_defined" || $$0 == "suppress") next; \
 			if ($$0 == "-framework") { getline name; print "-framework " name } else { print $$0 } \
 		}' \
 	| awk '!seen[$$0]++ { printf "%s ", $$0 }')
-ENDLDLIBS := $(filter-out -L/opt/homebrew/Cellar/openssl@3/3.5.1/lib,$(ENDLDLIBS))
-LDFLAGS := $(filter-out -L/opt/homebrew/Cellar/openssl@3/3.5.1/lib,$(LDFLAGS))
-
-# Sanitize LDFLAGS coming from included makefiles: remove obsolete flags like
-# '-multiply_defined' and stray 'suppress', and collapse duplicate OpenSSL -L
-# entries into a single occurrence while preserving order.
-ORIG_LDFLAGS := $(LDFLAGS)
-HAS_OPENSSL_L := $(filter -L/opt/homebrew/opt/openssl@3/lib,$(ORIG_LDFLAGS))
-LDFLAGS := $(filter-out -multiply_defined suppress -L/opt/homebrew/opt/openssl@3/lib,$(ORIG_LDFLAGS))
-ifeq ($(HAS_OPENSSL_L),-L/opt/homebrew/opt/openssl@3/lib)
-LDFLAGS := -L/opt/homebrew/opt/openssl@3/lib $(LDFLAGS)
-endif
+LDFLAGS := $(filter-out -multiply_defined suppress,$(LDFLAGS))
 
 # Debug information
 debug-info:
@@ -241,8 +222,8 @@ debug-info:
         build-h264-plugins deploy-h264-plugins clean-h264-plugins test-h264-plugins rebuild-with-h264-plugins \
         build-h264-plugin clean-h264-plugin test-h264-plugin rebuild-with-h264
 
-# Default target using unified H.264 plugin
-default: video deploy-unified-h264-plugin
+# The default builds the application; codec plugins are separate prerequisites.
+default: video
 
 # Main build target using unified H.264 plugin
 video-with-unified-plugin: video deploy-unified-h264-plugin

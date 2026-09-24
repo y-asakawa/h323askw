@@ -1,0 +1,65 @@
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: ["master"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout H323ASKW
+        uses: actions/checkout@v7
+        with:
+          path: h323askw
+
+      - name: Checkout PTLib
+        uses: actions/checkout@v7
+        with:
+          repository: willamowius/ptlib
+          ref: f85a10209ac25fdd8bbb8e835c5da161d682e5ac
+          path: ptlib
+
+      - name: Checkout H323Plus
+        uses: actions/checkout@v7
+        with:
+          repository: willamowius/h323plus
+          ref: ea2072978f0334583b550dbfc8b5f6eb7303cbef
+          path: h323plus
+
+      - name: Install build dependencies
+        run: |
+          brew update
+          brew install automake bison flex openssl@3 pkg-config qt speexdsp ffmpeg x264
+
+      - name: Build PTLib
+        working-directory: ptlib
+        run: |
+          ./configure --enable-ipv6 --disable-odbc --disable-sdl --disable-lua --disable-expat
+          make debugnoshared
+
+      - name: Build H323Plus
+        working-directory: h323plus
+        env:
+          PWLIBDIR: ${{ github.workspace }}/ptlib
+        run: |
+          ./configure --enable-h235 --enable-h235-256 --enable-h46017 --enable-h46026 --enable-h46019m --enable-h249 --enable-h46025 --enable-h460p --enable-h460pre --enable-h460com --enable-h460im --enable-h461 --enable-t120 --enable-t140 --enable-aec
+          make debugnoshared
+
+      - name: Build H323ASKW
+        working-directory: h323askw
+        env:
+          PWLIBDIR: ${{ github.workspace }}/ptlib
+          OPENH323DIR: ${{ github.workspace }}/h323plus
+          H323ASKW_DARWIN_ARCH: arm64
+        run: |
+          export PKG_CONFIG_PATH="$(brew --prefix qt)/lib/pkgconfig:$(brew --prefix openssl@3)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          make video
+          test -x obj_Darwin_aarch64_d_s/h323askw
+          file obj_Darwin_aarch64_d_s/h323askw | grep -q arm64

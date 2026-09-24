@@ -350,9 +350,46 @@ System-level messages can also be found by searching for `h323askw` in
 
 ## Building from Source
 
-The build expects compatible H323Plus and PTLib source trees. See
-[the build guide](docs/APP_BUNDLE_BUILD_GUIDE.md) for application bundle
-packaging details.
+The supported build target is an Apple Silicon Mac with Xcode Command Line
+Tools and Homebrew. The standalone source checkout needs two public sibling
+repositories; neither is vendored here. Install the build packages first:
+
+```bash
+brew install automake bison flex openssl@3 pkg-config qt speexdsp ffmpeg x264
+```
+
+Then, from a common parent directory:
+
+```bash
+git clone https://github.com/willamowius/ptlib.git
+git clone https://github.com/willamowius/h323plus.git
+git clone https://github.com/y-asakawa/h323askw.git
+cd ptlib && git checkout f85a10209ac25fdd8bbb8e835c5da161d682e5ac
+./configure --enable-ipv6 --disable-odbc --disable-sdl --disable-lua --disable-expat
+make debugnoshared
+cd ../h323plus && git checkout ea2072978f0334583b550dbfc8b5f6eb7303cbef
+PWLIBDIR="$(cd ../ptlib && pwd)" ./configure --enable-h235 --enable-h235-256 --enable-h46017 --enable-h46026 --enable-h46019m --enable-h249 --enable-h46025 --enable-h460p --enable-h460pre --enable-h460com --enable-h460im --enable-h461 --enable-t120 --enable-t140 --enable-aec
+PWLIBDIR="$(cd ../ptlib && pwd)" make debugnoshared
+cd ../h323askw
+PKG_CONFIG_PATH="$(brew --prefix qt)/lib/pkgconfig:$(brew --prefix openssl@3)/lib/pkgconfig" make video
+```
+
+The [build workflow](.github/workflows/build.yml) runs the same application
+build on a clean macOS runner for each push and pull request.
+`PWLIBDIR`, `OPENH323DIR`, and `MOC` may be set to use different locations.
+`make` and `make video` build the application only; they do not produce a DMG
+or H.264 codec plugin.
+
+For optional codec plugins and application bundle packaging, see
+[the build guide](docs/APP_BUNDLE_BUILD_GUIDE.md). A public H323Plus checkout
+contains the plugin sources used by the bundle script, but plugin build and
+runtime compatibility are not covered by the application-build workflow.
+The separately maintained `y-asakawa/h323plus-plugins` repository is private
+and is not required to build the application source. The macOS camera and
+PortAudio PTLib plugins required by the bundle script are not present in the
+public upstream PTLib checkout, so a full-featured bundle cannot yet be
+reproduced from public sources alone. Do not publish a binary without
+completing the [dependency license review](docs/DEPENDENCY-LICENSE-REVIEW.md).
 
 ### Required H323Plus Video Patch
 

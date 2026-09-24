@@ -45,6 +45,7 @@ components into `H323ASKW.app`.
 | PortAudio | MIT license | https://www.portaudio.com/ |
 | SpeexDSP | BSD 3-Clause license | https://www.speex.org/ |
 | Speex | BSD 3-Clause license | https://www.speex.org/ |
+| mpg123 / libmpg123, when bundled | GNU LGPL 2.1-only according to Homebrew package metadata; verify the exact bundled build | https://www.mpg123.de/ |
 | SDL2 compatibility library, when included | zlib license | https://github.com/libsdl-org/sdl2-compat |
 
 Qt itself contains third-party code under additional licenses. The matching Qt
