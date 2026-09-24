@@ -24,6 +24,13 @@
  * the License for the specific language governing rights and limitations
  * under the License.
  *
+ * The Original Code is CallGen323.
+ *
+ * The Initial Developer of the Original Code is Benny L. Prijono
+ *
+ * Contributor(s): Equivalence Pty. Ltd.
+ *                 Yoshifumi Asakawa (H323ASKW modifications)
+ *
  */
 
 

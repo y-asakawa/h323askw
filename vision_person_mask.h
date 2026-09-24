@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Yoshifumi Asakawa
+// SPDX-License-Identifier: MPL-1.0
+
 #ifndef H323ASKW_VISION_PERSON_MASK_H
 #define H323ASKW_VISION_PERSON_MASK_H
 

@@ -1,6 +1,8 @@
 /**
  * @file qt_video_window.cpp
  * @brief Qt6ベースのビデオ表示ウィンドウ実装
+ * Copyright (c) 2025 Yoshifumi Asakawa
+ * SPDX-License-Identifier: MPL-1.0
  */
 
 #ifdef USE_QT6

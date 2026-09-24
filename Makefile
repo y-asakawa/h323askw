@@ -2,6 +2,8 @@
 # Makefile
 #
 # Makefile for H.323 Video Client
+# Portions Copyright (c) 2025-2026 Yoshifumi Asakawa
+# SPDX-License-Identifier: MPL-1.0
 #
 
 PROG		= h323askw

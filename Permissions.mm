@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Yoshifumi Asakawa
+// SPDX-License-Identifier: MPL-1.0
+
 #import "Permissions.h"
 
 #import <Foundation/Foundation.h>

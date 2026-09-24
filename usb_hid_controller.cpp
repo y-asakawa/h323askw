@@ -5,6 +5,7 @@
  * This file wraps the pure C implementation (usb_hid_impl.mm)
  *
  * Copyright (c) 2024 H323ASKW Project
+ * SPDX-License-Identifier: MPL-1.0
  */
 
 #include "usb_hid_controller.h"

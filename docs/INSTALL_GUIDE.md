@@ -380,7 +380,7 @@ Failed to read data from video grabber
    ```
 3. H.323 Plus を再ビルド: `cd h323plus && make`
 
-詳細は `docs/H323PLUS_BUGFIX_bytesPerFrame.txt` を参照してください
+詳細は [READMEのH323Plus映像パッチ手順](../README.md#required-h323plus-video-patch) を参照してください。
 
 ### 音声が聞こえない/届かない
 
@@ -487,8 +487,8 @@ A: いいえ、1対1の通話のみ対応しています。
 
 #### 詳細ドキュメント
 
-パッチの詳細、症状の説明、検証方法については以下を参照してください:
-- `docs/H323PLUS_BUGFIX_bytesPerFrame.txt`
+パッチの詳細、症状の説明、検証方法は
+[READMEのH323Plus映像パッチ手順](../README.md#required-h323plus-video-patch) を参照してください。
 
 #### パッチ未適用時の症状
 

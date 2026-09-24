@@ -5,6 +5,7 @@
  * This file is isolated from PTLib to avoid ULONG type conflict
  *
  * Copyright (c) 2024 H323ASKW Project
+ * SPDX-License-Identifier: MPL-1.0
  */
 
 #include "usb_hid_impl.h"

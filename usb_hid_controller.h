@@ -5,6 +5,7 @@
  * Supports Jabra, Plantronics, Logitech, and other HID-compliant devices
  *
  * Copyright (c) 2024 H323ASKW Project
+ * SPDX-License-Identifier: MPL-1.0
  */
 
 #ifndef USB_HID_CONTROLLER_H

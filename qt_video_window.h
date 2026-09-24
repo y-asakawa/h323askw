@@ -1,6 +1,8 @@
 /**
  * @file qt_video_window.h
  * @brief Qt6ベースのビデオ表示ウィンドウ
+ * Copyright (c) 2025 Yoshifumi Asakawa
+ * SPDX-License-Identifier: MPL-1.0
  * 
  * SDL2Managerの置き換えとして、Qt6を使用したビデオ表示を提供します。
  * 既存のH.323/メディア処理バックエンドはそのまま維持し、

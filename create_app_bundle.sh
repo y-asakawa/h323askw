@@ -2,6 +2,8 @@
 #
 # H323ASKW App Bundle 作成スクリプト
 # macOS用の配布可能なアプリケーションバンドルを作成します
+# Copyright (c) 2025-2026 Yoshifumi Asakawa
+# SPDX-License-Identifier: MPL-1.0
 #
 
 set -e  # エラー時に停止

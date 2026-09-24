@@ -5,6 +5,7 @@
  * This isolates IOKit from PTLib to avoid ULONG type conflict
  *
  * Copyright (c) 2024 H323ASKW Project
+ * SPDX-License-Identifier: MPL-1.0
  */
 
 #ifndef USB_HID_IMPL_H

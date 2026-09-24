@@ -23,6 +23,14 @@ Version 1.0. Files derived from or containing CallGen323 source code remain
 subject to the Mozilla Public License Version 1.0 and retain the original
 copyright and license notices where present.
 
+The `version.h` header in CallGen323 also carries the original Portable
+Windows Library notice and credits Equivalence Pty. Ltd. as its Initial
+Developer. That file-specific notice is retained in H323ASKW's `version.h`.
+
+Unless otherwise noted, H323ASKW-authored source files, build scripts, and
+application metadata are also distributed under Mozilla Public License
+Version 1.0. File-level notices identify their copyright holders.
+
 The complete Mozilla Public License Version 1.0 text is included in
 [`LICENSE.md`](LICENSE.md).
 

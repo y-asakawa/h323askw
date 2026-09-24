@@ -3,8 +3,9 @@
  *
  * Thread-safe connection-scoped state management for H.323 calls
  *
- * Copyright (c) 2025
+ * Copyright (c) 2025 Yoshifumi Asakawa
  * Part of CallGen323 Phase 1 stability improvements
+ * SPDX-License-Identifier: MPL-1.0
  */
 
 #ifndef CONNECTION_STATE_H
