@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # H323ASKW App Bundle 作成スクリプト
-# macOS用の配布可能なアプリケーションバンドルを作成します
+# macOS用のローカル検証向けアプリケーションバンドルを作成します
 # Copyright (c) 2025-2026 Yoshifumi Asakawa
 # SPDX-License-Identifier: MPL-1.0
 #
@@ -1294,12 +1294,12 @@ sign_bundle() {
         has_sign_error=1
     fi
 
-    # Gatekeeper 判定（他PC配布時の可否）
+    # Gatekeeper 判定（ローカル検証用の参考情報）
     if spctl --assess --type execute --verbose=2 "${APP_BUNDLE}" >/dev/null 2>&1; then
         log_success "Gatekeeper 検証: 通過"
     else
         log_warn "Gatekeeper 検証: 拒否されました"
-        log_warn "  他PCで配布するには Developer ID 署名 + notarization が必要です"
+        log_warn "  このビルドは配布用に承認されたものではありません"
     fi
 
     if [ $has_sign_error -ne 0 ]; then
@@ -1308,7 +1308,7 @@ sign_bundle() {
     fi
 }
 
-# ===== DMG作成 (オプション) =====
+# ===== ローカル検証用DMG作成 (オプション) =====
 create_dmg() {
     log_info "DMG を作成中..."
     
@@ -1330,6 +1330,11 @@ create_dmg() {
 
 # ===== メイン処理 =====
 main() {
+    if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != "--create-dmg" ]; }; then
+        echo "Usage: $0 [--create-dmg]" >&2
+        exit 2
+    fi
+
     echo ""
     echo "=========================================="
     echo "  ${APP_NAME} App Bundle Builder"
@@ -1353,8 +1358,9 @@ main() {
     log_success "App Bundle が作成されました: ${APP_BUNDLE}"
     echo ""
     
-    # DMG作成（デフォルトで実行）
-    create_dmg
+    if [ "${1:-}" = "--create-dmg" ]; then
+        create_dmg
+    fi
     
     echo ""
     log_info "完了しました！"

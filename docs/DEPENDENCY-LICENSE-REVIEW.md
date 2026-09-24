@@ -2,13 +2,14 @@
 
 Last reviewed: 2026-06-24
 
-This document is the working license-review record for H323ASKW builds and
-binary packaging. It lists potential and build-dependent dependencies. It does
-not state that every listed component is present in every release.
+This document records the license review of local H323ASKW builds and optional
+binary packaging. The maintainer publishes source code only; no DMG, App
+Bundle, or executable is offered. Potential and build-dependent dependencies
+listed here are not necessarily present in every local build.
 
-The public attribution index is `THIRD-PARTY-NOTICES.md`. Before a binary
-release, replace assumptions in this document with an inventory generated from
-the completed application bundle.
+The public attribution index is `THIRD-PARTY-NOTICES.md`. This record does not
+approve binary redistribution. Anyone considering it must replace assumptions
+here with an inventory of their completed application bundle.
 
 ## Reviewed Source Revisions
 
@@ -21,9 +22,10 @@ the completed application bundle.
 These revisions identify the local source trees reviewed on the date above.
 They are not automatically the revisions used by a later release.
 
-The H323Plus Plugins repository was private when reviewed. Preserve access to
-the source revision and its history for as long as a release containing those
-plugins is distributed.
+The H323Plus Plugins repository was private when reviewed and is planned for
+separate publication. Its link may be unavailable until then. A distributor
+of a build containing those plugins must identify the exact source revision
+and satisfy the applicable license obligations.
 
 The bundle script now defaults to the public H323Plus plugin sources instead.
 The private plugin revision above is historical review evidence, not a required
@@ -113,9 +115,9 @@ The H323Plus plugin source tree contains mixed license and patent notices.
 | G.722.1 | Contains a permissive wrapper notice and ITU-T reference code identified as using the ITU-T General Public License (G.191). Source notices also identify patent-related conditions. |
 | G.722.2 / AMR-WB | Source states that AMR-WB is patented and use requires a license from VoiceAge. Exclude this plugin from public binaries unless current rights are separately confirmed. |
 
-## Release Inventory Procedure
+## Inventory Procedure If Redistributing Binaries
 
-For every candidate `H323ASKW.app`:
+For any candidate `H323ASKW.app` intended for redistribution:
 
 1. List all regular files and symbolic links under `Contents/Frameworks`,
    `Contents/PlugIns`, and `Contents/Resources/plugins`.
@@ -129,7 +131,7 @@ For every candidate `H323ASKW.app`:
 6. Compare the resulting inventory with `THIRD-PARTY-NOTICES.md` and include
    all required full license texts in the application bundle.
 7. Archive the inventory, source revisions, local patches, build scripts, and
-   source-code availability materials with the release record.
+   source-code availability materials with the distribution record.
 
 ## Distribution Decision
 
@@ -137,15 +139,17 @@ The reviewed development configuration uses a GPL 3-or-later FFmpeg build and
 GPL-covered codec components with MPL 1.0-covered H323ASKW code. A notice file
 does not resolve the resulting license-compatibility issue.
 
-Source-code publication and prebuilt binary distribution are separate
-decisions. Do not publish a binary produced from the reviewed configuration
-until the licensing model has been resolved through a compatible build,
-component exclusion, appropriate architectural separation, separately
-obtained licenses, or qualified legal review.
+The maintainer publishes source code only. This policy does not limit rights
+granted to others by the applicable licenses. The reviewed configuration has
+not been cleared for binary redistribution; anyone considering it must resolve
+the licensing model through a compatible build, component exclusion,
+appropriate architectural separation, separately obtained licenses, or
+qualified legal review.
 
-## Release Review Record
+## Optional Binary Redistribution Review Template
 
-Complete this section separately for every binary release.
+This template is not an approval or an active maintainer release plan. Complete
+it separately for any proposed binary distribution.
 
 | Item | Recorded value |
 | --- | --- |

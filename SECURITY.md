@@ -1,8 +1,9 @@
 # Security Policy
 
-## Supported Versions
+## Support Scope
 
-Security updates are provided for the latest public release of H323ASKW.
+Security fixes are made available in the public H323ASKW source repository.
+The maintainer does not publish prebuilt binaries.
 
 ## Reporting a Vulnerability
 

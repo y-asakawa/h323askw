@@ -51,6 +51,10 @@ The source code for H323ASKW, including modifications to the Covered Code, is
 available from the H323ASKW GitHub repository under the terms of the Mozilla
 Public License Version 1.0.
 
+The maintainer publishes source code only and does not provide DMGs,
+application bundles, or other prebuilt binaries. This publication policy does
+not limit rights granted to others under the applicable licenses.
+
 ## Third-Party Software
 
 H323ASKW uses or may be built with the following external projects:

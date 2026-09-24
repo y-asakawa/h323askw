@@ -7,14 +7,16 @@ packaged with additional third-party libraries and codec plugins. Those
 components remain under their own licenses and are not relicensed by
 H323ASKW's `LICENSE.md`.
 
-This file is an attribution and license index for the H323ASKW source
-repository and the third-party components used by its build and packaging
-process. It is not a substitute for the complete license texts or source-code
-availability materials required when distributing binaries.
+The maintainer publishes only the H323ASKW source repository, not DMGs,
+application bundles, or executables. This file is an attribution and license
+index for the source repository and the third-party components used by its
+local build and packaging process. It is not a substitute for the complete
+license texts or source-code availability materials required if someone else
+distributes binaries.
 
 Potential, build-dependent, and release-specific dependencies are documented
 separately in `docs/DEPENDENCY-LICENSE-REVIEW.md`. The exact contents and
-licenses of every binary release must be checked against the completed
+licenses of any binary distribution must be checked against the completed
 application bundle.
 
 ## Source Origin and Core Libraries
@@ -85,10 +87,11 @@ audio, video, networking, and user-interface frameworks. Those components are
 provided under Apple's applicable SDK and operating-system terms and are not
 redistributed as third-party project files by this repository.
 
-## Binary Distribution Requirements
+## Requirements If Redistributing Binaries
 
-Before publishing a DMG, application bundle, installer, or other binary
-distribution:
+The maintainer does not publish binary distributions. This publication policy
+does not limit rights granted by the applicable licenses. Anyone who chooses
+to distribute a DMG, application bundle, installer, or other binary must first:
 
 1. Inventory every executable, dynamic library, framework, and plugin in the
    final release artifact, including recursively copied Homebrew and Qt
@@ -116,8 +119,9 @@ GPL-covered codec components. MPL 1.0 and GPL compatibility is a material
 distribution issue, and this notice file alone does not resolve that issue.
 
 Publishing source code is legally distinct from distributing a prebuilt
-application bundle. Do not publish the current GPL-enabled binary bundle until
-the applicable licensing model has been resolved, for example by:
+application bundle. The reviewed GPL-enabled development bundle has not been
+cleared for redistribution. The applicable licensing model would have to be
+resolved, for example by:
 
 * using a compatible LGPL-only FFmpeg build;
 * excluding GPL codec libraries and plugins;

@@ -1,6 +1,9 @@
 # H323ASKW macOS App Bundle ビルドガイド
 
-このドキュメントでは、H323ASKWをmacOS App Bundleとしてパッケージングし、他のMacに配布可能な形式にする方法を説明します。
+このドキュメントでは、H323ASKWを自分のMacで検証するためにmacOS App Bundleへ
+パッケージングする方法を説明します。開発者はDMG、App Bundle、実行ファイルを
+公開・配布しません。依存ライブラリを組み込んだBundleの再配布には、別途
+ライセンス確認が必要です。
 
 ---
 
@@ -13,7 +16,7 @@
 5. [ビルドスクリプトの使い方](#ビルドスクリプトの使い方)
 6. [スクリプトの詳細解説](#スクリプトの詳細解説)
 7. [トラブルシューティング](#トラブルシューティング)
-8. [配布について](#配布について)
+8. [公開方針](#公開方針)
 
 ---
 
@@ -21,10 +24,10 @@
 
 H323ASKWは複数のダイナミックライブラリ（dylib）に依存しています。
 ビルドしたままの状態では、ライブラリへのパスが絶対パスでハードコードされているため、
-他のMacでは動作しません。
+他のMacではそのまま動作しません。
 
 このガイドでは、`install_name_tool`を使ってライブラリパスを相対パスに書き換え、
-配布可能なApp Bundleを作成する方法を説明します。
+ローカル検証用のApp Bundleを作成する方法を説明します。
 
 ---
 
@@ -47,7 +50,8 @@ H.264プラグインはH323Plusのconfigure後に
 このプラグインの現行Homebrew環境でのビルド・実行互換性は、Build CIの
 検証対象外です。独自のプラグインツリーを使う場合だけ、
 `H323PLUS_PLUGINS_DIR`に`H.264/`を含む親ディレクトリを指定します。
-非公開の`y-asakawa/h323plus-plugins`は公開版の本体ビルドに必須ではありません。
+公開予定の`y-asakawa/h323plus-plugins`は、現時点では非公開であり、
+公開版の本体ビルドに必須ではありません。
 一方、Bundle作成で必要な`vidinput_macos_pwplugin.dylib`と
 `portaudio_pwplugin.dylib`のソースは、現時点の公開PTLibにはありません。
 これらを別途入手・ビルドできない場合、同等のカメラ・音声機能付きBundleは
@@ -197,15 +201,22 @@ cd /path/to/h323askw
 OUTPUT_DIR=/tmp/h323askw-bundle-test ./create_app_bundle.sh
 ```
 
+ローカル検証用のDMGも必要な場合だけ、`--create-dmg`を指定します。
+
+```bash
+./create_app_bundle.sh --create-dmg
+```
+
 ### 2. 実行結果
 
-成功すると以下のファイルが生成されます:
+通常は以下のApp Bundleだけが生成されます:
 
 ```
 dist/
-├── H323ASKW.app/          # App Bundle
-└── H323ASKW-1.0.0.dmg     # 配布用DMG（オプション）
+└── H323ASKW.app/          # ローカル検証用App Bundle
 ```
+
+`--create-dmg`を指定した場合のみ、`dist/H323ASKW-<version>.dmg`も生成されます。
 
 ### 3. 動作確認
 
@@ -244,7 +255,7 @@ open dist/H323ASKW.app
          ↓
 10. show_bundle_size()       サイズ表示
          ↓
-11. create_dmg()             DMG作成（オプション）
+11. create_dmg()             --create-dmg指定時のみ
 ```
 
 ---
@@ -435,43 +446,23 @@ done
 
 ### コード署名エラー
 
-配布時にコード署名が必要な場合:
+ローカル検証用にアドホック署名する場合:
 
 ```bash
 codesign --force --deep --sign - dist/H323ASKW.app
 ```
 
-Apple Developer IDで署名する場合:
-```bash
-codesign --force --deep --sign "Developer ID Application: Your Name" dist/H323ASKW.app
-```
-
 ---
 
-## 配布について
+## 公開方針
 
-### DMGファイルの作成
-
-スクリプト実行時に「DMGも作成しますか?」で `y` を選択すると、
-配布用のDMGファイルが作成されます。
-
-手動で作成する場合:
-```bash
-hdiutil create -volname "H323ASKW" \
-    -srcfolder dist/H323ASKW.app \
-    -ov -format UDZO \
-    dist/H323ASKW-1.0.0.dmg
-```
-
-### 配布時の注意
-
-1. **アーキテクチャ**: 現在はARM64専用です。Intel Macでも動作させる場合は、Universal Binaryを作成する必要があります。
-
-2. **Gatekeeper**: 署名されていないアプリは、初回起動時に警告が表示されます。
-   - 右クリック → 「開く」で実行可能
-   - または `xattr -cr H323ASKW.app` で検疫属性を削除
-
-3. **公証（Notarization）**: App Store外で配布する場合、Appleの公証が推奨されます。
+このリポジトリで公開するのはソースコードのみです。スクリプトは明示的に
+指定した場合のみDMGを作成できますが、ローカル検証用であり、開発者は
+公開しません。
+この方針は、各ライセンスが第三者に認める権利を制限するものではありません。
+BundleやDMGを再配布する人は、完成した成果物について
+[`DEPENDENCY-LICENSE-REVIEW.md`](DEPENDENCY-LICENSE-REVIEW.md)に記載した
+依存関係とライセンス条件を個別に確認する必要があります。
 
 ---
 

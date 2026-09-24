@@ -8,10 +8,10 @@ The application supports direct H.323 calls, gatekeeper-based calls, local
 audio and video device selection, and H.264, H.263, H.261, G.711, and G.722
 media.
 
-> **Binary distribution notice:** The reviewed development environment uses a
-> GPL-enabled FFmpeg build. Do not redistribute a DMG or application bundle
-> produced from that configuration until the applicable license compatibility
-> and distribution requirements have been resolved. See
+> **Source-only publication:** This project does not provide DMGs, application
+> bundles, or other prebuilt binaries. Build from source for local use. The
+> reviewed development environment uses a GPL-enabled FFmpeg build, whose
+> binary redistribution requirements have not been resolved. See
 > [Third-Party Notices](THIRD-PARTY-NOTICES.md).
 
 
@@ -39,14 +39,13 @@ media.
 - macOS 11.0 Big Sur or later
 - Apple Silicon Mac (M1, M2, M3, M4, or later)
 
-The distributed application bundle is currently ARM64-only and does not run on
-Intel Macs.
+The supported local build target is ARM64 and does not run on Intel Macs.
 
 ### Runtime Dependencies
 
-The application bundle is intended to contain its required libraries.
-Homebrew, FFmpeg, and OpenSSL should not need to be installed separately on the
-target Mac.
+Install the build dependencies listed under [Building from Source](#building-from-source)
+on your Mac. A locally assembled application bundle can contain its own
+libraries, but this project does not distribute one.
 
 ### Hardware
 
@@ -67,27 +66,21 @@ target Mac.
 
 ## Installation
 
-### Install from a DMG
-
-1. Open the H323ASKW DMG.
-2. Drag `H323ASKW.app` into the `Applications` folder.
-3. Eject the H323ASKW volume.
-
-### Install the Application Bundle Directly
-
-Copy `H323ASKW.app` to `/Applications` or another suitable location.
+Build the application from source using [Building from Source](#building-from-source).
+You can run the resulting executable locally. For optional local bundle
+assembly, see the [bundle build guide](docs/APP_BUNDLE_BUILD_GUIDE.md); no
+prebuilt bundle or DMG is provided.
 
 ## First Launch
 
 ### Gatekeeper Warning
 
-An unsigned build may be blocked because macOS cannot verify its developer.
+An unsigned local build may be blocked because macOS cannot verify its developer.
 Use one of the following methods:
 
 1. Control-click `H323ASKW.app`, select **Open**, and confirm.
 2. Open **System Settings > Privacy & Security** and select **Open Anyway**.
-3. Remove the quarantine attribute from a build you obtained from a trusted
-   source:
+3. Remove the quarantine attribute from your own local build, if needed:
 
    ```bash
    xattr -cr /Applications/H323ASKW.app
@@ -148,8 +141,8 @@ Listen on a specific port:
 
 ### Launch from Finder
 
-Open `/Applications/H323ASKW.app`. The packaged launcher starts H323ASKW with
-its default configuration.
+If you assembled a local bundle, open `/Applications/H323ASKW.app`. Its launcher
+starts H323ASKW with the default configuration.
 
 ## Command-Line Options
 
@@ -384,12 +377,14 @@ For optional codec plugins and application bundle packaging, see
 [the build guide](docs/APP_BUNDLE_BUILD_GUIDE.md). A public H323Plus checkout
 contains the plugin sources used by the bundle script, but plugin build and
 runtime compatibility are not covered by the application-build workflow.
-The separately maintained `y-asakawa/h323plus-plugins` repository is private
-and is not required to build the application source. The macOS camera and
+The separately maintained `y-asakawa/h323plus-plugins` repository is not yet
+public and is not required to build the application source. The macOS camera and
 PortAudio PTLib plugins required by the bundle script are not present in the
 public upstream PTLib checkout, so a full-featured bundle cannot yet be
-reproduced from public sources alone. Do not publish a binary without
-completing the [dependency license review](docs/DEPENDENCY-LICENSE-REVIEW.md).
+reproduced from public sources alone. The maintainer does not publish binaries;
+anyone considering redistribution must independently review the completed
+build and applicable licenses in the
+[dependency license review](docs/DEPENDENCY-LICENSE-REVIEW.md).
 
 ### Required H323Plus Video Patch
 
@@ -488,12 +483,12 @@ Additional information:
 - [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md): public attribution and
   third-party license index
 - [docs/DEPENDENCY-LICENSE-REVIEW.md](docs/DEPENDENCY-LICENSE-REVIEW.md):
-  build-dependent dependency and binary-release license review record
+  build-dependent dependency and optional binary redistribution review record
 
-Binary distribution requirements depend on the exact libraries, plugins,
-build options, and linking methods used in a release. Before publishing a DMG
-or application bundle, inspect the completed artifact and include all required
-license texts, copyright notices, and source-code availability materials.
+The maintainer publishes source code only. This publication policy does not
+restrict the rights granted by the applicable licenses. Anyone distributing a
+binary built from this source must separately resolve the requirements for the
+exact libraries, plugins, build options, and linking methods used.
 
 H323ASKW is an independent project and is not endorsed by or affiliated with
 the original CallGen323 developers or any third-party project.
