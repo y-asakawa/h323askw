@@ -8,7 +8,7 @@
 
 PROG		= h323askw
 SOURCES		= main.cxx
-.DEFAULT_GOAL := video
+.DEFAULT_GOAL := default
 
 # USB HID Controller for physical mute button (Jabra, Plantronics, etc.)
 # macOS only - requires IOKit framework
@@ -224,8 +224,9 @@ debug-info:
         build-h264-plugins deploy-h264-plugins clean-h264-plugins test-h264-plugins rebuild-with-h264-plugins \
         build-h264-plugin clean-h264-plugin test-h264-plugin rebuild-with-h264
 
-# The default builds the application; codec plugins are separate prerequisites.
-default: video
+# The camera plugin links shared PTLib, so the default executable must as well.
+# Keep `make video` as the static debug build used by CI.
+default: optshared
 
 # Main build target using unified H.264 plugin
 video-with-unified-plugin: video deploy-unified-h264-plugin
@@ -581,10 +582,10 @@ h323askw-help::
 	@echo "==============================================="
 	@echo ""
 	@echo "📋 Main Build Targets:"
-	@echo "  default                  - Build H323ASKW with unified H.264 plugin (RECOMMENDED)"
+	@echo "  default                  - Build shared H323ASKW for dynamic camera plugins (RECOMMENDED)"
+	@echo "  video                    - Build static debug H323ASKW (CI; no macOS camera plugin)"
 	@echo "  video-with-unified-plugin - Build with detailed status output"
 	@echo "  video-with-h264          - Build with detailed status output (alias)"
-	@echo "  video                    - Build H323ASKW only (no plugin deployment)"
 	@echo ""
 	@echo "🔧 H.264 Plugin Targets (Unified):"
 	@echo "  build-h264-unified-plugin     - Build unified h264_plugin_h323plus.dylib"
@@ -611,9 +612,7 @@ h323askw-help::
 	@echo "  debug-info               - Show build configuration"
 	@echo "  help                     - Show this help (run 'make h323askw-help')"
 	@echo ""
-	@echo "⚠️  Current Default: Unified Plugin Architecture"
-	@echo "  'make default' now uses the unified h264_plugin_h323plus.dylib"
-	@echo "  For legacy separated plugins, use 'make all-with-plugins'"
+	@echo "  Codec plugins must be built and installed separately."
 	@echo ""
 	@echo "🔧 Plugin Architecture:"
 	@echo "  The unified plugin contains both encoder and decoder in a single dylib"
@@ -622,11 +621,11 @@ h323askw-help::
 	@echo "📋 Recommended Workflow:"
 	@echo "  1. make check-deps                # Check what's installed"
 	@echo "  2. make install-deps              # Install missing dependencies"  
-	@echo "  3. make default                   # Build everything (RECOMMENDED)"
+	@echo "  3. make default                   # Build shared application (RECOMMENDED)"
 	@echo "  4. make test-unified-h264-plugin  # Test the plugin system"
 	@echo ""
 	@echo "🚀 Quick Start:"
-	@echo "  make default                      # Build everything from scratch"
+	@echo "  make default                      # Build shared application"
 	@echo ""
 	@echo "📖 Usage Examples:"
 	@echo "  Listen mode:   ./obj_Darwin_aarch64/h323askw -l -v --sdl2-display"

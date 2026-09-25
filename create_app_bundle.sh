@@ -200,6 +200,14 @@ change_dep_with_fallback() {
 }
 
 # ===== 必要なファイルの存在確認 =====
+build_executable() {
+    log_info "App Bundle 用の最適化共有バイナリをビルド中..."
+    if ! make -C "${CALLGEN_DIR}" optshared; then
+        log_error "実行ファイルのビルドに失敗しました (make optshared)"
+        return 1
+    fi
+}
+
 check_prerequisites() {
     log_info "必要なファイルを確認中..."
     log_info "  CALLGEN_DIR: ${CALLGEN_DIR}"
@@ -1350,6 +1358,7 @@ main() {
     echo "=========================================="
     echo ""
     
+    build_executable
     check_prerequisites
     create_bundle_structure
     create_info_plist

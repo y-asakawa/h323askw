@@ -647,7 +647,8 @@ class MyVideoChannel : public PVideoChannel
 {
     PCLASSINFO(MyVideoChannel, PVideoChannel);
   public:
-    MyVideoChannel(MyH323Connection * connection, PBoolean isEncoding = FALSE);
+    MyVideoChannel(MyH323Connection * connection, PBoolean isEncoding = FALSE,
+                   bool letterboxLegacyVideo = false);
     virtual ~MyVideoChannel();
     
     virtual PBoolean Read(void * buf, PINDEX len);
@@ -656,6 +657,9 @@ class MyVideoChannel : public PVideoChannel
   protected:
     MyH323Connection * m_connection;
     PBoolean m_isEncoding;  // TRUE for outgoing (encoding), FALSE for incoming (decoding)
+    bool m_firstOutgoingFrame = true;
+    bool m_letterboxLegacyVideo = false;
+    std::vector<BYTE> m_legacyFrameScratch;
     
     // 🛡️ THREAD SAFETY FIX: Instance-specific counters to prevent data races
     unsigned m_incomingFrameCount = 0;  // Frame count for this channel instance

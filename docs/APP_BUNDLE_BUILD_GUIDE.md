@@ -196,6 +196,10 @@ cd /path/to/h323askw
 ./create_app_bundle.sh
 ```
 
+スクリプトは先に`make optshared`を実行し、App Bundle用の
+`obj_Darwin_aarch64/h323askw`をビルドします。`make video`で生成される
+デバッグ版`obj_Darwin_aarch64_d_s/h323askw`は使用しません。
+
 既存の`dist/`を上書きせずに試す場合は、`OUTPUT_DIR`で出力先を指定できます。
 
 ```bash

@@ -38,6 +38,7 @@
 #include "main.h"
 #include "vision_person_mask.h"
 #include "video_frame_size.h"
+#include "video_letterbox.h"
 #ifdef __clang__
 #pragma clang diagnostic pop
 #endif
@@ -2392,21 +2393,57 @@ void MyH323Connection::SetRemoteRxPayloadType(unsigned sessionID, int pt) {
 // 唯一のオープン関数
 // ✅ openVideoTxOnce function removed - converted to state variable for better OLC management
 
+#ifdef H323_VIDEO
+static int VideoCodecPreference(const PString & formatName)
+{
+  PCaselessString name(formatName);
+  if (name.Find("H.264") == 0 || name.Find("H264") == 0)
+    return 0;
+  if (name.Find("H.263") == 0 || name.Find("H263") == 0)
+    return 1;
+  if (name.Find("H.261") == 0 || name.Find("H261") == 0)
+    return 2;
+  return 3;
+}
+
+static H323Capability * FindPreferredVideoCapability(const H323Capabilities & localCaps,
+                                                      const H323Capabilities * remoteCaps = NULL,
+                                                      bool returnRemote = false)
+{
+  for (int preference = 0; preference < 3; ++preference) {
+    for (PINDEX i = 0; i < localCaps.GetSize(); ++i) {
+      H323Capability & localCap = localCaps[i];
+      if (localCap.GetMainType() != H323Capability::e_Video ||
+          localCap.GetDefaultSessionID() != RTP_Session::DefaultVideoSessionID ||
+          VideoCodecPreference(localCap.GetFormatName()) != preference)
+        continue;
+
+      H323Capability * remoteCap = remoteCaps != NULL ? remoteCaps->FindCapability(localCap) : NULL;
+      if (remoteCaps != NULL && remoteCap == NULL)
+        continue;
+      return returnRemote ? remoteCap : &localCap;
+    }
+  }
+  return NULL;
+}
+#endif
+
 // OpenVideoTransmitChannel - 実際のビデオ送信チャネル開設処理
 bool MyH323Connection::OpenVideoTransmitChannel() {
   PTRACE(1, "H323ASKW\t📹 OpenVideoTransmitChannel: Starting video TX channel establishment");
   
 #ifdef H323_VIDEO
-  // Get local H.264 capability
   const H323Capabilities& localCaps = GetLocalCapabilities();
-  H323Capability* h264Cap = localCaps.FindCapability("H.264");
+  const H323Capabilities& remoteCaps = GetRemoteCapabilities();
+  H323Capability* videoCap = FindPreferredVideoCapability(localCaps,
+      remoteCaps.GetSize() > 0 ? &remoteCaps : NULL);
   
-  if (h264Cap == NULL) {
-    PTRACE(1, "H323ASKW\t❌ OpenVideoTransmitChannel: No H.264 capability found");
+  if (videoCap == NULL) {
+    PTRACE(1, "H323ASKW\tOpenVideoTransmitChannel: No compatible video capability found");
     return false;
   }
   
-  PTRACE(1, "H323ASKW\t✅ Found H.264 capability: " << h264Cap->GetFormatName());
+  PTRACE(1, "H323ASKW\tSelected video capability: " << videoCap->GetFormatName());
   
   // Use VIDEO_SESSION_ID (typically 2) for video transmission
   unsigned sessionID = VIDEO_SESSION_ID;
@@ -2430,7 +2467,7 @@ bool MyH323Connection::OpenVideoTransmitChannel() {
     // Mark OLC as pending in state machine before sending
     m_h245State.prepareVideoOLC();
     
-    bool result = OpenLogicalChannel(*h264Cap, sessionID, H323Channel::IsTransmitter);
+    bool result = OpenLogicalChannel(*videoCap, sessionID, H323Channel::IsTransmitter);
     if (result) {
       PTRACE(1, "H323ASKW\t📤 Video TX OLC sent - waiting for ACK/REJECT...");
       // Update state machine to OLCSent
@@ -3746,27 +3783,25 @@ void H323ASKW::Main()
 
   h323->RemoveCapabilities(args.GetOptionString('D').Lines());
   
-  // Prefer H.264 if video is enabled and available
+  // Keep video codecs ahead of audio unless the caller supplied a preference.
   PStringArray preferenceOrder = args.GetOptionString('P').Lines();
 #ifdef H323_VIDEO
   // Check if video is enabled via -v, USB/camera options, or the Qt UI request
   bool videoRequested = args.HasOption('v') || args.HasOption("usb-camera") || args.HasOption("camera") || qtUiRequested;
   if (videoRequested) {
-    // Add H.264 to the beginning of preference order if not already specified
-    bool hasH264Preference = false;
-    for (PINDEX i = 0; i < preferenceOrder.GetSize(); i++) {
-      if (preferenceOrder[i].Find("H.264") != P_MAX_INDEX || 
-          preferenceOrder[i].Find("H264") != P_MAX_INDEX) {
-        hasH264Preference = true;
-        break;
+    const char * defaultVideoOrder[] = { "H.264-720", "H.264", "H264", "H.263", "H263", "H.261", "H261" };
+    for (PINDEX i = 0; i < sizeof(defaultVideoOrder) / sizeof(defaultVideoOrder[0]); ++i) {
+      bool specified = false;
+      for (PINDEX j = 0; j < preferenceOrder.GetSize(); ++j) {
+        if (PCaselessString(preferenceOrder[j]) == defaultVideoOrder[i]) {
+          specified = true;
+          break;
+        }
       }
+      if (!specified)
+        preferenceOrder.AppendString(defaultVideoOrder[i]);
     }
-    if (!hasH264Preference) {
-      PStringArray newOrder("H.264");
-      newOrder += preferenceOrder;
-      preferenceOrder = newOrder;
-      cout << "Adding H.264 codec preference for video" << endl;
-    }
+    cout << "Video codec preference: H.264 > H.263 > H.261 (available codecs only)" << endl;
   }
 #endif
   h323->ReorderCapabilities(preferenceOrder);
@@ -7237,8 +7272,10 @@ PBoolean MyH323Connection::HandlePDU_SafeFallback(const H323ControlPDU & pdu)
 
 #ifdef USE_QT6
 // Custom video channel implementation
-MyVideoChannel::MyVideoChannel(MyH323Connection * connection, PBoolean isEncoding)
-  : PVideoChannel(), m_connection(connection), m_isEncoding(isEncoding)
+MyVideoChannel::MyVideoChannel(MyH323Connection * connection, PBoolean isEncoding,
+                               bool letterboxLegacyVideo)
+  : PVideoChannel(), m_connection(connection), m_isEncoding(isEncoding),
+    m_letterboxLegacyVideo(letterboxLegacyVideo)
 {
 }
 
@@ -7297,6 +7334,17 @@ PBoolean MyVideoChannel::Read(void * buf, PINDEX len)
             expectedYUV420Size = width * height * 3 / 2;
             
             PTRACE(4, "H323ASKW\t*** Successfully read camera frame: " << actualBytesRead << " bytes ***");
+
+            // Start every new video channel with a neutral frame, never cached camera content.
+            bool initialBlank = m_firstOutgoingFrame && actualBytesRead >= expectedYUV420Size &&
+                                width > 0 && height > 0;
+            if (initialBlank) {
+                BYTE* yuvBuf = (BYTE*)buf;
+                PINDEX yPlaneSize = width * height;
+                memset(yuvBuf, 16, yPlaneSize);
+                memset(yuvBuf + yPlaneSize, 128, yPlaneSize / 2);
+                m_firstOutgoingFrame = false;
+            }
             
             // 📹🔇 CAMERA MUTE: Replace frame with black if muted
             if (cameraMuted && actualBytesRead >= expectedYUV420Size && width > 0 && height > 0) {
@@ -7319,10 +7367,14 @@ PBoolean MyVideoChannel::Read(void * buf, PINDEX len)
                 }
             }
 
-            if (m_connection && actualBytesRead >= expectedYUV420Size && width > 0 && height > 0) {
+            if (!initialBlank && m_connection && actualBytesRead >= expectedYUV420Size && width > 0 && height > 0) {
                 m_connection->ApplyLocalVideoBackgroundBlur((BYTE*)buf, width, height);
                 m_connection->ApplyLocalVideoOverlay((BYTE*)buf, width, height);
             }
+
+            const bool letterboxed = m_letterboxLegacyVideo && !initialBlank && !cameraMuted &&
+                VideoLetterbox::WideSourceToCif((BYTE*)buf, actualBytesRead,
+                                               width, height, m_legacyFrameScratch);
             
             // *** VIDEO TX READY FLAG: Mark that actual frames are being captured ***
             static bool firstFrameLogged = false;
@@ -7337,7 +7389,8 @@ PBoolean MyVideoChannel::Read(void * buf, PINDEX len)
             // Qt6 preview display - ★重要: 内部バッファを使用した場合はreadBufを使う
             // Qt6 preview display
             if (m_connection && m_connection->outgoingVideoDisplay && width > 0 && height > 0) {
-                m_connection->DisplayVideoFrame((const BYTE*)buf, actualBytesRead, width, height, TRUE);
+                const BYTE* previewFrame = letterboxed ? m_legacyFrameScratch.data() : (const BYTE*)buf;
+                m_connection->DisplayVideoFrame(previewFrame, actualBytesRead, width, height, TRUE);
             }
         }
     } else {
@@ -8628,19 +8681,17 @@ PBoolean MyH323Connection::OnSendSignalSetup(H323SignalPDU & setupPDU)
     if (!GetEndPoint().IsFastStartDisabled()) {
         PTRACE(1, "H323ASKW\tFastStart enabled - signaling video receive capability to MCU");
         
-        // Check if we have H.264 video capability in our local capability set
         const H323Capabilities& localCaps = GetLocalCapabilities();
-        H323Capability* h264Cap = localCaps.FindCapability("H.264");
+        H323Capability* videoCap = FindPreferredVideoCapability(localCaps);
         
-        if (h264Cap != NULL) {
-            PTRACE(1, "H323ASKW\tH.264 capability found - MCU will see our video receive capability");
-            PTRACE(1, "H323ASKW\tH.264 format: " << h264Cap->GetFormatName());
+        if (videoCap != NULL) {
+            PTRACE(1, "H323ASKW\tVideo receive capability available: " << videoCap->GetFormatName());
             
             // The FastStart elements will be automatically populated by H323Plus
-            // based on our enhanced TCS capabilities with detailed H.241 parameters
-            PTRACE(1, "H323ASKW\tFastStart will include H.264 receive channels with enhanced H.241 parameters");
+            // from the local capability set.
+            PTRACE(1, "H323ASKW\tFastStart will offer available video receive capabilities");
         } else {
-            PTRACE(1, "H323ASKW\tWARNING: No H.264 capability found for FastStart");
+            PTRACE(1, "H323ASKW\tWARNING: No video capability found for FastStart");
         }
         
         PTRACE(1, "H323ASKW\tFastStart video receive capability signaled to MCU");
@@ -8881,11 +8932,28 @@ PBoolean MyH323Connection::OnReceiveRTPPacket(RTP_Session & session, RTP_DataFra
         }
     }
     
+    // Leave H.263/H.261 packets to the negotiated H323Plus decoder.
+    bool legacyVideo = sessionTruth != NULL && sessionTruth->mediaType == "video" &&
+                       VideoCodecPreference(sessionTruth->codecName) > 0 &&
+                       VideoCodecPreference(sessionTruth->codecName) < 3;
+    if (!legacyVideo && sessionTruth == NULL) {
+        H323Channel * receiveChannel = FindChannel(sessionID, FALSE);
+        legacyVideo = receiveChannel != NULL &&
+                      receiveChannel->GetCapability().GetMainType() == H323Capability::e_Video &&
+                      VideoCodecPreference(receiveChannel->GetCapability().GetFormatName()) > 0 &&
+                      VideoCodecPreference(receiveChannel->GetCapability().GetFormatName()) < 3;
+    }
+    if (legacyVideo) {
+        PTRACE(4, "H323ASKW\tLeaving H.263/H.261 RTP packet to negotiated video decoder");
+        return TRUE;
+    }
+
     // *** 包括的H.264処理 - MCU異常動作完全対応 ***
     bool isH264Video = false;
 
     // 1) 標準的なH.264検出 (sessionTruthベース)
-    if (sessionTruth && sessionTruth->mediaType == "video" && sessionTruth->codecName.Find("H.264") != P_MAX_INDEX) {
+    if (sessionTruth && sessionTruth->mediaType == "video" &&
+        VideoCodecPreference(sessionTruth->codecName) == 0) {
         if (payloadType == sessionTruth->dynamicPayloadType || payloadType == 96) {
             isH264Video = true;
             PTRACE(1, "H323ASKW\t✅ H.264 VIDEO ACCEPTED: PT=" << payloadType
@@ -9023,10 +9091,10 @@ PBoolean MyH323Connection::OnStartLogicalChannel(H323Channel & channel) {
     }
 #endif
     
-    // *** CRITICAL: RTP Session Monitoring Setup for H.264 video ***
+    // Track all supported receive video channels; only H.264 uses the RFC 6184 depacketizer.
     if (channel.GetCapability().GetMainType() == H323Capability::e_Video && 
         direction == H323Channel::IsReceiver && 
-        capability.Find("H.264") != P_MAX_INDEX) {
+        VideoCodecPreference(capability) < 3) {
       
       // ==== ALWAYS-ON: VIDEO RX ESTABLISHED MARKER ====
       PTRACE(1, "H323ASKW\t🎬 Video RX channel established"
@@ -9034,10 +9102,10 @@ PBoolean MyH323Connection::OnStartLogicalChannel(H323Channel & channel) {
                   << ", cap=" << channel.GetCapability().GetFormatName()
                   << ", lc=" << channel.GetNumber() << ")");
       
-      PTRACE(1, "H323ASKW\t🎯 Setting up H.264 RTV receive monitoring for sessionID=" << sessionID);
+      PTRACE(1, "H323ASKW\tSetting up " << capability << " receive monitoring for sessionID=" << sessionID);
       
-      // Initialize H.264 depacketizer for this session
-      InitializeH264Depacketizer(sessionID);
+      if (VideoCodecPreference(capability) == 0)
+        InitializeH264Depacketizer(sessionID);
       
       // Store session information for RTP monitoring
       // Note: UseSession requires additional parameters in H323Plus, so we'll use alternative approach
@@ -9048,9 +9116,9 @@ PBoolean MyH323Connection::OnStartLogicalChannel(H323Channel & channel) {
       } else {
         m_videoSessionID = sessionID;
         m_videoChannelActive = TRUE;
-        PTRACE(1, "H323ASKW\t✅ H.264 video session registered for monitoring: SessionID=" << sessionID);
+        PTRACE(1, "H323ASKW\tVideo session registered for monitoring: SessionID=" << sessionID);
       }
-      PTRACE(1, "H323ASKW\t⚡ H.264 RTP monitoring setup complete - ready for packet processing");
+      PTRACE(1, "H323ASKW\tVideo receive monitoring setup complete");
     }
     
     // *** COMPREHENSIVE EVENT INTEGRATION: Record OLC Start Event ***
@@ -10598,6 +10666,34 @@ PBoolean MyH323Connection::OpenVideoChannel(PBoolean isEncoding, H323VideoCodec 
 #if (H323PLUS_VER >= 1271)
   isH239 = codec.GetRTPSessionID() > 2;
 #endif
+  PCaselessString codecName(codec.GetMediaFormat());
+  int codecPreference = VideoCodecPreference(codecName);
+  bool isLegacyVideo = !isH239 && (codecPreference == 1 || codecPreference == 2);
+  unsigned videoWidth = 1280;
+  unsigned videoHeight = 720;
+  if (isLegacyVideo) {
+    if (codecName.Find("SQCIF") != P_MAX_INDEX) {
+      videoWidth = 128;
+      videoHeight = 96;
+    } else if (codecName.Find("16CIF") != P_MAX_INDEX) {
+      videoWidth = 1408;
+      videoHeight = 1152;
+    } else if (codecName.Find("4CIF") != P_MAX_INDEX) {
+      videoWidth = 704;
+      videoHeight = 576;
+    } else if (codecName.Find("QCIF") != P_MAX_INDEX) {
+      videoWidth = 176;
+      videoHeight = 144;
+    } else if (codecName.Find("CIF") != P_MAX_INDEX) {
+      videoWidth = 352;
+      videoHeight = 288;
+    } else {
+      videoWidth = codec.GetWidth();
+      videoHeight = codec.GetHeight();
+    }
+    PTRACE(1, "H323ASKW\tUsing negotiated " << codecName << " frame size: "
+           << videoWidth << "x" << videoHeight);
+  }
   
   CoreVideoDeviceConfig videoCfg;
   bool useMosaic = false;
@@ -10607,7 +10703,7 @@ PBoolean MyH323Connection::OpenVideoChannel(PBoolean isEncoding, H323VideoCodec 
   }
   
   // Apply USB camera resolution if encoding and USB camera is enabled
-  if (isEncoding && (endpoint.IsUsingUSBCamera() || useMosaic)) {
+  if (isEncoding && !isLegacyVideo && (endpoint.IsUsingUSBCamera() || useMosaic)) {
     PTRACE(1, "H323ASKW\t*** APPLYING USB CAMERA RESOLUTION FOR VIDEO ENCODING ***");
     
     // CRITICAL FIX: Force 720p for MCU compatibility
@@ -10942,10 +11038,30 @@ PBoolean MyH323Connection::OpenVideoChannel(PBoolean isEncoding, H323VideoCodec 
     return FALSE;
   }
 
+  const bool letterboxLegacyVideo = isEncoding && isLegacyVideo && !useMosaic &&
+      device->GetFrameHeight() > 0 &&
+      device->GetFrameWidth() * 3 > device->GetFrameHeight() * 4;
+
+  if (isEncoding && isLegacyVideo) {
+    PTRACE(1, "H323ASKW\tLegacy video source " << device->GetFrameWidth() << 'x'
+           << device->GetFrameHeight() << ", mosaic=" << useMosaic
+           << ", direct-camera letterbox=" << letterboxLegacyVideo);
+  }
+
   PTRACE(3, "H323ASKW\tCreated video device: " << device->GetDeviceNames());
 
   // Set supported formats for codec
   if (isEncoding) {
+    if (isLegacyVideo) {
+      PVideoInputDevice::Capabilities caps;
+      PVideoFrameInfo frameInfo;
+      frameInfo.SetColourFormat("YUV420P");
+      frameInfo.SetFrameRate(endpoint.GetFrameRate());
+      frameInfo.SetFrameSize(videoWidth, videoHeight);
+      caps.framesizes.push_back(frameInfo);
+      codec.SetSupportedFormats(caps.framesizes);
+      codec.SetFrameSize(videoWidth, videoHeight);
+    } else {
 #if PTLIB_VER >= 2110
       PVideoInputDevice::Capabilities videoCaps;
       // 🎯 CRITICAL FIX: Use device name as driver parameter for PTLib 2110+
@@ -11022,16 +11138,26 @@ PBoolean MyH323Connection::OpenVideoChannel(PBoolean isEncoding, H323VideoCodec 
       
       codec.SetSupportedFormats(caps.framesizes);
     }
+    }
   }
 
-  // CRITICAL FIX: Force 720p resolution for H.264 compatibility
-  // Ignore codec's native resolution (may be 1920x1080) and use 720p
-  unsigned forceWidth = 1280;
-  unsigned forceHeight = 720;
-  PTRACE(1, "H323ASKW\t🎬 FORCING 720p resolution: " << forceWidth << "x" << forceHeight 
+  unsigned forceWidth = videoWidth;
+  unsigned forceHeight = videoHeight;
+  PTRACE(1, "H323ASKW\tConfiguring video device at " << forceWidth << "x" << forceHeight
          << " (codec reports: " << codec.GetWidth() << "x" << codec.GetHeight() << ")");
   
-  device->SetFrameSize(forceWidth, forceHeight);
+  PBoolean frameSizeSet = isLegacyVideo && isEncoding
+      ? device->SetFrameSizeConverter(forceWidth, forceHeight)
+      : device->SetFrameSize(forceWidth, forceHeight);
+  if (isLegacyVideo && !frameSizeSet) {
+    PTRACE(1, "H323ASKW\tCannot configure " << codecName << " video device at "
+           << forceWidth << "x" << forceHeight);
+    if (!(useMosaic && device == (PVideoDevice *)m_mosaicVideoInput))
+      delete device;
+    else
+      m_mosaicVideoInput = NULL;
+    return FALSE;
+  }
   device->SetColourFormatConverter("YUV420P");
   device->SetFrameRate(endpoint.GetFrameRate());
   
@@ -11063,7 +11189,7 @@ PBoolean MyH323Connection::OpenVideoChannel(PBoolean isEncoding, H323VideoCodec 
     
     // CRITICAL FIX: Always use MyVideoChannel for encoding to ensure proper H.323 codec pipeline
     PTRACE(1, "H323ASKW\t*** USING MyVideoChannel FOR H.323 ENCODER PIPELINE ***");
-    videoChannelOut = new MyVideoChannel(this, TRUE);  // TRUE = encoding (outgoing)
+    videoChannelOut = new MyVideoChannel(this, TRUE, letterboxLegacyVideo);  // TRUE = encoding (outgoing)
     
     videoChannelOut->AttachVideoReader((PVideoInputDevice *)device);
     PTRACE(1, "H323ASKW\t*** CAMERA DEVICE ATTACHED TO MyVideoChannel FOR H.323 ENCODING ***");
@@ -11627,21 +11753,11 @@ void MyH323Connection::OnSelectLogicalChannels()
   PTRACE(3, "H323ASKW\tPOLYCOM COMPATIBILITY: Preparing Video TX OpenLogicalChannel");
     
     const H323Capabilities & localCaps = GetLocalCapabilities();
-    const H323Capability * h264Cap = NULL;
-    
-    for (PINDEX i = 0; i < localCaps.GetSize(); i++) {
-        const H323Capability & cap = localCaps[i];
-        if (cap.GetMainType() == H323Capability::e_Video) {
-            PString formatName = cap.GetFormatName();
-            if (formatName.Find("H.264") != P_MAX_INDEX) {
-                h264Cap = &cap;
-                PTRACE(3, "H323ASKW\t   Found H.264 capability: " << formatName);
-                break;
-            }
-        }
-    }
-    
-    if (h264Cap) {
+    const H323Capabilities & remoteCaps = GetRemoteCapabilities();
+    H323Capability * videoCap = FindPreferredVideoCapability(localCaps,
+        remoteCaps.GetSize() > 0 ? &remoteCaps : NULL);
+
+    if (videoCap != NULL) {
         // *** CRITICAL: Check if H.245 control channel exists before attempting OLC ***
         H323ControlPDU pdu;
         PBoolean hasControlChannel = controlChannel != NULL && controlChannel->IsOpen();
@@ -11667,7 +11783,8 @@ void MyH323Connection::OnSelectLogicalChannels()
             SetBandwidthAvailable(50000, TRUE);   // 50 Mbps TX bandwidth
             SetBandwidthAvailable(50000, FALSE);  // 50 Mbps RX bandwidth
             
-            PBoolean result = OpenLogicalChannel(*h264Cap, 2, H323Channel::IsTransmitter);
+            PTRACE(2, "H323ASKW\tSelected video TX codec: " << videoCap->GetFormatName());
+            PBoolean result = OpenLogicalChannel(*videoCap, VIDEO_SESSION_ID, H323Channel::IsTransmitter);
             if (result) {
                 PTRACE(2, "H323ASKW\t✅ Video TX OLC sent successfully");
                 RecordOLCEvent("OLC_SENT", 2, "video");
@@ -11676,7 +11793,7 @@ void MyH323Connection::OnSelectLogicalChannels()
             }
         }
     } else {
-        PTRACE(2, "H323ASKW\tNo H.264 capability found for video TX");
+        PTRACE(2, "H323ASKW\tNo compatible H.264, H.263, or H.261 capability found for video TX");
     }
     
     // Continue to session protection logic below
@@ -14060,60 +14177,43 @@ PBoolean Qt6VideoOutputDevice::EndFrame()
 #endif // USE_QT6
 
 #ifdef H323_VIDEO
-// Implementation of delayed H.264 video channel opening
+// Implementation of delayed video channel opening
 void MyH323Connection::scheduleDelayedVideoChannelOpening()
 {
-    PTRACE(1, "H323ASKW\tScheduling delayed H.264 video channel opening in 3 seconds");
+    PTRACE(1, "H323ASKW\tScheduling delayed video channel opening in 3 seconds");
     m_delayedVideoChannelTimer.RunContinuous(3000); // Retry after 3 seconds
 }
 
 void MyH323Connection::DelayedVideoChannelOpening(PTimer &, INT)
 {
-    PTRACE(1, "H323ASKW\tExecuting delayed H.264 video channel opening");
+    PTRACE(1, "H323ASKW\tExecuting delayed video channel opening");
     m_delayedVideoChannelTimer.Stop(); // Stop the timer
     
     // Check if connection is still active and established
     if (IsEstablished()) {
-        PTRACE(1, "H323ASKW\tConnection still active, attempting delayed H.264 video channel opening");
+        PTRACE(1, "H323ASKW\tConnection still active, attempting delayed video channel opening");
         
         // Get current capabilities
         const H323Capabilities & remoteCapabilities = GetRemoteCapabilities();
         
-        // Look for H.264 capability specifically
-        H323Capability * h264Capability = NULL;
-        for (PINDEX i = 0; i < localCapabilities.GetSize(); i++) {
-            H323Capability & capability = localCapabilities[i];
-            if (capability.GetMainType() == H323Capability::e_Video) {
-                PString capName = capability.GetFormatName();
-                
-                // Check if this is H.264 and remote supports it
-                if ((capName.Find("H264") != P_MAX_INDEX || capName.Find("H.264") != P_MAX_INDEX)) {
-                    H323Capability * remoteCap = remoteCapabilities.FindCapability(capability);
-                    if (remoteCap != NULL) {
-                        h264Capability = &capability;
-                        PTRACE(1, "H323ASKW\tFound H.264 capability for delayed opening: " << capName);
-                        break;
-                    }
-                }
-            }
-        }
+        H323Capability * videoCapability = FindPreferredVideoCapability(localCapabilities, &remoteCapabilities);
         
-        if (h264Capability != NULL) {
-            PTRACE(1, "H323ASKW\tAttempting delayed H.264 video channel opening (via State Machine)");
+        if (videoCapability != NULL) {
+            PTRACE(1, "H323ASKW\tAttempting delayed video channel opening with " << videoCapability->GetFormatName());
             
             // Phase 2 Migration: Use state machine API
             if (m_h245State.canSendVideoOLC()) {
-                PTRACE(1, "H323ASKW\t🚀 Attempting delayed H.264 video TX (sessionID=2)");
+                PTRACE(1, "H323ASKW\tAttempting delayed video TX (sessionID=2)");
                 m_h245State.prepareVideoOLC();
-                bool result = OpenLogicalChannel(*h264Capability, 2, H323Channel::IsTransmitter);
+                bool result = OpenLogicalChannel(*videoCapability, 2, H323Channel::IsTransmitter);
                 if (result) {
-                    PTRACE(1, "H323ASKW\t📤 Delayed H.264 TX OLC sent - waiting for ACK/REJECT...");
+                    PTRACE(1, "H323ASKW\tDelayed video TX OLC sent - waiting for ACK/REJECT...");
                     m_h245State.markVideoOLCSent(2);
                 
                 // Verify the channel is active
                 H323Channel * activeVideoChannel = FindChannel(H323Capability::e_Video, true);
                 if (activeVideoChannel != NULL) {
-                    PTRACE(1, "H323ASKW\tConfirmed: Delayed H.264 video channel is active");
+                    PTRACE(1, "H323ASKW\tConfirmed: Delayed video channel is active");
                 } else {
                     PTRACE(1, "H323ASKW\tWarning: Delayed channel opened but not found in active channels");
                 }
@@ -14123,7 +14223,7 @@ void MyH323Connection::DelayedVideoChannelOpening(PTimer &, INT)
                 for (int attempt = 1; attempt <= 5; attempt++) {
                     PTRACE(1, "H323ASKW\tReceive channel attempt " << attempt << "/5");
                     
-                    if (OpenLogicalChannel(*h264Capability, 2, H323Channel::IsReceiver)) {
+                    if (OpenLogicalChannel(*videoCapability, 2, H323Channel::IsReceiver)) {
                         PTRACE(1, "H323ASKW\t*** SUCCESS: Receive channel established on attempt " << attempt << " ***");
                         break;
                     } else {
@@ -14133,14 +14233,14 @@ void MyH323Connection::DelayedVideoChannelOpening(PTimer &, INT)
                 }
                 
                 } else {
-                    PTRACE(1, "H323ASKW\t❌ Failed to send delayed H.264 TX OLC");
+                    PTRACE(1, "H323ASKW\tFailed to send delayed video TX OLC");
                     m_h245State.rejectVideo("Delayed OLC failed");
                 }
             } else {
-                PTRACE(1, "H323ASKW\t⚠️ Delayed H.264 channel SKIPPED (state=" << m_h245State.videoStateString() << ")");
+                PTRACE(1, "H323ASKW\tDelayed video channel skipped (state=" << m_h245State.videoStateString() << ")");
             }
         } else {
-            PTRACE(1, "H323ASKW\tNo H.264 capability available for delayed opening");
+            PTRACE(1, "H323ASKW\tNo common video capability available for delayed opening");
         }
     } else {
         PTRACE(1, "H323ASKW\tConnection no longer active, cancelling delayed video channel opening");
@@ -14211,21 +14311,12 @@ void MyH323Connection::AggressiveVideoReceiveRequest(PTimer&, INT)
     const H323Capabilities & remoteCapabilities = GetRemoteCapabilities();
     H323Capability * remoteVideoCapability = NULL;
     
-    // Look for H.264 capability in remote capabilities
-    for (PINDEX i = 0; i < remoteCapabilities.GetSize(); i++) {
-        const H323Capability & remoteCap = remoteCapabilities[i];
-        if (remoteCap.GetMainType() == H323Capability::e_Video) {
-            PString capName = remoteCap.GetFormatName();
-            PTRACE(1, "H323ASKW\tFound remote video capability: " << capName);
-            if (capName.Find("H264") != P_MAX_INDEX || capName.Find("H.264") != P_MAX_INDEX) {
-                remoteVideoCapability = const_cast<H323Capability*>(&remoteCap);
-                PTRACE(1, "H323ASKW\tSelected remote H.264 capability for receive request");
-                break;
-            }
-        }
-    }
+    remoteVideoCapability = FindPreferredVideoCapability(GetLocalCapabilities(),
+                                                          &remoteCapabilities, true);
     
     if (remoteVideoCapability != NULL) {
+        PTRACE(1, "H323ASKW\tSelected remote video capability for receive request: "
+               << remoteVideoCapability->GetFormatName());
         PTRACE(1, "H323ASKW\t*** REQUESTING VIDEO TRANSMISSION FROM REMOTE ***");
         PTRACE(1, "H323ASKW\tSending H.245 request for remote to open video logical channel to us");
         
@@ -14301,29 +14392,15 @@ void MyH323Connection::SendBidirectionalVideoRequestMode(PTimer&, INT)
     
     PTRACE(1, "H323ASKW\t📡 NEW STRATEGY: Directly request video RX channel from Polycom");
     
-    // Find H.264 capability in remote capabilities
     const H323Capabilities & remoteCaps = GetRemoteCapabilities();
-    H323Capability * remoteH264Cap = NULL;
+    const H323Capabilities & localCaps = GetLocalCapabilities();
+    H323Capability * remoteVideoCap = FindPreferredVideoCapability(localCaps, &remoteCaps, true);
     
-    PTRACE(1, "H323ASKW\t🔍 Searching remote capabilities for H.264...");
-    for (PINDEX i = 0; i < remoteCaps.GetSize(); i++) {
-        const H323Capability & cap = remoteCaps[i];
-        if (cap.GetMainType() == H323Capability::e_Video) {
-            PString formatName = cap.GetFormatName();
-            PTRACE(2, "H323ASKW\t  Remote cap[" << i << "]: " << formatName);
-            if (formatName.Find("H.264") != P_MAX_INDEX || formatName.Find("H264") != P_MAX_INDEX) {
-                remoteH264Cap = const_cast<H323Capability*>(&cap);
-                PTRACE(1, "H323ASKW\t✅ Found remote H.264 capability: " << formatName 
-                       << " (capNumber=" << cap.GetCapabilityNumber() << ")");
-                break;
-            }
-        }
-    }
-    
-    if (remoteH264Cap == NULL) {
-        PTRACE(1, "H323ASKW\t❌ Remote does not support H.264 - cannot request video");
+    if (remoteVideoCap == NULL) {
+        PTRACE(1, "H323ASKW\tNo common video codec available for receive request");
         return;
     }
+    PTRACE(1, "H323ASKW\tSelected remote video codec: " << remoteVideoCap->GetFormatName());
     
     // NEW APPROACH: Send FlowControlCommand to signal we're ready for video
     PTRACE(1, "H323ASKW\t📤 APPROACH 1: Sending FlowControlCommand to signal video readiness");
@@ -14366,28 +14443,17 @@ void MyH323Connection::SendBidirectionalVideoRequestMode(PTimer&, INT)
     // APPROACH 4: CRITICAL - Use LOCAL capability to open receive channel
     PTRACE(1, "H323ASKW\t📤 APPROACH 4 (CRITICAL): Opening our own Video RX logical channel");
     
-    const H323Capabilities & localCaps = GetLocalCapabilities();
-    const H323Capability * localH264Cap = NULL;
+    H323Capability * localVideoCap = FindPreferredVideoCapability(localCaps, &remoteCaps);
     
-    for (PINDEX i = 0; i < localCaps.GetSize(); i++) {
-        const H323Capability & cap = localCaps[i];
-        PString formatName = cap.GetFormatName();
-        if (formatName.Find("H.264") != P_MAX_INDEX) {
-            localH264Cap = &cap;
-            PTRACE(1, "H323ASKW\t   Found LOCAL H.264 capability: " << formatName);
-            break;
-        }
-    }
-    
-    if (!localH264Cap) {
-        PTRACE(1, "H323ASKW\t❌ No local H.264 capability!");
+    if (!localVideoCap) {
+        PTRACE(1, "H323ASKW\tNo local video capability compatible with remote endpoint");
         return;
     }
     
     PBoolean rxChannelResult = false;
     for (unsigned sessionID = 2; sessionID <= 3 && !rxChannelResult; sessionID++) {
         PTRACE(1, "H323ASKW\t   Trying sessionID=" << sessionID);
-        rxChannelResult = OpenLogicalChannel(*localH264Cap, sessionID, H323Channel::IsReceiver);
+        rxChannelResult = OpenLogicalChannel(*localVideoCap, sessionID, H323Channel::IsReceiver);
         if (rxChannelResult) {
             PTRACE(1, "H323ASKW\t✅✅✅ Video RX channel request sent! sessionID=" << sessionID);
             break;
@@ -14434,43 +14500,31 @@ void MyH323Connection::ProactiveVideoChannelRequest(PTimer&, INT)
     
     PTRACE(1, "H323ASKW\t*** NO VIDEO CHANNEL DETECTED - INITIATING PROACTIVE REQUEST (attempt " << (m_proactiveVideoRetryCount + 1) << "/3) ***");
     
-    // H.264能力を取得
     const H323Capabilities & localCaps = GetLocalCapabilities();
-    H323Capability * h264Cap = NULL;
+    const H323Capabilities & remoteCaps = GetRemoteCapabilities();
+    H323Capability * videoCap = FindPreferredVideoCapability(localCaps, &remoteCaps);
     
-    for (PINDEX i = 0; i < localCaps.GetSize(); i++) {
-        H323Capability & cap = localCaps[i];
-        if (cap.GetMainType() == H323Capability::e_Video) {
-            PString capName = cap.GetFormatName();
-            if (capName.Find("H264") != P_MAX_INDEX || capName.Find("H.264") != P_MAX_INDEX) {
-                h264Cap = &cap;
-                PTRACE(1, "H323ASKW\tFound H.264 capability for proactive channel: " << capName);
-                break;
-            }
-        }
-    }
-    
-    if (h264Cap != NULL) {
-        PTRACE(1, "H323ASKW\t*** SENDING PROACTIVE H.264 VIDEO CHANNEL REQUEST ***");
+    if (videoCap != NULL) {
+        PTRACE(1, "H323ASKW\tSending proactive video channel request with " << videoCap->GetFormatName());
         
         // 方法1: H.245のOpenLogicalChannelProcedureを使用
-        PTRACE(1, "H323ASKW\tMethod 1: Requesting H.264 video logical channel via H.245");
+        PTRACE(1, "H323ASKW\tMethod 1: Requesting video logical channel via H.245");
         
         // H.323Capabilityからチャンネル番号を取得
-        unsigned sessionID = h264Cap->GetDefaultSessionID();
-        PTRACE(1, "H323ASKW\tUsing session ID: " << sessionID << " for H.264 capability");
+        unsigned sessionID = videoCap->GetDefaultSessionID();
+        PTRACE(1, "H323ASKW\tUsing session ID: " << sessionID << " for " << videoCap->GetFormatName());
         
         // 🚨 Phase 2 Migration: Use state machine for proactive video request
         if (m_h245State.canSendVideoOLC()) {
-            PTRACE(1, "H323ASKW\t🚀 Sending proactive H.264 video TX request (sessionID=" << sessionID << ")");
+            PTRACE(1, "H323ASKW\tSending proactive video TX request (sessionID=" << sessionID << ")");
             m_h245State.prepareVideoOLC();
-            bool result = OpenLogicalChannel(*h264Cap, sessionID, H323Channel::IsTransmitter);
+            bool result = OpenLogicalChannel(*videoCap, sessionID, H323Channel::IsTransmitter);
             if (result) {
-                PTRACE(1, "H323ASKW\t📤 Proactive H.264 TX OLC sent - MCU should respond");
+                PTRACE(1, "H323ASKW\tProactive video TX OLC sent - MCU should respond");
                 m_h245State.markVideoOLCSent(sessionID);
                 m_proactiveVideoRetryCount = 0; // Reset counter on success
             } else {
-                PTRACE(1, "H323ASKW\t❌ Failed to send proactive H.264 TX OLC");
+                PTRACE(1, "H323ASKW\tFailed to send proactive video TX OLC");
                 m_h245State.rejectVideo("Proactive OLC failed");
                 // Increment retry count and schedule next attempt
                 m_proactiveVideoRetryCount++;
@@ -14499,7 +14553,7 @@ void MyH323Connection::ProactiveVideoChannelRequest(PTimer&, INT)
         PTRACE(1, "H323ASKW\tRe-advertising video capabilities to MCU");
         
     } else {
-        PTRACE(1, "H323ASKW\t❌ ERROR: No H.264 capability found for proactive request");
+        PTRACE(1, "H323ASKW\tNo common video capability found for proactive request");
         m_proactiveVideoRetryCount++;
         if (m_proactiveVideoRetryCount < 3) {
             PTRACE(1, "H323ASKW\t🔄 Scheduling next proactive attempt in 3 seconds (attempt " << (m_proactiveVideoRetryCount + 1) << "/3)");
@@ -14634,43 +14688,32 @@ void MyH323Connection::BidirectionalVideoChannelTimer(PTimer &, H323_INT)
   
   PTRACE(1, "H323ASKW\t*** OPENING VIDEO TRANSMIT CHANNEL WITH MCU sessionID=" << mcuVideoSessionID << " ***");
   
-  // Find our H.264 capability
   const H323Capabilities & localCaps = GetLocalCapabilities();
-  H323Capability * h264Cap = NULL;
+  const H323Capabilities & remoteCaps = GetRemoteCapabilities();
+  H323Capability * videoCap = FindPreferredVideoCapability(localCaps, &remoteCaps);
   
-  for (PINDEX i = 0; i < localCaps.GetSize(); i++) {
-    H323Capability & cap = localCaps[i];
-    if (cap.GetMainType() == H323Capability::e_Video) {
-      PString capName = cap.GetFormatName();
-      if (capName.Find("H264") != P_MAX_INDEX || capName.Find("H.264") != P_MAX_INDEX) {
-        h264Cap = &cap;
-        PTRACE(1, "H323ASKW\tFound H.264 capability for transmit channel: " << capName);
-        break;
-      }
-    }
-  }
-  
-  if (h264Cap) {
-    PTRACE(1, "H323ASKW\t*** OPENING H.264 TRANSMIT CHANNEL WITH MCU'S sessionID=" << mcuVideoSessionID << " ***");
+  if (videoCap) {
+    PTRACE(1, "H323ASKW\tOpening " << videoCap->GetFormatName()
+           << " transmit channel with MCU sessionID=" << mcuVideoSessionID);
     
     // 🚨 Phase 2 Migration: Use state machine for MCU bidirectional video
     if (m_h245State.canSendVideoOLC()) {
-      PTRACE(1, "H323ASKW\t🚀 Opening H.264 TX with MCU sessionID=" << mcuVideoSessionID);
+      PTRACE(1, "H323ASKW\tOpening video TX with MCU sessionID=" << mcuVideoSessionID);
       m_h245State.prepareVideoOLC();
-      bool result = OpenLogicalChannel(*h264Cap, mcuVideoSessionID, H323Channel::IsTransmitter);
+      bool result = OpenLogicalChannel(*videoCap, mcuVideoSessionID, H323Channel::IsTransmitter);
       if (result) {
-        PTRACE(1, "H323ASKW\t📤 H.264 TX OLC sent with MCU sessionID=" << mcuVideoSessionID);
+        PTRACE(1, "H323ASKW\tVideo TX OLC sent with MCU sessionID=" << mcuVideoSessionID);
         PTRACE(1, "H323ASKW\t*** MCU SHOULD NOW SEE OUR VIDEO TX! ***");
         m_h245State.markVideoOLCSent(mcuVideoSessionID);
       } else {
-        PTRACE(1, "H323ASKW\t❌ Failed to send H.264 TX OLC with MCU sessionID");
+        PTRACE(1, "H323ASKW\tFailed to send video TX OLC with MCU sessionID");
         m_h245State.rejectVideo("MCU bidirectional OLC failed");
       }
     } else {
       PTRACE(1, "H323ASKW\t⚠️ MCU bidirectional channel SKIPPED (state=" << m_h245State.videoStateString() << ")");
     }
   } else {
-    PTRACE(1, "H323ASKW\tNo H.264 capability found for bidirectional video");
+    PTRACE(1, "H323ASKW\tNo common video capability found for bidirectional video");
   }
 }
 
@@ -18476,10 +18519,13 @@ void MyH323Connection::OnOlcRetryTimeout(PTimer&, INT) {
   // Attempt to reopen video channel
 #ifdef H323_VIDEO
   const H323Capabilities & localCaps = GetLocalCapabilities();
-  H323Capability* h264Cap = localCaps.FindCapability("H.264");
-  if (h264Cap != NULL) {
+  const H323Capabilities & remoteCaps = GetRemoteCapabilities();
+  H323Capability * videoCap = FindPreferredVideoCapability(localCaps,
+      remoteCaps.GetSize() > 0 ? &remoteCaps : NULL);
+  if (videoCap != NULL) {
     // Try to open video transmit channel again
-    bool result = OpenLogicalChannel(*h264Cap, 2, H323Channel::IsTransmitter); // Session ID 2 for video
+    PTRACE(1, "H323ASKW\tOLC RETRY: Selected " << videoCap->GetFormatName());
+    bool result = OpenLogicalChannel(*videoCap, VIDEO_SESSION_ID, H323Channel::IsTransmitter);
     if (result) {
       PTRACE(1, "H323ASKW\t📤 OLC RETRY: Video TX OLC resent - waiting for ACK/REJECT...");
       
@@ -18491,7 +18537,7 @@ void MyH323Connection::OnOlcRetryTimeout(PTimer&, INT) {
       PTRACE(1, "H323ASKW\t❌ OLC RETRY: Failed to resend video TX OLC");
     }
   } else {
-    PTRACE(1, "H323ASKW\t❌ OLC RETRY: No H.264 capability found for retry");
+    PTRACE(1, "H323ASKW\tOLC RETRY: No compatible video capability found");
   }
 #else
   PTRACE(1, "H323ASKW\t❌ OLC RETRY: Video support not compiled");
@@ -21052,17 +21098,11 @@ void MosaicVideoInputDevice::CopyTileToMosaic(
     return;
   }
 
-  // Keep source aspect ratio (letterbox/pillarbox inside each tile).
+  // CIF has non-square samples; size the active image for its 4:3 display.
   unsigned copyW = tileW;
   unsigned copyH = tileH;
-  const uint64_t lhs = static_cast<uint64_t>(srcW) * tileH;
-  const uint64_t rhs = static_cast<uint64_t>(srcH) * tileW;
-  if (lhs > rhs) {
-    copyH = static_cast<unsigned>((static_cast<uint64_t>(tileW) * srcH) / srcW);
-  } else if (lhs < rhs) {
-    copyW = static_cast<unsigned>((static_cast<uint64_t>(tileH) * srcW) / srcH);
-  }
-  if (copyW == 0 || copyH == 0) {
+  if (!VideoLetterbox::FitTile(srcW, srcH, tileW, tileH,
+                               VideoLetterbox::IsCifRaster(dstW, dstH), copyW, copyH)) {
     return;
   }
 

@@ -13,6 +13,7 @@
 
 #include "qt_video_window.h"
 #include "video_frame_size.h"
+#include "video_letterbox.h"
 #include <QDebug>
 #include <QThread>
 #include <QCoreApplication>
@@ -565,7 +566,10 @@ void QtVideoWidget::updateTargetRect()
 {
     QSize frameSize = m_currentFrame.size();
     QSize widgetSize = size();
-    QSize scaledSize = frameSize.scaled(widgetSize, Qt::KeepAspectRatio);
+    QSize displaySize = frameSize;
+    if (VideoLetterbox::IsCifRaster(frameSize.width(), frameSize.height()))
+        displaySize.setWidth(frameSize.width() * 12 / 11);
+    QSize scaledSize = displaySize.scaled(widgetSize, Qt::KeepAspectRatio);
     
     int x = (widgetSize.width() - scaledSize.width()) / 2;
     int y = (widgetSize.height() - scaledSize.height()) / 2;
@@ -1994,6 +1998,8 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
                 QT_TRACE(1, "WARNING: QtVideoMainWindow was deleted before invokeMethod executed");
                 return;
             }
+            if (safeThis->m_h323Connection != connection)
+                safeThis->clearVideoFramesToBlack();
             safeThis->m_h323Connection = connection;
             if (connection) {
                 QT_TRACE(1, "H323Connection set - UI controls enabled (via invokeMethod)");
@@ -2060,6 +2066,8 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
             safeThis->updateSingleDevicePanelVisibility();
         }, Qt::QueuedConnection);
     } else {
+        if (m_h323Connection != connection)
+            clearVideoFramesToBlack();
         m_h323Connection = connection;
         if (connection) {
             QT_TRACE(1, "H323Connection set - UI controls enabled (direct call)");
@@ -2129,6 +2137,7 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
 
 void QtVideoMainWindow::enqueueLocalFrame(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize)
 {
+    const quint64 generation = m_frameGeneration.load();
     size_t ySize = 0;
     size_t requiredSize = 0;
     if (!yuvData || !VideoFrameSize::YUV420P(width, height, ySize, requiredSize) ||
@@ -2144,11 +2153,12 @@ void QtVideoMainWindow::enqueueLocalFrame(const unsigned char* yuvData, unsigned
     
     // YUVデータをコピーしてシグナル発行
     QByteArray data(reinterpret_cast<const char*>(yuvData), static_cast<int>(requiredSize));
-    emit localFrameReady(data, width, height);
+    emit localFrameReady(data, width, height, generation);
 }
 
 void QtVideoMainWindow::enqueueRemoteFrame(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize)
 {
+    const quint64 generation = m_frameGeneration.load();
     size_t ySize = 0;
     size_t requiredSize = 0;
     if (!yuvData || !VideoFrameSize::YUV420P(width, height, ySize, requiredSize) ||
@@ -2156,12 +2166,13 @@ void QtVideoMainWindow::enqueueRemoteFrame(const unsigned char* yuvData, unsigne
     
     // YUVデータをコピーしてシグナル発行
     QByteArray data(reinterpret_cast<const char*>(yuvData), static_cast<int>(requiredSize));
-    emit remoteFrameReady(data, width, height);
+    emit remoteFrameReady(data, width, height, generation);
 }
 
-void QtVideoMainWindow::onLocalFrameReady(const QByteArray& yuvData, unsigned width, unsigned height)
+void QtVideoMainWindow::onLocalFrameReady(const QByteArray& yuvData, unsigned width, unsigned height,
+                                          quint64 generation)
 {
-    if (m_h323Connection == nullptr || !m_connectEstablished) {
+    if (generation != m_frameGeneration.load() || m_h323Connection == nullptr || !m_connectEstablished) {
         return;
     }
 
@@ -2180,9 +2191,10 @@ void QtVideoMainWindow::onLocalFrameReady(const QByteArray& yuvData, unsigned wi
     }
 }
 
-void QtVideoMainWindow::onRemoteFrameReady(const QByteArray& yuvData, unsigned width, unsigned height)
+void QtVideoMainWindow::onRemoteFrameReady(const QByteArray& yuvData, unsigned width, unsigned height,
+                                           quint64 generation)
 {
-    if (m_h323Connection == nullptr || !m_connectEstablished) {
+    if (generation != m_frameGeneration.load() || m_h323Connection == nullptr || !m_connectEstablished) {
         return;
     }
 
@@ -2206,9 +2218,11 @@ void QtVideoMainWindow::setConnectionStatus(const QString& status)
 {
     if (status.startsWith("Calling ") || status.startsWith("Connecting ")) {
         m_connectEstablished = false;
+        clearVideoFramesToBlack();
         startConnectBlink();
     } else if (status.startsWith("Call failed") || status.startsWith("Disconnected") || status.startsWith("Disconnecting")) {
         m_connectEstablished = false;
+        clearVideoFramesToBlack();
         stopConnectBlink();
     }
 
@@ -2255,6 +2269,7 @@ void QtVideoMainWindow::setLocalCameraMuted(bool muted)
 
 void QtVideoMainWindow::clearVideoFramesToBlack()
 {
+    ++m_frameGeneration;
     if (m_localVideo) {
         m_localVideo->clearFrameToBlack();
     }

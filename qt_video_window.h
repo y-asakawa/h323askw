@@ -575,12 +575,12 @@ signals:
     /**
      * @brief ローカルフレーム到着シグナル（スレッド間通信用）
      */
-    void localFrameReady(const QByteArray& yuvData, unsigned width, unsigned height);
+    void localFrameReady(const QByteArray& yuvData, unsigned width, unsigned height, quint64 generation);
 
     /**
      * @brief リモートフレーム到着シグナル（スレッド間通信用）
      */
-    void remoteFrameReady(const QByteArray& yuvData, unsigned width, unsigned height);
+    void remoteFrameReady(const QByteArray& yuvData, unsigned width, unsigned height, quint64 generation);
 
     /**
      * @brief 接続要求シグナル
@@ -622,12 +622,12 @@ public slots:
     /**
      * @brief ローカルフレームを処理（Qtメインスレッド）
      */
-    void onLocalFrameReady(const QByteArray& yuvData, unsigned width, unsigned height);
+    void onLocalFrameReady(const QByteArray& yuvData, unsigned width, unsigned height, quint64 generation);
 
     /**
      * @brief リモートフレームを処理（Qtメインスレッド）
      */
-    void onRemoteFrameReady(const QByteArray& yuvData, unsigned width, unsigned height);
+    void onRemoteFrameReady(const QByteArray& yuvData, unsigned width, unsigned height, quint64 generation);
 
     // ==================== Phase 1: Multi-Device Audio UI Slots ====================
     
@@ -843,6 +843,7 @@ private:
 
     // 状態
     MyH323Connection* m_h323Connection;
+    std::atomic<quint64> m_frameGeneration{0};
     bool m_running;
 
     // ==================== Phase 1: Multi-Device Audio UI Members ====================

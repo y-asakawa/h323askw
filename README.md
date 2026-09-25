@@ -370,8 +370,29 @@ PKG_CONFIG_PATH="$(brew --prefix qt)/lib/pkgconfig:$(brew --prefix openssl@3)/li
 The [build workflow](.github/workflows/build.yml) runs the same application
 build on a clean macOS runner for each push and pull request.
 `PWLIBDIR`, `OPENH323DIR`, and `MOC` may be set to use different locations.
-`make` and `make video` build the application only; they do not produce a DMG
-or H.264 codec plugin.
+The commands above build the static CI target. For a local build that uses the
+macOS camera plugin, also build shared PTLib and H323Plus, then build H323ASKW:
+
+```bash
+cd ../ptlib && make optshared
+cd ../h323plus && make optshared
+cd ../h323askw && make
+```
+
+`make` (or `make default`) builds `obj_Darwin_aarch64/h323askw` against the
+shared PTLib and H323Plus libraries. This is the build to use with dynamic
+camera plugins. For example, after building the PTLib macOS camera plugin,
+check its registration with:
+
+```bash
+./obj_Darwin_aarch64/h323askw --list-cameras
+```
+
+`make video` remains a static debug build for CI and writes
+`obj_Darwin_aarch64_d_s/h323askw`; its separate PTLib registry cannot use the
+shared macOS camera plugin. Both targets build the application only: neither
+produces a DMG or an H.264 codec plugin. The camera plugin must be built
+separately and is not included in the public upstream PTLib checkout.
 
 For optional codec plugins and application bundle packaging, see
 [the build guide](docs/APP_BUNDLE_BUILD_GUIDE.md). A public H323Plus checkout
