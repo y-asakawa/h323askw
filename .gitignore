@@ -31,6 +31,9 @@ obj_Darwin_aarch64_d_s/
 # Distribution
 dist/
 
+# Local-only bundle builder (not published)
+/create_app_bundle_local.sh
+
 # Local notes and generated reference manuals
 *.pdf
 *.txt

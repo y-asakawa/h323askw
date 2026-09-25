@@ -67,7 +67,7 @@ H.264プラグインはH323Plusのconfigure後に
 | PTLib | `libpt.2.10.9.dylib` | `ptlib/lib_Darwin_aarch64/` |
 | OpenSSL | `libssl.3.dylib`, `libcrypto.3.dylib` | `/opt/homebrew/opt/openssl@3/lib/` |
 | SDL2 | `libSDL2-2.0.0.dylib` | `/opt/homebrew/opt/sdl2/lib/` |
-| FFmpeg | `libavcodec.62.dylib`, `libavutil.60.dylib`, `libswresample.6.dylib`, `libswscale.9.dylib` | `/opt/homebrew/opt/ffmpeg/lib/` |
+| FFmpeg | `libavformat`, `libavcodec`, `libavutil`, `libswresample`, `libswscale` の各バージョン付きdylib | `/opt/homebrew/opt/ffmpeg/lib/` |
 | x264 | `libx264.165.dylib` | `/opt/homebrew/opt/x264/lib/` |
 | PortAudio | `libportaudio.2.dylib` | `/opt/homebrew/opt/portaudio/lib/` |
 | H.264 Plugin | `h264_video_pwplugin.dylib` | `h323plus/plugins/video/H.264/` |
@@ -95,10 +95,11 @@ H323ASKW.app/
     │   ├── libssl.3.dylib
     │   ├── libcrypto.3.dylib
     │   ├── libSDL2-2.0.0.dylib
-    │   ├── libavcodec.62.dylib
-    │   ├── libavutil.60.dylib
-    │   ├── libswresample.6.dylib
-    │   ├── libswscale.9.dylib
+    │   ├── libavformat.<major>.dylib
+    │   ├── libavcodec.<major>.dylib
+    │   ├── libavutil.<major>.dylib
+    │   ├── libswresample.<major>.dylib
+    │   ├── libswscale.<major>.dylib
     │   ├── libx264.165.dylib
     │   └── libportaudio.2.dylib
     └── Resources/

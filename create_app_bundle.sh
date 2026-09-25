@@ -62,6 +62,8 @@ OPENSSL_CRYPTO_LIB=""
 OPENSSL_CRYPTO_NAME=""
 AVCODEC_LIB=""
 AVCODEC_NAME=""
+AVFORMAT_LIB=""
+AVFORMAT_NAME=""
 AVUTIL_LIB=""
 AVUTIL_NAME=""
 SWRESAMPLE_LIB=""
@@ -498,12 +500,17 @@ copy_libraries() {
     
     # FFmpeg (実体ファイルをコピー・バージョン自動検出)
     AVCODEC_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/ffmpeg/lib" "libavcodec")
+    AVFORMAT_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/ffmpeg/lib" "libavformat")
     AVUTIL_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/ffmpeg/lib" "libavutil")
     SWRESAMPLE_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/ffmpeg/lib" "libswresample")
     SWSCALE_LIB=$(find_latest_dylib "${HOMEBREW_DIR}/opt/ffmpeg/lib" "libswscale")
     if [ -n "$AVCODEC_LIB" ]; then
         AVCODEC_NAME=$(primary_dylib_basename "$AVCODEC_LIB")
         cp "$AVCODEC_LIB" "${FRAMEWORKS}/${AVCODEC_NAME}"
+    fi
+    if [ -n "$AVFORMAT_LIB" ]; then
+        AVFORMAT_NAME=$(primary_dylib_basename "$AVFORMAT_LIB")
+        cp "$AVFORMAT_LIB" "${FRAMEWORKS}/${AVFORMAT_NAME}"
     fi
     if [ -n "$AVUTIL_LIB" ]; then
         AVUTIL_NAME=$(primary_dylib_basename "$AVUTIL_LIB")
@@ -772,6 +779,7 @@ fix_library_paths() {
     [ -n "$OPENSSL_SSL_NAME" ] && install_name_tool -id "@executable_path/../Frameworks/${OPENSSL_SSL_NAME}" "${FRAMEWORKS}/${OPENSSL_SSL_NAME}"
     [ -n "$OPENSSL_CRYPTO_NAME" ] && install_name_tool -id "@executable_path/../Frameworks/${OPENSSL_CRYPTO_NAME}" "${FRAMEWORKS}/${OPENSSL_CRYPTO_NAME}"
     [ -n "$AVCODEC_NAME" ] && install_name_tool -id "@executable_path/../Frameworks/${AVCODEC_NAME}" "${FRAMEWORKS}/${AVCODEC_NAME}"
+    [ -n "$AVFORMAT_NAME" ] && install_name_tool -id "@executable_path/../Frameworks/${AVFORMAT_NAME}" "${FRAMEWORKS}/${AVFORMAT_NAME}"
     [ -n "$SPEEXDSP_NAME" ] && install_name_tool -id "@executable_path/../Frameworks/${SPEEXDSP_NAME}" "${FRAMEWORKS}/${SPEEXDSP_NAME}"
     
     # Qt6 フレームワークのIDを修正
@@ -904,6 +912,7 @@ fix_library_paths() {
         install_name_tool -id "@executable_path/../Resources/plugins/video/H.263-ffmpeg/h263-ffmpeg_video_pwplugin.dylib" \
             "${H263_PLUGIN}" 2>/dev/null || log_warn "  H.263プラグインID設定をスキップ"
         
+        [ -n "$AVFORMAT_NAME" ] && change_dep_with_fallback "${H263_PLUGIN}" "libavformat.*\\.dylib" "@loader_path/../../../../Frameworks/${AVFORMAT_NAME}" "@executable_path/../Frameworks/${AVFORMAT_NAME}" || log_warn "  H.263: libavformat の依存書き換えに失敗"
         [ -n "$AVCODEC_NAME" ] && change_dep_with_fallback "${H263_PLUGIN}" "libavcodec.*\\.dylib" "@loader_path/../../../../Frameworks/${AVCODEC_NAME}" "@executable_path/../Frameworks/${AVCODEC_NAME}" || log_warn "  H.263: libavcodec の依存書き換えに失敗"
         [ -n "$AVUTIL_NAME" ] && change_dep_with_fallback "${H263_PLUGIN}" "libavutil.*\\.dylib" "@loader_path/../../../../Frameworks/${AVUTIL_NAME}" "@executable_path/../Frameworks/${AVUTIL_NAME}" || log_warn "  H.263: libavutil の依存書き換えに失敗"
     fi
