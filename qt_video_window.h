@@ -170,7 +170,7 @@ public:
      * @param width フレーム幅
      * @param height フレーム高さ
      */
-    void updateFrameYUV420P(const unsigned char* yuvData, unsigned width, unsigned height);
+    void updateFrameYUV420P(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize);
 
     /**
      * @brief フレームを更新（RGB24形式）
@@ -178,7 +178,7 @@ public:
      * @param width フレーム幅
      * @param height フレーム高さ
      */
-    void updateFrameRGB24(const unsigned char* rgbData, unsigned width, unsigned height);
+    void updateFrameRGB24(const unsigned char* rgbData, unsigned width, unsigned height, size_t dataSize);
 
     /**
      * @brief 表示を黒フレームで強制クリア
@@ -232,7 +232,7 @@ protected:
     QSize minimumSizeHint() const override;
 
 private:
-    void convertYUV420PtoRGB(const unsigned char* yuvData, unsigned width, unsigned height);
+    bool convertYUV420PtoRGB(const unsigned char* yuvData, unsigned width, unsigned height);
     void drawMicrophoneIcon(QPainter& painter, int x, int y, int size, bool muted);
     void updateTargetRect();  // 描画領域の再計算
 
@@ -529,12 +529,12 @@ public:
     /**
      * @brief ローカルフレームを更新（H.323スレッドから呼び出し可能）
      */
-    void enqueueLocalFrame(const unsigned char* yuvData, unsigned width, unsigned height);
+    void enqueueLocalFrame(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize);
 
     /**
      * @brief リモートフレームを更新（H.323スレッドから呼び出し可能）
      */
-    void enqueueRemoteFrame(const unsigned char* yuvData, unsigned width, unsigned height);
+    void enqueueRemoteFrame(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize);
 
     /**
      * @brief ウィンドウが実行中かどうか

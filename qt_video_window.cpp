@@ -12,6 +12,7 @@
 #endif
 
 #include "qt_video_window.h"
+#include "video_frame_size.h"
 #include <QDebug>
 #include <QThread>
 #include <QCoreApplication>
@@ -291,9 +292,12 @@ QtVideoWidget::~QtVideoWidget()
     QT_TRACE(1, "QtVideoWidget destroyed: " << m_title.toStdString());
 }
 
-void QtVideoWidget::updateFrameYUV420P(const unsigned char* yuvData, unsigned width, unsigned height)
+void QtVideoWidget::updateFrameYUV420P(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize)
 {
-    if (!yuvData || width == 0 || height == 0) {
+    size_t ySize = 0;
+    size_t requiredSize = 0;
+    if (!yuvData || !VideoFrameSize::YUV420P(width, height, ySize, requiredSize) ||
+        dataSize < requiredSize) {
         return;
     }
 
@@ -318,12 +322,9 @@ void QtVideoWidget::updateFrameYUV420P(const unsigned char* yuvData, unsigned wi
 
     QMutexLocker locker(&m_frameMutex);
     
-    m_frameWidth = width;
-    m_frameHeight = height;
-    
     // 📺 フレームデータ変更検出（最初の16バイトのチェックサム）
     unsigned int checksum = 0;
-    for (int i = 0; i < 16 && i < static_cast<int>(width * height); i++) {
+    for (size_t i = 0; i < 16 && i < ySize; i++) {
         checksum += yuvData[i];
     }
     static unsigned int lastChecksum = 0;
@@ -335,30 +336,38 @@ void QtVideoWidget::updateFrameYUV420P(const unsigned char* yuvData, unsigned wi
     lastChecksum = checksum;
     
     // YUV420P → RGB24 変換
-    convertYUV420PtoRGB(yuvData, width, height);
+    if (!convertYUV420PtoRGB(yuvData, width, height)) {
+        return;
+    }
+    m_frameWidth = width;
+    m_frameHeight = height;
 
     // タイマーでの再描画をリクエスト（イベントオーバーフロー防止）
     m_needsRepaint = true;
 }
 
-void QtVideoWidget::updateFrameRGB24(const unsigned char* rgbData, unsigned width, unsigned height)
+void QtVideoWidget::updateFrameRGB24(const unsigned char* rgbData, unsigned width, unsigned height, size_t dataSize)
 {
-    if (!rgbData || width == 0 || height == 0) {
+    size_t rgbSize = 0;
+    if (!rgbData || !VideoFrameSize::RGB24(width, height, rgbSize) || dataSize < rgbSize) {
         return;
     }
 
     QMutexLocker locker(&m_frameMutex);
-    
-    m_frameWidth = width;
-    m_frameHeight = height;
-    
-    // RGB24データをQImageに直接コピー（事前確保でcopy()を避ける）
-    size_t rgbSize = width * height * 3;
+
     if (m_currentFrame.width() != static_cast<int>(width) || 
         m_currentFrame.height() != static_cast<int>(height)) {
         m_currentFrame = QImage(width, height, QImage::Format_RGB888);
     }
-    memcpy(m_currentFrame.bits(), rgbData, rgbSize);
+    if (m_currentFrame.isNull()) {
+        return;
+    }
+    const size_t rowBytes = static_cast<size_t>(width) * 3;
+    for (unsigned y = 0; y < height; ++y) {
+        memcpy(m_currentFrame.scanLine(y), rgbData + static_cast<size_t>(y) * rowBytes, rowBytes);
+    }
+    m_frameWidth = width;
+    m_frameHeight = height;
 
     // タイマーでの再描画をリクエスト
     m_needsRepaint = true;
@@ -397,10 +406,15 @@ void QtVideoWidget::clearFrameToBlack(unsigned width, unsigned height)
     update();
 }
 
-void QtVideoWidget::convertYUV420PtoRGB(const unsigned char* yuvData, unsigned width, unsigned height)
+bool QtVideoWidget::convertYUV420PtoRGB(const unsigned char* yuvData, unsigned width, unsigned height)
 {
-    // YUV420Pのサイズ: Y = width*height, U = width*height/4, V = width*height/4
-    size_t ySize = width * height;
+    size_t ySize = 0;
+    size_t yuvSize = 0;
+    size_t rgbSize = 0;
+    if (!VideoFrameSize::YUV420P(width, height, ySize, yuvSize) ||
+        !VideoFrameSize::RGB24(width, height, rgbSize)) {
+        return false;
+    }
     size_t uvSize = ySize / 4;
     
     const unsigned char* yPlane = yuvData;
@@ -408,21 +422,25 @@ void QtVideoWidget::convertYUV420PtoRGB(const unsigned char* yuvData, unsigned w
     const unsigned char* vPlane = yuvData + ySize + uvSize;
 
     // RGB24バッファを確保（既存バッファを再利用）
-    size_t rgbSize = width * height * 3;
     if (m_rgbBuffer.size() != static_cast<int>(rgbSize)) {
-        m_rgbBuffer.resize(rgbSize);
-        // QImageも事前確保（ゼロコピー用）
+        m_rgbBuffer.resize(static_cast<int>(rgbSize));
+    }
+    if (m_currentFrame.width() != static_cast<int>(width) ||
+        m_currentFrame.height() != static_cast<int>(height)) {
         m_currentFrame = QImage(width, height, QImage::Format_RGB888);
+    }
+    if (m_rgbBuffer.size() != static_cast<int>(rgbSize) || m_currentFrame.isNull()) {
+        return false;
     }
     unsigned char* rgbData = reinterpret_cast<unsigned char*>(m_rgbBuffer.data());
 
     // YUV420P → RGB24 変換（SIMD最適化版）
     // NOTE: macOS NV12変換後のI420では Cb=U, Cr=V の順序
     for (unsigned y = 0; y < height; ++y) {
-        const unsigned char* yRow = yPlane + y * width;
-        const unsigned char* uRow = uPlane + (y / 2) * (width / 2);
-        const unsigned char* vRow = vPlane + (y / 2) * (width / 2);
-        unsigned char* rgbRow = rgbData + y * width * 3;
+        const unsigned char* yRow = yPlane + static_cast<size_t>(y) * width;
+        const unsigned char* uRow = uPlane + static_cast<size_t>(y / 2) * (width / 2);
+        const unsigned char* vRow = vPlane + static_cast<size_t>(y / 2) * (width / 2);
+        unsigned char* rgbRow = rgbData + static_cast<size_t>(y) * width * 3;
         
         for (unsigned x = 0; x < width; ++x) {
             int Y = yRow[x];
@@ -446,15 +464,11 @@ void QtVideoWidget::convertYUV420PtoRGB(const unsigned char* yuvData, unsigned w
         }
     }
 
-    // 事前確保済みQImageにデータをコピー（copy()を避ける）
-    if (m_currentFrame.width() == static_cast<int>(width) && 
-        m_currentFrame.height() == static_cast<int>(height)) {
-        // 直接メモリコピー（高速）
-        memcpy(m_currentFrame.bits(), rgbData, rgbSize);
-    } else {
-        // サイズ変更時のみ再作成
-        m_currentFrame = QImage(rgbData, width, height, width * 3, QImage::Format_RGB888).copy();
+    const size_t rowBytes = static_cast<size_t>(width) * 3;
+    for (unsigned y = 0; y < height; ++y) {
+        memcpy(m_currentFrame.scanLine(y), rgbData + static_cast<size_t>(y) * rowBytes, rowBytes);
     }
+    return true;
 }
 
 void QtVideoWidget::paintEvent(QPaintEvent* event)
@@ -2113,9 +2127,12 @@ void QtVideoMainWindow::setH323Connection(MyH323Connection* connection)
     }
 }
 
-void QtVideoMainWindow::enqueueLocalFrame(const unsigned char* yuvData, unsigned width, unsigned height)
+void QtVideoMainWindow::enqueueLocalFrame(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize)
 {
-    if (!yuvData || width == 0 || height == 0) return;
+    size_t ySize = 0;
+    size_t requiredSize = 0;
+    if (!yuvData || !VideoFrameSize::YUV420P(width, height, ySize, requiredSize) ||
+        dataSize < requiredSize) return;
     
     // フレームレート制限（30fps = 33ms間隔）- カクカク防止
     static qint64 lastLocalFrameTime = 0;
@@ -2126,18 +2143,19 @@ void QtVideoMainWindow::enqueueLocalFrame(const unsigned char* yuvData, unsigned
     lastLocalFrameTime = currentTime;
     
     // YUVデータをコピーしてシグナル発行
-    size_t dataSize = width * height * 3 / 2;  // YUV420P
-    QByteArray data(reinterpret_cast<const char*>(yuvData), dataSize);
+    QByteArray data(reinterpret_cast<const char*>(yuvData), static_cast<int>(requiredSize));
     emit localFrameReady(data, width, height);
 }
 
-void QtVideoMainWindow::enqueueRemoteFrame(const unsigned char* yuvData, unsigned width, unsigned height)
+void QtVideoMainWindow::enqueueRemoteFrame(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize)
 {
-    if (!yuvData || width == 0 || height == 0) return;
+    size_t ySize = 0;
+    size_t requiredSize = 0;
+    if (!yuvData || !VideoFrameSize::YUV420P(width, height, ySize, requiredSize) ||
+        dataSize < requiredSize) return;
     
     // YUVデータをコピーしてシグナル発行
-    size_t dataSize = width * height * 3 / 2;  // YUV420P
-    QByteArray data(reinterpret_cast<const char*>(yuvData), dataSize);
+    QByteArray data(reinterpret_cast<const char*>(yuvData), static_cast<int>(requiredSize));
     emit remoteFrameReady(data, width, height);
 }
 
@@ -2158,7 +2176,7 @@ void QtVideoMainWindow::onLocalFrameReady(const QByteArray& yuvData, unsigned wi
     if (m_localVideo) {
         m_localVideo->updateFrameYUV420P(
             reinterpret_cast<const unsigned char*>(yuvData.constData()), 
-            width, height);
+            width, height, static_cast<size_t>(yuvData.size()));
     }
 }
 
@@ -2180,7 +2198,7 @@ void QtVideoMainWindow::onRemoteFrameReady(const QByteArray& yuvData, unsigned w
     if (m_remoteVideo) {
         m_remoteVideo->updateFrameYUV420P(
             reinterpret_cast<const unsigned char*>(yuvData.constData()), 
-            width, height);
+            width, height, static_cast<size_t>(yuvData.size()));
     }
 }
 
@@ -2738,10 +2756,13 @@ QtContentWindow::~QtContentWindow() = default;
 
 void QtContentWindow::enqueueContentFrame(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize)
 {
-    if (!yuvData || dataSize == 0) {
+    size_t ySize = 0;
+    size_t requiredSize = 0;
+    if (!yuvData || !VideoFrameSize::YUV420P(width, height, ySize, requiredSize) ||
+        dataSize < requiredSize) {
         return;
     }
-    QByteArray buffer(reinterpret_cast<const char*>(yuvData), static_cast<int>(dataSize));
+    QByteArray buffer(reinterpret_cast<const char*>(yuvData), static_cast<int>(requiredSize));
     emit contentFrameReady(buffer, width, height);
 }
 
@@ -2750,7 +2771,8 @@ void QtContentWindow::onContentFrameReady(const QByteArray& yuvData, unsigned wi
     if (!m_contentVideo) {
         return;
     }
-    m_contentVideo->updateFrameYUV420P(reinterpret_cast<const unsigned char*>(yuvData.constData()), width, height);
+    m_contentVideo->updateFrameYUV420P(reinterpret_cast<const unsigned char*>(yuvData.constData()),
+                                       width, height, static_cast<size_t>(yuvData.size()));
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -3035,33 +3057,40 @@ void QtVideoManager::showWindow()
 
 void QtVideoManager::enqueueLocalFrame(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize)
 {
-    Q_UNUSED(dataSize);
-    if (m_mainWindow && yuvData && width > 0 && height > 0) {
+    size_t ySize = 0;
+    size_t requiredSize = 0;
+    if (m_mainWindow && yuvData && VideoFrameSize::YUV420P(width, height, ySize, requiredSize) &&
+        dataSize >= requiredSize) {
         MyH323Connection* conn = getH323Connection();
         if (conn && conn->IsRecording()) {
             conn->RecordVideoFrame(yuvData, width, height, true);
         }
         // enqueueLocalFrameはシグナル経由でQueuedConnectionを使うのでスレッドセーフ
-        m_mainWindow->enqueueLocalFrame(yuvData, width, height);
+        m_mainWindow->enqueueLocalFrame(yuvData, width, height, dataSize);
     }
 }
 
 void QtVideoManager::enqueueRemoteFrame(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize)
 {
-    Q_UNUSED(dataSize);
-    if (m_mainWindow && yuvData && width > 0 && height > 0) {
+    size_t ySize = 0;
+    size_t requiredSize = 0;
+    if (m_mainWindow && yuvData && VideoFrameSize::YUV420P(width, height, ySize, requiredSize) &&
+        dataSize >= requiredSize) {
         MyH323Connection* conn = getH323Connection();
         if (conn && conn->IsRecording()) {
             conn->RecordVideoFrame(yuvData, width, height, false);
         }
         // enqueueRemoteFrameはシグナル経由でQueuedConnectionを使うのでスレッドセーフ
-        m_mainWindow->enqueueRemoteFrame(yuvData, width, height);
+        m_mainWindow->enqueueRemoteFrame(yuvData, width, height, dataSize);
     }
 }
 
 void QtVideoManager::enqueueContentFrame(const unsigned char* yuvData, unsigned width, unsigned height, size_t dataSize)
 {
-    if (!yuvData || width == 0 || height == 0) {
+    size_t ySize = 0;
+    size_t requiredSize = 0;
+    if (!yuvData || !VideoFrameSize::YUV420P(width, height, ySize, requiredSize) ||
+        dataSize < requiredSize) {
         return;
     }
 
@@ -3077,7 +3106,7 @@ void QtVideoManager::enqueueContentFrame(const unsigned char* yuvData, unsigned 
 
     // フレームデータを安全にUIスレッドへ渡すためコピーを保持
     const QByteArray frameCopy(reinterpret_cast<const char*>(yuvData),
-                               static_cast<int>(dataSize));
+                               static_cast<int>(requiredSize));
     auto showAndEnqueue = [this, frameCopy, width, height]() {
         if (!m_contentWindow) {
             createContentWindow(static_cast<int>(width), static_cast<int>(height));
@@ -3435,7 +3464,10 @@ bool QtVideoManager::getLatestContentFrame(QByteArray& outFrame, unsigned& width
     height = static_cast<unsigned>(m_captureHeight);
     
     // Validate before returning
-    if (width < 2 || height < 2 || outFrame.size() != (width * height * 3 / 2)) {
+    size_t ySize = 0;
+    size_t expectedSize = 0;
+    if (!VideoFrameSize::YUV420P(width, height, ySize, expectedSize) ||
+        static_cast<size_t>(outFrame.size()) != expectedSize) {
         PTRACE(2, "QtVideo\tgetLatestContentFrame: Invalid data - w=" << width 
                << " h=" << height << " size=" << outFrame.size());
         return false;

@@ -37,6 +37,7 @@
 #endif
 #include "main.h"
 #include "vision_person_mask.h"
+#include "video_frame_size.h"
 #ifdef __clang__
 #pragma clang diagnostic pop
 #endif
@@ -7637,7 +7638,12 @@ public:
         if (w == 0) w = 1280;
         if (h == 0) h = 720;
         
-        const PINDEX bytes = w * h * 3 / 2; // YUV420P
+        size_t ySize = 0;
+        size_t frameSize = 0;
+        if (!VideoFrameSize::YUV420P(w, h, ySize, frameSize)) {
+            return 0;
+        }
+        const PINDEX bytes = static_cast<PINDEX>(frameSize);
         PTRACE(6, "H323ASKW\tQtContentInputDevice::GetMaxFrameBytes: " << w << "x" << h << " = " << bytes << " bytes");
         return bytes;
     }
@@ -7707,6 +7713,8 @@ public:
         // 先にキャプチャ用の変数を確保（gotoでスキップされないようにする）
         QByteArray frameData;
         unsigned actualW = 0, actualH = 0;
+        size_t sourceYSize = 0;
+        size_t expectedSrc = 0;
         QtVideoManager& qtMgr = QtVideoManager::getInstance();
 
         if (buffer == nullptr) {
@@ -7725,7 +7733,12 @@ public:
 
         const unsigned dstW = m_frameWidth;
         const unsigned dstH = m_frameHeight;
-        const PINDEX required = dstW * dstH * 3 / 2; // avoid relying on base GetMaxFrameBytes
+        size_t yPlaneSize = 0;
+        size_t requiredSize = 0;
+        if (!VideoFrameSize::YUV420P(dstW, dstH, yPlaneSize, requiredSize)) {
+            return false;
+        }
+        const PINDEX required = static_cast<PINDEX>(requiredSize);
 
         PTRACE(5, "H323ASKW\tQtContentInputDevice::GetFrameData: dstW=" << dstW << " dstH=" << dstH << " required=" << required);
         
@@ -7761,7 +7774,7 @@ public:
             goto fallback_black_frame;
         }
         
-        if (actualW < 2 || actualH < 2 || actualW > 4096 || actualH > 4096) {
+        if (!VideoFrameSize::YUV420P(actualW, actualH, sourceYSize, expectedSrc)) {
             PTRACE(2, "H323ASKW\tQtContentInputDevice: Invalid dimensions " << actualW << "x" << actualH);
             goto fallback_black_frame;
         }
@@ -7780,7 +7793,6 @@ public:
             return true;
         } else {
             // try to rescale if size matches YUV420P for actualW/actualH
-            PINDEX expectedSrc = actualW * actualH * 3 / 2;
             if (frameData.size() == static_cast<int>(expectedSrc)) {
                 const BYTE* srcData = reinterpret_cast<const BYTE*>(frameData.constData());
                 if (srcData) {
@@ -7801,14 +7813,14 @@ public:
         // Generate black frame
         if (m_alignedBuffer && m_alignedBufferSize >= required) {
             BYTE* yPlane = m_alignedBuffer;
-            BYTE* uPlane = m_alignedBuffer + dstW * dstH;
-            BYTE* vPlane = uPlane + (dstW * dstH) / 4;
+            BYTE* uPlane = m_alignedBuffer + yPlaneSize;
+            BYTE* vPlane = uPlane + yPlaneSize / 4;
             
             // Y = 16 (black in video range)
-            memset(yPlane, 16, dstW * dstH);
+            memset(yPlane, 16, yPlaneSize);
             // U, V = 128 (neutral chroma)
-            memset(uPlane, 128, (dstW * dstH) / 4);
-            memset(vPlane, 128, (dstW * dstH) / 4);
+            memset(uPlane, 128, yPlaneSize / 4);
+            memset(vPlane, 128, yPlaneSize / 4);
             
             // Copy from aligned buffer to H323Plus buffer
             memcpy(buffer, m_alignedBuffer, required);
@@ -7830,7 +7842,10 @@ public:
 private:
     void AllocateAlignedBuffer(unsigned w, unsigned h) {
         FreeAlignedBuffer();
-        m_alignedBufferSize = (w * h * 3) / 2;
+        size_t ySize = 0;
+        if (!VideoFrameSize::YUV420P(w, h, ySize, m_alignedBufferSize)) {
+            return;
+        }
         // Allocate 16-byte aligned buffer for x264
         posix_memalign(reinterpret_cast<void**>(&m_alignedBuffer), 16, m_alignedBufferSize);
         if (m_alignedBuffer) {
@@ -8310,8 +8325,11 @@ PBoolean MyH323Connection::DecodePreviewFrame(const BYTE * data, PINDEX len, uns
 void MyH323Connection::DisplayVideoFrame(const BYTE * frameData, PINDEX frameSize, unsigned width, unsigned height, PBoolean isOutgoing)
 {
 #ifdef USE_QT6
-    // CRITICAL SAFETY CHECK: Validate buffer size before passing to Qt6
-    size_t requiredSize = width * height * 3 / 2; // YUV420P
+    size_t ySize = 0;
+    size_t requiredSize = 0;
+    if (!frameData || !VideoFrameSize::YUV420P(width, height, ySize, requiredSize)) {
+        return;
+    }
     
     if (frameSize < requiredSize) {
         // Try to decode H.264 compressed data for preview
@@ -8331,10 +8349,10 @@ void MyH323Connection::DisplayVideoFrame(const BYTE * frameData, PINDEX frameSiz
     
     if (isOutgoing) {
         PTRACE(4, "H323ASKW\t📹 Enqueueing LOCAL Qt6 preview frame: " << width << "x" << height);
-        qt6Manager.enqueueLocalFrame(frameData, width, height, requiredSize);
+        qt6Manager.enqueueLocalFrame(frameData, width, height, static_cast<size_t>(frameSize));
     } else {
         PTRACE(4, "H323ASKW\t📺 Enqueueing REMOTE Qt6 video frame: " << width << "x" << height);
-        qt6Manager.enqueueRemoteFrame(frameData, width, height, requiredSize);
+        qt6Manager.enqueueRemoteFrame(frameData, width, height, static_cast<size_t>(frameSize));
     }
 #endif // USE_QT6
 }
@@ -8344,8 +8362,11 @@ void MyH323Connection::DisplayVideoFrame(const BYTE * frameData, PINDEX frameSiz
 void MyH323Connection::DisplayContentFrame(const BYTE * frameData, PINDEX frameSize, unsigned width, unsigned height)
 {
 #ifdef USE_QT6
-    // CRITICAL SAFETY CHECK: Validate buffer size before passing to Qt6
-    size_t requiredSize = width * height * 3 / 2; // YUV420P
+    size_t ySize = 0;
+    size_t requiredSize = 0;
+    if (!frameData || !VideoFrameSize::YUV420P(width, height, ySize, requiredSize)) {
+        return;
+    }
     
     if (frameSize < requiredSize) {
         PTRACE(5, "H323ASKW\t⏭️ H.239 content frame skipped (insufficient data)");
@@ -8356,7 +8377,7 @@ void MyH323Connection::DisplayContentFrame(const BYTE * frameData, PINDEX frameS
     QtVideoManager& qt6Manager = QtVideoManager::instance();
     
     PTRACE(3, "H323ASKW\t📺 Enqueueing H.239 CONTENT frame: " << width << "x" << height);
-    qt6Manager.enqueueContentFrame(frameData, width, height, requiredSize);
+    qt6Manager.enqueueContentFrame(frameData, width, height, static_cast<size_t>(frameSize));
 #endif // USE_QT6
 }
 #endif // H323_H239
